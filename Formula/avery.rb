@@ -14,7 +14,7 @@ class Avery < Formula
 
   def install
     bin.install "bin/avery"
-    libexec.install "libexec/avery-mail"
+    libexec.install "libexec/avery-mail", "libexec/avery-make-app"
     pkgshare.install Dir["share/avery/*"]
     bin.install_symlink libexec/"avery-mail"
   end
@@ -32,15 +32,19 @@ class Avery < Formula
       Goose Desktop is a cask and is not installed by this formula:
         brew install --cask block-goose
 
+      The app (Avery.app with its own icon, in /Applications) is a cask from the same tap:
+        brew install --cask flavioaiello/avery/avery
+
       First run:
         avery init
         avery pull     # downloads the model once (about 17 GB); Ctrl+C when it says Ready
         avery mail setup
         avery mail selftest
 
-      Daily use: run "avery install-app" once, then open "Avery" with Spotlight or the Dock.
+      Daily use: open "Avery" with Spotlight or the Dock.
         It starts the model, opens Goose, and stops the model by itself a few minutes after Goose is closed.
         The same from a terminal: avery up   (avery down stops the model right away)
+        Without the cask, "avery install-app" creates the app in ~/Applications.
 
       The model service holds up to 28 GB of memory while it runs (AVERY_MAX_MEMORY).
       To start it at every login instead: brew services start avery

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="600" viewBox="272 210 480 600">
+  <title>Avery</title>
+  <defs>
+    <linearGradient id="inkdark" gradientUnits="userSpaceOnUse" x1="260" y1="230" x2="760" y2="794">
+      <stop offset="0" stop-color="#46A0FF"/><stop offset="0.5" stop-color="#5B54F5"/><stop offset="1" stop-color="#26106A"/>
+    </linearGradient>
+    <linearGradient id="warm" gradientUnits="userSpaceOnUse" x1="410" y1="542" x2="614" y2="678">
+      <stop offset="0" stop-color="#FFD66E"/><stop offset="1" stop-color="#FF7A5A"/>
+    </linearGradient>
+    <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <path d="M440 572L512 638L584 572" fill="none" stroke="#000" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <g mask="url(#gap)"><path d="M332 754L512 270L692 754" fill="none" stroke="url(#inkdark)" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/></g>
+  <path d="M440 572L512 638L584 572" fill="none" stroke="url(#warm)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

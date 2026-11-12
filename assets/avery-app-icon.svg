@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Avery</title>
+  <defs>
+    <linearGradient id="ink" gradientUnits="userSpaceOnUse" x1="0" y1="230" x2="0" y2="794">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#DCDFFF"/>
+    </linearGradient>
+    <linearGradient id="warm" gradientUnits="userSpaceOnUse" x1="410" y1="542" x2="614" y2="678">
+      <stop offset="0" stop-color="#FFD66E"/><stop offset="1" stop-color="#FF7A5A"/>
+    </linearGradient>
+    <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <path d="M440 572L512 638L584 572" fill="none" stroke="#000" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#46A0FF"/><stop offset="0.5" stop-color="#5B54F5"/><stop offset="1" stop-color="#26106A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.4" cy="0.34" r="0.66"><stop offset="0" stop-color="#fff" stop-opacity="0.32"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.5" r="0.75"><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#0a0630" stop-opacity="0.35"/></radialGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.28"/><stop offset="0.5" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.55"/><stop offset="0.4" stop-color="#fff" stop-opacity="0.04"/><stop offset="1" stop-color="#000" stop-opacity="0.28"/></linearGradient>
+    <radialGradient id="flap" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#FFB45E" stop-opacity="0.55"/><stop offset="1" stop-color="#FFB45E" stop-opacity="0"/></radialGradient>
+    <filter id="blur22" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><feGaussianBlur stdDeviation="22"/></filter>
+    <filter id="blur15" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><feGaussianBlur stdDeviation="15"/></filter>
+    <clipPath id="tile"><path d="M0 0H1024V1024H0Z"/></clipPath>
+  </defs>
+  
+  <path d="M0 0H1024V1024H0Z" fill="url(#bg)"/>
+  <g clip-path="url(#tile)">
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+    <rect width="1024" height="1024" fill="url(#vig)"/>
+    <rect width="1024" height="560" fill="url(#sheen)"/>
+  </g>
+  
+  <g transform="translate(512 512) scale(1.2427) translate(-512 -512)">
+    <g mask="url(#gap)"><g filter="url(#blur15)" opacity="0.5" transform="translate(0 20)"><path d="M332 754L512 270L692 754" fill="none" stroke="#12093e" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/></g></g>
+    <circle cx="512" cy="609" r="150" fill="url(#flap)"/>
+    <g mask="url(#gap)"><path d="M332 754L512 270L692 754" fill="none" stroke="url(#ink)" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g filter="url(#blur15)" opacity="0.35" transform="translate(0 10)"><path d="M440 572L512 638L584 572" fill="none" stroke="#7a1d00" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <path d="M440 572L512 638L584 572" fill="none" stroke="url(#warm)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

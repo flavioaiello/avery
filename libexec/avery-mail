@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SERVER_NAME = "avery-mail"
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("MAIL_MCP_CONFIG")

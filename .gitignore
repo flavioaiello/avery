@@ -5,3 +5,4 @@ __pycache__/
 *.bak-*
 config.json
 sendlog.jsonl
+dist/

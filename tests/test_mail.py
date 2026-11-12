@@ -625,6 +625,8 @@ for base, dirs, names in os.walk(ROOT):
                 problems.append("%s: %s" % (os.path.relpath(full, ROOT), pattern.pattern))
         for match in EMAIL.finditer(text):
             domain = match.group(1).lower()
+            if re.fullmatch(r"[0-9]x\.(png|tiff?)", domain):
+                continue  # icon_16x16@2x.png
             if not (domain.endswith(".example") or domain in ("example.org", "example.com", "example.invalid", "github.com")):
                 problems.append("%s: %s" % (os.path.relpath(full, ROOT), match.group(0)))
 check("L1 keine persoenlichen Adressen, Pfade oder Zugangsdaten im Projekt", not problems, problems[:5])
@@ -715,7 +717,10 @@ check("P1 genau eine App; die alte 'Avery beenden.app' ist entfernt",
       proc.returncode == 0 and os.listdir(apps) == ["Avery.app"] and "entfernt" in proc.stdout, proc.stdout + proc.stderr)
 source = subprocess.run(["osadecompile", start_app], capture_output=True, text=True).stdout
 check("P2 die App ruft 'avery up' auf und zeigt Fehler in einem Dialog",
-      'do shell script "%s up 2>&1"' % stub in source and "display dialog" in source and " down" not in source, source)
+      'set cliPath to "%s"' % stub in source and 'quoted form of cliPath & " up 2>&1"' in source
+      and "display dialog" in source and " down" not in source, source)
+check("P2b fehlt die Kommandozeile, erklaert die App, was zu installieren ist",
+      'do shell script "test -x " & quoted form of cliPath' in source and "brew install flavioaiello/avery/avery" in source, source)
 info = plistlib.load(open(os.path.join(start_app, "Contents", "Info.plist"), "rb"))
 check("P3 Name, Kennung und Version sind gesetzt",
       info.get("CFBundleName") == "Avery" and info.get("CFBundleDisplayName") == "Avery"
@@ -734,8 +739,65 @@ proc, _ = avery("install-app", env={"AVERY_APP_DIR": apps, "AVERY_APP_COMMAND": 
 check("P7 install-app ist wiederholbar", proc.returncode == 0 and os.listdir(apps) == ["Avery.app"] and "entfernt" not in proc.stdout, proc.stdout)
 proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_root + "/x", "AVERY_APP_COMMAND": '/tmp/a"b'})
 check("P8 Pfad mit Anfuehrungszeichen wird abgelehnt", proc.returncode == 1 and "Anfuehrungszeichen" in proc.stderr, proc.stderr)
+for bad_path, label in (("/x/avery\\", "ein einzelner Backslash"), ('/x/a"b', "ein Anfuehrungszeichen")):
+    proc = subprocess.run([os.path.join(ROOT, "libexec", "avery-make-app"), "--output", app_root + "/y.app", "--command", bad_path],
+                          capture_output=True, text=True)
+    check("P8b avery-make-app lehnt %s im Pfad ab" % label, proc.returncode == 1 and "Anfuehrungszeichen oder Backslashes" in proc.stderr, proc.stderr)
+keep = os.path.join(app_root, "keep.app")
+os.makedirs(os.path.join(keep, "Contents"))
+open(os.path.join(keep, "Contents", "marker"), "w").write("alt")
+unreadable = os.path.join(app_root, "unreadable.icns")
+open(unreadable, "w").write("x")
+os.chmod(unreadable, 0)
+proc = subprocess.run([os.path.join(ROOT, "libexec", "avery-make-app"), "--output", keep, "--icon", unreadable], capture_output=True, text=True)
+check("P8c ein fehlgeschlagener Bau laesst eine vorhandene App unangetastet",
+      proc.returncode != 0 and os.path.exists(os.path.join(keep, "Contents", "marker")), proc.stdout + proc.stderr)
+os.chmod(unreadable, 0o600)
 proc, _ = avery("help")
 check("P9 help nennt install-app, nicht mehr 'beenden.app'", "avery install-app" in proc.stdout and "beenden.app" not in proc.stdout)
+
+check("P10 kein Asset-Katalog und keine CFBundleIconName (sonst zeigt macOS das Skript-Icon statt Avery)",
+      not os.path.exists(os.path.join(start_app, "Contents", "Resources", "Assets.car")) and "CFBundleIconName" not in info, sorted(info))
+for version_string, expected_icon in (("26.0.1", "Avery.icns"), ("15.4", "AveryClassic.icns")):
+    icon_apps = os.path.join(app_root, "icons-" + version_string)
+    proc, _ = avery("install-app", env={"AVERY_APP_DIR": icon_apps, "AVERY_APP_COMMAND": stub, "AVERY_MACOS_VERSION": version_string})
+    check("P11 macOS %s bekommt %s" % (version_string, expected_icon),
+          proc.returncode == 0 and filecmp.cmp(os.path.join(ROOT, "share", "avery", expected_icon),
+                                                os.path.join(icon_apps, "Avery.app", "Contents", "Resources", "applet.icns"), shallow=False),
+          proc.stdout + proc.stderr)
+check("P11b die beiden Icons unterscheiden sich",
+      not filecmp.cmp(os.path.join(ROOT, "share", "avery", "Avery.icns"), os.path.join(ROOT, "share", "avery", "AveryClassic.icns"), shallow=False))
+
+# With the cask installed, install-app must not create a second icon and removes a leftover copy.
+cask_app = os.path.join(app_root, "Programme", "Avery.app")
+os.makedirs(cask_app)
+home_dup = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(home_dup)
+os.makedirs(os.path.join(home_dup, "Applications", "Avery.app"))
+proc, _ = avery("install-app", home=home_dup, env={"AVERY_SYSTEM_APP": cask_app})
+check("P12 mit installiertem Cask legt install-app keine zweite App an und raeumt die Kopie ab",
+      proc.returncode == 0 and "schon installiert" in proc.stdout and not os.path.exists(os.path.join(home_dup, "Applications", "Avery.app")),
+      proc.stdout + proc.stderr)
+same_home = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(same_home)
+same_app = os.path.join(same_home, "Applications", "Avery.app")
+os.makedirs(same_app)
+proc, _ = avery("install-app", home=same_home, env={"AVERY_SYSTEM_APP": same_app})
+check("P12b install-app loescht nie die App des Cask, auch wenn beide Pfade zusammenfallen",
+      proc.returncode == 0 and os.path.isdir(same_app) and "entfernt" not in proc.stdout, proc.stdout + proc.stderr)
+proc, _ = avery("doctor", env={"AVERY_SYSTEM_APP": cask_app})
+check("P13 doctor findet die App im Programme-Ordner", "ok      Avery.app (%s)" % cask_app in proc.stdout, proc.stdout)
+proc, _ = avery("doctor", env={"AVERY_SYSTEM_APP": os.path.join(app_root, "nirgends", "Avery.app")})
+check("P14 fehlt die App, ist das nur ein Hinweis und zaehlt nicht als fehlend",
+      "Hinweis Avery.app fehlt" in proc.stdout and "brew install --cask flavioaiello/avery/avery" in proc.stdout, proc.stdout)
+builder = os.path.join(ROOT, "libexec", "avery-make-app")
+for args, expected in (([], "--output fehlt"), (["--output", app_root + "/x"], "muss auf .app enden"),
+                       (["--output", app_root + "/x.app", "--command", "relativ"], "absoluter Pfad"),
+                       (["--output", app_root + "/x.app", "--icon", app_root + "/gibt-es-nicht.icns"], "Icon nicht gefunden"),
+                       (["--bogus"], "unbekannte Option")):
+    proc = subprocess.run([builder] + args, capture_output=True, text=True)
+    check("P15 avery-make-app %s -> %s" % (" ".join(args[:2]) or "(ohne Argumente)", expected),
+          proc.returncode == 1 and expected in proc.stderr, proc.stderr)
 
 # ---------------------------------------- G: opening Goose with the right profile (fake Goose processes)
 import signal
@@ -843,6 +905,102 @@ check("W7 ein schon laufendes Modell bleibt unter deiner Kontrolle (kein Waechte
 
 health_server.shutdown()
 
+# ------------------------------------------- Q: logo, disk image and cask
+icons = [os.path.join(ROOT, "share", "avery", name) for name in ("Avery.icns", "AveryClassic.icns")]
+for icon_path in icons:
+    out_dir = tempfile.mkdtemp(prefix="averytest-")
+    TMPDIRS.append(out_dir)
+    proc = subprocess.run(["iconutil", "-c", "iconset", icon_path, "-o", os.path.join(out_dir, "x.iconset")], capture_output=True, text=True)
+    sizes = sorted(os.listdir(os.path.join(out_dir, "x.iconset"))) if proc.returncode == 0 else []
+    check("Q1 %s ist ein gueltiges icns mit allen 10 Groessen" % os.path.basename(icon_path), len(sizes) == 10, proc.stderr or sizes)
+for name in ("avery-icon.svg", "avery-app-icon.svg", "avery-mark.svg"):
+    text = open(os.path.join(ROOT, "assets", name), encoding="utf-8").read()
+    check("Q2 assets/%s ist ein SVG ohne eingebettete Bilder" % name, text.startswith("<svg") and "<image" not in text and "base64" not in text)
+tiff_info = subprocess.run(["tiffutil", "-info", os.path.join(ROOT, "assets", "dmg", "background.tiff")], capture_output=True, text=True).stdout
+check("Q3 das DMG-Hintergrundbild hat 1x und 2x (640x448 und 1280x896)",
+      tiff_info.count("Directory at") == 2 and "Image Width: 640 Image Length: 448" in tiff_info and "Image Width: 1280 Image Length: 896" in tiff_info, tiff_info)
+for script in ("tools/render-assets.sh", "tools/make-dmg.sh", "tools/verify-dmg.sh", "tools/publish-dmg.sh", "libexec/avery-make-app", "bin/avery"):
+    full = os.path.join(ROOT, script)
+    check("Q4 %s ist ausfuehrbar und hat gueltige Syntax" % script,
+          os.access(full, os.X_OK) and subprocess.run(["bash", "-n", full], capture_output=True).returncode == 0)
+make_dmg = open(os.path.join(ROOT, "tools", "make-dmg.sh"), encoding="utf-8").read()
+verify_dmg = open(os.path.join(ROOT, "tools", "verify-dmg.sh"), encoding="utf-8").read()
+geometry = re.search(r"win_left=(\d+) win_top=(\d+) win_width=(\d+) win_height=(\d+)\napp_x=(\d+) app_y=(\d+) apps_x=(\d+) apps_y=(\d+)", make_dmg)
+expected_layout = "icon view|%d,%d,%d,%d|%s,%s|%s,%s|128|13|false" % (
+    int(geometry.group(1)), int(geometry.group(2)), int(geometry.group(1)) + int(geometry.group(3)), int(geometry.group(2)) + int(geometry.group(4)),
+    geometry.group(5), geometry.group(6), geometry.group(7), geometry.group(8)) if geometry else None
+check("Q5 make-dmg.sh und verify-dmg.sh meinen dasselbe Fensterlayout", bool(geometry) and expected_layout in verify_dmg, expected_layout)
+check("Q6 das Fenster passt zum Hintergrundbild (640 x 448)", bool(geometry) and geometry.group(3) == "640" and geometry.group(4) == "448")
+check("Q7 das Volume-Icon kommt erst nach Finders Update ins Image (Finder loescht es sonst)",
+      make_dmg.index("update without registering applications") < make_dmg.index(".VolumeIcon.icns"))
+
+cask_text = open(os.path.join(ROOT, "Casks", "avery.rb"), encoding="utf-8").read()
+check("Q8 Cask: App aus dem verschachtelten DMG, Abhaengigkeit von der Formel, Tahoe",
+      'app "Avery.app"' in cask_text and 'container nested: "Avery-#{version}.dmg"' in cask_text
+      and 'depends_on formula: "flavioaiello/avery/avery"' in cask_text and "depends_on macos: :tahoe" in cask_text, cask_text)
+cask_url = re.search(r'url "([^"]+)"', cask_text)
+check("Q9 Cask: Image per git ueber SSH, Tag dmg-v<Version> und feste Revision",
+      bool(cask_url) and cask_url.group(1) == "ssh://git@github.com/flavioaiello/avery.git" and "using:    :git" in cask_text
+      and 'tag:      "dmg-v#{version}"' in cask_text and re.search(r'revision: "[0-9a-f]{40}"', cask_text) is not None)
+if shutil.which("ruby") and cask_url:
+    check("Q9b die Cask-URL ist ein gueltiger URI (die scp-Form git@host:pfad ist es nicht und laesst den Cask nicht laden)",
+          subprocess.run(["ruby", "-ruri", "-e", "URI(ARGV[0])", cask_url.group(1)], capture_output=True).returncode == 0)
+check("Q10 Cask: Quarantaene wird entfernt (Ad-hoc-Signatur, nicht notarisiert), mit den aktuellen Schritten statt dem veralteten postflight",
+      "postflight_steps do" in cask_text and "postflight do" not in cask_text
+      and 'run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Avery.app"]' in cask_text)
+brew_path = shutil.which("brew") or ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else None)
+if brew_path:
+    brew_env = dict(os.environ, HOMEBREW_DEVELOPER="1", HOMEBREW_NO_AUTO_UPDATE="1", HOMEBREW_NO_ANALYTICS="1", HOMEBREW_NO_ENV_HINTS="1")
+    loader = ('c = Cask::CaskLoader::FromContentLoader.new(File.read(ARGV[0]), tap: Tap.fetch("flavioaiello/avery")).load(config: nil); '
+              'puts "geladen #{c.token} #{c.version}"')
+    proc = subprocess.run([brew_path, "ruby", "-e", loader, os.path.join(ROOT, "Casks", "avery.rb")],
+                          capture_output=True, text=True, env=brew_env, timeout=120)
+    check("Q11a Homebrew laedt den Cask im strengen Entwicklermodus ohne Fehler und ohne Veraltet-Warnungen",
+          "geladen avery " + mm.VERSION in proc.stdout and "deprecated" not in (proc.stdout + proc.stderr).lower(), proc.stdout + proc.stderr)
+if shutil.which("ruby"):
+    for rb in ("Casks/avery.rb", "Formula/avery.rb"):
+        check("Q11 %s hat gueltige Ruby-Syntax" % rb, subprocess.run(["ruby", "-c", os.path.join(ROOT, rb)], capture_output=True).returncode == 0)
+
+# publish-dmg.sh against a throw-away project and a bare "origin"
+if shutil.which("git") and shutil.which("ruby"):
+    pub = tempfile.mkdtemp(prefix="averytest-")
+    TMPDIRS.append(pub)
+    project, remote = os.path.join(pub, "project"), os.path.join(pub, "origin.git")
+    for sub in ("bin", "tools", "Casks", "dist"):
+        os.makedirs(os.path.join(project, sub))
+    shutil.copy(os.path.join(ROOT, "tools", "publish-dmg.sh"), os.path.join(project, "tools"))
+    shutil.copy(os.path.join(ROOT, "Casks", "avery.rb"), os.path.join(project, "Casks"))
+    open(os.path.join(project, "bin", "avery"), "w").write('AVERY_VERSION="9.9.9"\n')
+    image = os.path.join(project, "dist", "Avery-9.9.9.dmg")
+    open(image, "wb").write(b"disk image one")
+    git_env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.org")
+    run_git = lambda *a, cwd=project: subprocess.run(["git"] + list(a), cwd=cwd, capture_output=True, text=True, env=git_env)
+    run_git("init", "-q", "--bare", remote, cwd=pub)
+    run_git("init", "-q", ".")
+    run_git("remote", "add", "origin", remote)
+    publish = os.path.join(project, "tools", "publish-dmg.sh")
+    first = subprocess.run([publish], capture_output=True, text=True, env=git_env)
+    revision = run_git("rev-parse", "dmg-v9.9.9^{commit}").stdout.strip()
+    files = run_git("ls-tree", "-r", "--name-only", revision).stdout.split()
+    parents = run_git("rev-list", "--parents", "-n", "1", revision).stdout.split()
+    pinned = open(os.path.join(project, "Casks", "avery.rb")).read()
+    check("Q12 publish-dmg: ein Tag mit genau einem Commit, der nur das Image enthaelt (ohne Elternteil)",
+          first.returncode == 0 and files == ["Avery-9.9.9.dmg"] and parents == [revision], first.stdout + first.stderr)
+    check("Q13 publish-dmg: Tag liegt auf dem Server, Cask nennt Version und Revision",
+          run_git("--git-dir", remote, "rev-parse", "dmg-v9.9.9^{commit}").stdout.strip() == revision
+          and 'version "9.9.9"' in pinned and 'revision: "%s"' % revision in pinned, pinned)
+    again = subprocess.run([publish], capture_output=True, text=True, env=git_env)
+    check("Q14 publish-dmg ist wiederholbar, solange das Image gleich ist", again.returncode == 0 and "existiert schon" in again.stdout, again.stdout + again.stderr)
+    open(image, "wb").write(b"disk image two")
+    changed = subprocess.run([publish], capture_output=True, text=True, env=git_env)
+    check("Q15 publish-dmg verschiebt kein veroeffentlichtes Tag", changed.returncode == 1 and "nicht verschoben" in changed.stderr, changed.stderr)
+    run_git("--git-dir", remote, "tag", "-d", "dmg-v9.9.9")
+    redo = subprocess.run([publish], capture_output=True, text=True, env=git_env)
+    new_revision = run_git("rev-parse", "dmg-v9.9.9^{commit}").stdout.strip()
+    check("Q16 ein Tag, das nie auf dem Server ankam, darf mit neuem Image wiederholt werden",
+          redo.returncode == 0 and new_revision != revision
+          and run_git("--git-dir", remote, "rev-parse", "dmg-v9.9.9^{commit}").stdout.strip() == new_revision, redo.stdout + redo.stderr)
+
 # --------------------------------------------------------------- M: versions agree
 version_in_cli = re.search(r'^AVERY_VERSION="([0-9.]+)"', open(AVERY, encoding="utf-8").read(), re.M).group(1)
 check("M1 Versionen in bin/avery und libexec/avery-mail stimmen ueberein", version_in_cli == mm.VERSION, (version_in_cli, mm.VERSION))
@@ -850,6 +1008,10 @@ formula = os.path.join(ROOT, "Formula", "avery.rb")
 if os.path.exists(formula):
     tag = re.search(r'tag:\s+"v([0-9.]+)"', open(formula, encoding="utf-8").read())
     check("M2 Formel verweist auf das Tag dieser Version", bool(tag) and tag.group(1) == mm.VERSION, tag and tag.group(1))
+
+cask_version = re.search(r'^  version "([0-9.]+)"', cask_text, re.M)
+check("M3 Cask nennt die Version dieses Stands", bool(cask_version) and cask_version.group(1) == mm.VERSION, cask_version and cask_version.group(1))
+check("M4 die Revision im Cask ist gesetzt (nicht der Platzhalter)", "0" * 40 not in cask_text)
 
 for path in TMPDIRS:
     shutil.rmtree(path, ignore_errors=True)

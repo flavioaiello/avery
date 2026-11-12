@@ -1,0 +1,82 @@
+#!/bin/bash
+# Builds Avery.app, a small AppleScript launcher that runs "avery up" (macOS only).
+# Used by "avery install-app" and by tools/make-dmg.sh.
+#
+#   avery-make-app --output PATH/Avery.app [--command /opt/homebrew/bin/avery] [--version X.Y.Z] [--icon FILE.icns]
+set -euo pipefail
+
+die() { printf 'avery-make-app: %s\n' "$*" >&2; exit 1; }
+
+output="" cli="/opt/homebrew/bin/avery" version="0.0.0" icon=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output)  [ $# -ge 2 ] || die "--output braucht einen Wert"; output="$2"; shift ;;
+    --command) [ $# -ge 2 ] || die "--command braucht einen Wert"; cli="$2"; shift ;;
+    --version) [ $# -ge 2 ] || die "--version braucht einen Wert"; version="$2"; shift ;;
+    --icon)    [ $# -ge 2 ] || die "--icon braucht einen Wert"; icon="$2"; shift ;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+    *) die "unbekannte Option: $1" ;;
+  esac
+  shift
+done
+
+[ -n "$output" ] || die "--output fehlt"
+case "$output" in *.app) ;; *) die "--output muss auf .app enden: $output" ;; esac
+[ "$(uname -s)" = "Darwin" ] && command -v osacompile >/dev/null 2>&1 || die "osacompile fehlt (gehoert zu macOS)."
+case "$cli" in /*) ;; *) die "--command muss ein absoluter Pfad sein: $cli" ;; esac
+case "$cli" in
+  *'"'*|*'\'*) die "Der Pfad enthaelt Anfuehrungszeichen oder Backslashes: $cli" ;;
+esac
+if [ -n "$icon" ] && [ ! -f "$icon" ]; then die "Icon nicht gefunden: $icon"; fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+cat > "$tmp/start.applescript" <<EOF
+set cliPath to "$cli"
+set installHint to "brew install flavioaiello/avery/avery"
+try
+	do shell script "test -x " & quoted form of cliPath
+on error
+	set choice to button returned of (display dialog "Avery braucht die Kommandozeile (Homebrew-Paket)." & return & return & "Installieren mit:" & return & installHint buttons {"Befehl kopieren", "OK"} default button "OK" with title "Avery")
+	if choice is "Befehl kopieren" then set the clipboard to installHint
+	return
+end try
+try
+	do shell script "export PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:\$PATH; " & quoted form of cliPath & " up 2>&1"
+on error errMsg
+	display dialog "Avery konnte nicht gestartet werden:" & return & return & errMsg buttons {"OK"} default button "OK" with icon stop with title "Avery" giving up after 300
+end try
+EOF
+
+built="$tmp/Avery.app"
+osacompile -o "$built" "$tmp/start.applescript"
+
+plist="$built/Contents/Info.plist"
+plist_set() {
+  /usr/libexec/PlistBuddy -c "Set :$1 $2" "$plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :$1 string $2" "$plist"
+}
+plist_set CFBundleName Avery
+plist_set CFBundleDisplayName Avery
+plist_set CFBundleIdentifier io.github.flavioaiello.avery
+plist_set CFBundleShortVersionString "$version"
+plist_set CFBundleVersion "$version"
+plist_set LSApplicationCategoryType public.app-category.productivity
+plist_set NSHumanReadableCopyright "Copyright 2026 Flavio Aiello. MIT License."
+
+# osacompile adds an asset catalog with the generic script icon and points CFBundleIconName at it.
+# macOS prefers that over applet.icns, so without this the app shows the AppleScript icon.
+rm -f "$built/Contents/Resources/Assets.car"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$plist" >/dev/null 2>&1 || true
+if [ -n "$icon" ]; then cp "$icon" "$built/Contents/Resources/applet.icns"; fi
+
+codesign --force --deep --sign - "$built" >/dev/null 2>&1 || die "Die Signatur konnte nicht angelegt werden."
+codesign --verify --deep --strict "$built" >/dev/null 2>&1 || die "Die Signatur der App ist ungueltig."
+
+# An existing app is only replaced once the new one is complete.
+mkdir -p "$(dirname "$output")"
+rm -rf "$output"
+mv "$built" "$output"
+codesign --verify --deep --strict "$output" >/dev/null 2>&1 || die "Die Signatur der App ist nach dem Verschieben ungueltig."
+touch "$output"
+printf 'Angelegt: %s\n' "$output"

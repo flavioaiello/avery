@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Avery DMG background</title>
+<style>
+  /* Finder window 640 x 448 pt with the title bar. The design is laid out in the top 420 pt (the content below a 28 pt title bar);
+     the image is 28 pt taller so that nothing is left blank if Finder shows more.
+     Icons are placed at (170, 222) and (470, 222) by tools/make-dmg.sh. */
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 640px; height: 448px; position: relative; overflow: hidden;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    background: linear-gradient(165deg, #F8F9FF 0%, #EEF0FF 52%, #E4E7FD 100%);
+  }
+  .blob { position: absolute; border-radius: 50%; }
+  .blob.blue   { left: -150px; top: -190px; width: 470px; height: 470px;
+                 background: radial-gradient(circle, rgba(70,160,255,.30) 0%, rgba(91,84,245,.13) 52%, rgba(91,84,245,0) 72%); }
+  .blob.warm   { right: -170px; bottom: -210px; width: 470px; height: 470px;
+                 background: radial-gradient(circle, rgba(255,122,90,.17) 0%, rgba(255,214,110,.07) 50%, rgba(255,214,110,0) 72%); }
+  .title { position: absolute; top: 40px; left: 0; right: 0; text-align: center; }
+  .title .name { font-family: 'Avenir Next', 'Helvetica Neue', sans-serif; font-weight: 700; font-size: 32px;
+                 letter-spacing: -0.6px; color: #26106A; }
+  .title .tag  { margin-top: 2px; font-size: 12.5px; color: #6A6FA3; letter-spacing: .1px; }
+  .plate { position: absolute; width: 176px; height: 192px; border-radius: 42px; top: 130px;
+           background: rgba(255,255,255,.55); box-shadow: 0 10px 30px rgba(60,50,160,.10), inset 0 0 0 1px rgba(255,255,255,.7); }
+  .plate.left { left: 82px; } .plate.right { left: 382px; }
+  svg.arrow { position: absolute; left: 252px; top: 202px; }
+  .hint { position: absolute; left: 0; right: 0; top: 358px; text-align: center; color: #565A8C; font-size: 13px; }
+  .hint small { display: block; margin-top: 2px; font-size: 11px; color: #8E92B8; }
+</style>
+</head>
+<body>
+  <div class="blob blue"></div>
+  <div class="blob warm"></div>
+
+  <div class="title">
+    <div class="name">avery</div>
+    <div class="tag">Dein privater KI-Assistent, lokal auf deinem Mac</div>
+  </div>
+
+  <div class="plate left"></div>
+  <div class="plate right"></div>
+
+  <svg class="arrow" width="136" height="40" viewBox="0 0 136 40" aria-hidden="true">
+    <defs>
+      <linearGradient id="w" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFD66E"/><stop offset="1" stop-color="#FF7A5A"/></linearGradient>
+    </defs>
+    <g fill="none" stroke="url(#w)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M26 8 L46 20 L26 32" opacity=".35"/>
+      <path d="M58 8 L78 20 L58 32" opacity=".65"/>
+      <path d="M90 8 L110 20 L90 32" opacity="1"/>
+    </g>
+  </svg>
+
+  <div class="hint">Zum Installieren Avery in den Ordner „Programme“ ziehen
+    <small>Drag Avery to the Applications folder to install</small>
+  </div>
+</body>
+</html>
