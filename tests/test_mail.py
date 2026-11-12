@@ -626,6 +626,58 @@ for base, dirs, names in os.walk(ROOT):
                 problems.append("%s: %s" % (os.path.relpath(full, ROOT), match.group(0)))
 check("L1 keine persoenlichen Adressen, Pfade oder Zugangsdaten im Projekt", not problems, problems[:5])
 
+# ------------------------------------------------ N: service commands and YAML check
+import http.server
+import threading
+
+
+class _Health(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):
+        pass
+
+
+health_server = http.server.HTTPServer(("127.0.0.1", 0), _Health)
+threading.Thread(target=health_server.serve_forever, daemon=True).start()
+alive_url = "http://127.0.0.1:%d/health" % health_server.server_address[1]
+dead_url = "http://127.0.0.1:9/health"
+
+proc, _ = avery("up", env={"AVERY_DRY_RUN": "1", "AVERY_MODEL_URL": dead_url})
+lines = proc.stdout.strip().splitlines()
+check("N1 up (Modell aus): startet erst den Dienst, dann Goose",
+      any(line.endswith("services run avery") for line in lines) and lines[-1].startswith("open -n -a"), proc.stdout)
+proc, _ = avery("up", env={"AVERY_DRY_RUN": "1", "AVERY_MODEL_URL": alive_url})
+check("N2 up (Modell laeuft): kein zweiter Start, nur Goose",
+      "laeuft bereits" in proc.stdout and "services run" not in proc.stdout and "open -n -a" in proc.stdout, proc.stdout)
+proc, _ = avery("down", env={"AVERY_DRY_RUN": "1"})
+check("N3 down beendet den Dienst", "services stop avery" in proc.stdout and "Cmd+Q" in proc.stdout, proc.stdout)
+proc, _ = avery("doctor", env={"AVERY_MODEL_URL": alive_url})
+check("N4 doctor: Modell erreichbar", "ok      Modellserver laeuft" in proc.stdout, proc.stdout)
+proc, _ = avery("help")
+check("N5 help nennt up und down", "avery up" in proc.stdout and "avery down" in proc.stdout)
+
+if shutil.which("ruby"):
+    proc, home_y = avery("init")
+    proc, _ = avery("doctor", home=home_y, env={"AVERY_MODEL_URL": alive_url})
+    check("N6 doctor: gueltiges YAML wird bestaetigt", "YAML gueltig: config.yaml" in proc.stdout and "UNGUELTIG" not in proc.stdout, proc.stdout)
+    broken_path = os.path.join(home_y, ".avery", "goose", "config", "config.yaml")
+    original = open(broken_path, encoding="utf-8").read()
+    broken = original.replace("description: Private Mail (Apple Mail; lesen", "description: Private Mail (Apple Mail: lesen", 1)
+    check("N7 (Testaufbau) der Fehler vom 12.11. laesst sich nachstellen", broken != original)
+    open(broken_path, "w", encoding="utf-8").write(broken)
+    proc, _ = avery("doctor", home=home_y, env={"AVERY_MODEL_URL": alive_url})
+    check("N8 doctor erkennt ungueltiges YAML und meldet es", proc.returncode == 1 and "YAML UNGUELTIG" in proc.stdout, proc.stdout)
+
+formula_text = open(os.path.join(ROOT, "Formula", "avery.rb"), encoding="utf-8").read()
+check("N9 Formel definiert den Modell-Dienst",
+      "service do" in formula_text and 'run [opt_bin/"avery", "model"]' in formula_text
+      and "keep_alive crashed: true" in formula_text and "std_service_path_env" in formula_text)
+health_server.shutdown()
+
 # --------------------------------------------------------------- M: versions agree
 version_in_cli = re.search(r'^AVERY_VERSION="([0-9.]+)"', open(AVERY, encoding="utf-8").read(), re.M).group(1)
 check("M1 Versionen in bin/avery und libexec/avery-mail stimmen ueberein", version_in_cli == mm.VERSION, (version_in_cli, mm.VERSION))

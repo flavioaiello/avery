@@ -41,8 +41,6 @@ If the repository is public, tap it with `https://github.com/flavioaiello/avery`
 avery init            # create the Goose profile in ~/.avery/goose
 avery mail setup      # choose which Mail accounts the agent may read
 avery mail selftest   # check read access (macOS asks once to let Terminal control Mail)
-avery model           # start the local model; keep this terminal window open
-avery app             # start Goose Desktop with the Avery profile
 ```
 
 Writing is off until you enable it per account:
@@ -52,7 +50,20 @@ avery mail write-enable    # drafts and sending (with approval) for chosen accou
 avery mail selftest-write  # test the approval dialog, a draft, and optionally a mail to yourself
 ```
 
-Restart Goose after changing accounts or permissions. `avery doctor` shows what is missing.
+## Daily use
+
+```sh
+avery up      # starts the model as a background service, waits until it is ready, opens Goose
+avery down    # stops the model service and frees its memory
+```
+
+Only the model needs to run in the background. Goose Desktop is a normal app and starts the mail server itself when
+it needs it. `avery up` uses `brew services run avery`, so the model is not started at login. The model holds up to
+28 GB of memory while it runs; to have it start at every login anyway, use `brew services start avery`.
+`avery model` runs the model in the foreground instead (for testing). `avery doctor` shows what is missing and
+reports a Goose configuration that cannot be parsed.
+
+Restart Goose after changing accounts or permissions.
 
 ## How sending is protected
 
@@ -82,7 +93,8 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | `avery mail write-enable` / `write-disable` | Allow or forbid drafts and sending per account |
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialog and drafts |
 | `avery mail status` / `accounts` / `sendlog` | Show configuration, Mail accounts, recent send attempts |
-| `avery model` | Run the local model server in the foreground |
+| `avery up` / `avery down` | Start the model as a background service and open Goose / stop the service |
+| `avery model` | Run the local model server in the foreground (no service) |
 | `avery app` / `avery cli` | Start Goose Desktop / the Goose CLI with the Avery profile |
 | `avery doctor` | Check prerequisites and setup |
 
@@ -112,7 +124,7 @@ Set `AVERY_HOME` to use another base folder.
 ## Development
 
 ```sh
-python3 tests/test_mail.py        # about 110 checks against synthetic demo data, no Mail access
+python3 tests/test_mail.py        # about 120 checks against synthetic demo data, no Mail access
 MAIL_MCP_FAKE=1 libexec/avery-mail status
 AVERY_DRY_RUN=1 bin/avery model   # print the command instead of running it
 ```

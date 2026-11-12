@@ -3,8 +3,8 @@ class Avery < Formula
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,
-      tag:      "v0.1.0",
-      revision: "5f2329381a4675d1130bed3e1bec0b09737038c6"
+      tag:      "v0.2.0",
+      revision: "0000000000000000000000000000000000000000"
   license "MIT"
   head "git@github.com:flavioaiello/avery.git", using: :git, branch: "main"
 
@@ -19,6 +19,14 @@ class Avery < Formula
     bin.install_symlink libexec/"avery-mail"
   end
 
+  service do
+    run [opt_bin/"avery", "model"]
+    keep_alive crashed: true
+    log_path var/"log/avery-model.log"
+    error_log_path var/"log/avery-model.log"
+    environment_variables PATH: std_service_path_env
+  end
+
   def caveats
     <<~EOS
       Goose Desktop is a cask and is not installed by this formula:
@@ -28,8 +36,13 @@ class Avery < Formula
         avery init
         avery mail setup
         avery mail selftest
-        avery model   # keep this terminal window open
-        avery app
+
+      Daily use:
+        avery up     # starts the model as a background service, then opens Goose
+        avery down   # stops the model and frees its memory
+
+      The model service holds up to 28 GB of memory while it runs (AVERY_MAX_MEMORY).
+      To start it at every login instead: brew services start avery
     EOS
   end
 

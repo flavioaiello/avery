@@ -4,7 +4,7 @@
 #   bin/avery  libexec/avery-mail  share/avery/...
 set -euo pipefail
 
-AVERY_VERSION="0.1.0"
+AVERY_VERSION="0.2.0"
 
 resolve_path() {
   local target="$1" dir
@@ -46,7 +46,7 @@ load_env
 
 GOOSE_ROOT="${AVERY_GOOSE_ROOT:-$AVERY_HOME/goose}"
 GOOSE_APP="${AVERY_GOOSE_APP:-/Applications/Goose.app}"
-MODEL_URL="http://127.0.0.1:8000/health"
+MODEL_URL="${AVERY_MODEL_URL:-http://127.0.0.1:8000/health}"
 
 # AVERY_DRY_RUN=1 prints the command instead of running it (used by the tests).
 launch() {
@@ -55,6 +55,25 @@ launch() {
     return 0
   fi
   exec "$@"
+}
+
+# Like launch, but returns so that the caller can continue.
+run_cmd() {
+  if [ "${AVERY_DRY_RUN:-}" = "1" ]; then
+    printf '%s\n' "$*"
+    return 0
+  fi
+  "$@"
+}
+
+brew_bin() { command -v brew 2>/dev/null || echo /opt/homebrew/bin/brew; }
+
+model_healthy() { curl -s -m 2 -o /dev/null "$MODEL_URL"; }
+
+# 0 = valid, 1 = invalid, 2 = cannot check (no ruby)
+yaml_valid() {
+  command -v ruby >/dev/null 2>&1 || return 2
+  ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$1" >/dev/null 2>&1
 }
 
 mail_bin() {
@@ -105,13 +124,16 @@ Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
   avery mail <befehl>    Mail-Anbindung verwalten: setup, selftest, write-enable, write-disable,
                          selftest-write, accounts, sendlog, revoke, status, help
-  avery model            lokales Modell starten (Splash), in einem eigenen Terminal
+  avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen
+  avery down             Modell-Dienst beenden (gibt den Arbeitsspeicher frei)
+  avery model            lokales Modell im Vordergrund starten (zum Testen, ohne Dienst)
   avery app              Goose Desktop mit dem Avery-Profil starten
   avery cli [args]       Goose CLI mit dem Avery-Profil
   avery doctor           Voraussetzungen und Einrichtung pruefen
   avery version          Version anzeigen
 
-Erster Start: avery init, avery mail setup, avery mail selftest, avery model, avery app
+Erster Start: avery init, avery mail setup, avery mail selftest
+Taeglich:     avery up   (und am Ende avery down)
 Einstellungen: $AVERY_HOME/avery.env (siehe README)
 EOF
 }
@@ -141,8 +163,7 @@ cmd_init() {
   say "Weiter mit:"
   say "  avery mail setup       (private Mail-Konten waehlen)"
   say "  avery mail selftest    (Lesezugriff pruefen)"
-  say "  avery model            (in einem eigenen Terminal, laeuft im Vordergrund)"
-  say "  avery app              (Goose starten)"
+  say "  avery up               (Modell als Dienst starten und Goose oeffnen)"
 }
 
 cmd_mail() {
@@ -171,7 +192,7 @@ cmd_app() {
   if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
     [ -d "$GOOSE_APP" ] || die "Goose Desktop fehlt. Installieren mit: brew install --cask block-goose"
     [ -f "$GOOSE_ROOT/config/config.yaml" ] || die "Profil fehlt. Zuerst: avery init"
-    curl -s -m 2 -o /dev/null "$MODEL_URL" || say "Hinweis: Das Modell laeuft nicht. In einem eigenen Terminal 'avery model' starten." >&2
+    model_healthy || say "Hinweis: Das Modell laeuft nicht. Mit 'avery up' starten." >&2
     if pgrep -f "$GOOSE_APP/Contents/MacOS/" >/dev/null 2>&1; then
       die "Goose laeuft bereits (evtl. mit einem anderen Profil). Bitte beenden (Cmd+Q), dann 'avery app'."
     fi
@@ -190,8 +211,35 @@ cmd_cli() {
   launch "$bin" "$@"
 }
 
+cmd_up() {
+  local waited=0 limit="${AVERY_UP_TIMEOUT:-240}"
+  if model_healthy; then
+    say "Das Modell laeuft bereits."
+  else
+    say "Modell wird als Dienst gestartet (brew services) ..."
+    run_cmd "$(brew_bin)" services run avery || die "Der Dienst liess sich nicht starten (ist avery per Homebrew installiert?)."
+    if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
+      say "Warte auf das Modell, das Laden dauert 1-2 Minuten ..."
+      while ! model_healthy; do
+        sleep 3
+        waited=$((waited + 3))
+        if [ "$waited" -ge "$limit" ]; then
+          die "Das Modell ist nach ${limit} s nicht bereit. Log: $("$(brew_bin)" --prefix)/var/log/avery-model.log"
+        fi
+      done
+      say "Modell bereit."
+    fi
+  fi
+  cmd_app
+}
+
+cmd_down() {
+  run_cmd "$(brew_bin)" services stop avery
+  say "Modell-Dienst beendet. Goose Desktop schliesst du mit Cmd+Q."
+}
+
 cmd_doctor() {
-  local missing=0 version
+  local missing=0 version yaml yaml_rc
   ok()   { printf '  ok      %s\n' "$*"; }
   miss() { printf '  FEHLT   %s\n' "$*"; missing=$((missing + 1)); }
   say "Avery $AVERY_VERSION"
@@ -203,9 +251,19 @@ cmd_doctor() {
     miss "Goose Desktop -> brew install --cask block-goose"
   fi
   if command -v splash >/dev/null 2>&1; then ok "Splash ($(command -v splash))"; else miss "Splash -> brew install incoai/tap/splash"; fi
-  if curl -s -m 2 -o /dev/null "$MODEL_URL"; then ok "Modellserver laeuft"; else miss "Modellserver laeuft nicht -> avery model (eigenes Terminal)"; fi
+  if model_healthy; then ok "Modellserver laeuft"; else miss "Modellserver laeuft nicht -> avery up"; fi
   if [ -f "$GOOSE_ROOT/config/config.yaml" ]; then
     ok "Goose-Profil ($GOOSE_ROOT)"
+    for yaml in config.yaml permission.yaml; do
+      if [ -f "$GOOSE_ROOT/config/$yaml" ]; then
+        yaml_rc=0
+        yaml_valid "$GOOSE_ROOT/config/$yaml" || yaml_rc=$?
+        case "$yaml_rc" in
+          0) ok "YAML gueltig: $yaml" ;;
+          1) miss "YAML UNGUELTIG: $GOOSE_ROOT/config/$yaml (Goose kann die Konfiguration nicht laden)" ;;
+        esac
+      fi
+    done
     if grep -q "mail__send_message" "$GOOSE_ROOT/config/permission.yaml" 2>/dev/null; then
       ok "Senden in Goose auf 'nachfragen' gestellt"
     else
@@ -226,6 +284,8 @@ main() {
   case "$cmd" in
     init) cmd_init "$@" ;;
     mail) cmd_mail "$@" ;;
+    up) cmd_up "$@" ;;
+    down) cmd_down "$@" ;;
     model) cmd_model "$@" ;;
     app) cmd_app "$@" ;;
     cli) cmd_cli "$@" ;;
