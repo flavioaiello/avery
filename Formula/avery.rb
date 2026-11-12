@@ -3,8 +3,8 @@ class Avery < Formula
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,
-      tag:      "v0.2.1",
-      revision: "df331f9edbe6fa84e094e768433bd6678c8b6f69"
+      tag:      "v0.2.2",
+      revision: "0000000000000000000000000000000000000000"
   license "MIT"
   head "git@github.com:flavioaiello/avery.git", using: :git, branch: "main"
 
@@ -38,7 +38,7 @@ class Avery < Formula
         avery mail setup
         avery mail selftest
 
-      Daily use:
+      Daily use (once: avery install-app, then open "Avery" with Spotlight):
         avery up     # starts the model as a background service, then opens Goose
         avery down   # stops the model and frees its memory
 

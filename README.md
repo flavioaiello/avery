@@ -58,6 +58,14 @@ avery up      # starts the model as a background service, waits until it is read
 avery down    # stops the model service and frees its memory
 ```
 
+```sh
+avery install-app   # once: creates Avery.app and "Avery beenden.app" in ~/Applications
+```
+
+After that, open **Avery** with Spotlight (Cmd+Space) or drag it to the Dock: it starts the model and opens Goose with the
+Avery profile. **Avery beenden** stops the model. Do not start Goose from its own Dock icon for this setup: that opens
+Goose's default profile, and the model is not running.
+
 Only the model needs to run in the background. Goose Desktop is a normal app and starts the mail server itself when
 it needs it. `avery up` uses `brew services run avery`, so the model is not started at login. The model holds up to
 28 GB of memory while it runs; to have it start at every login anyway, use `brew services start avery`.
@@ -94,6 +102,7 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | `avery mail write-enable` / `write-disable` | Allow or forbid drafts and sending per account |
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialog and drafts |
 | `avery mail status` / `accounts` / `sendlog` | Show configuration, Mail accounts, recent send attempts |
+| `avery install-app` | Create `Avery.app` and `Avery beenden.app` in `~/Applications` |
 | `avery up` / `avery down` | Start the model as a background service and open Goose / stop the service |
 | `avery pull` | Download the model once (online, foreground; Ctrl+C when it says Ready) |
 | `avery model` | Run the local model server in the foreground (no service) |

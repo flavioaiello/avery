@@ -697,6 +697,37 @@ check("N9 Formel definiert den Modell-Dienst",
       and "keep_alive crashed: true" in formula_text and "std_service_path_env" in formula_text)
 health_server.shutdown()
 
+# ------------------------------------------------------------ P: double-clickable apps
+app_dir = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(app_dir)
+stub = os.path.join(app_dir, "fake-avery")
+stub_log = os.path.join(app_dir, "calls.log")
+with open(stub, "w") as handle:
+    handle.write('#!/bin/sh\necho "$@" >> "%s"\necho "Modell bereit"\nexit 0\n' % stub_log)
+os.chmod(stub, 0o755)
+proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_dir + "/Applications", "AVERY_APP_COMMAND": stub})
+start_app = os.path.join(app_dir, "Applications", "Avery.app")
+stop_app = os.path.join(app_dir, "Applications", "Avery beenden.app")
+check("P1 install-app legt beide Apps an",
+      proc.returncode == 0 and all(os.path.exists(os.path.join(a, "Contents", "Info.plist")) and
+                                   os.path.exists(os.path.join(a, "Contents", "MacOS", "applet")) for a in (start_app, stop_app)),
+      proc.stdout + proc.stderr)
+source_start = subprocess.run(["osadecompile", start_app], capture_output=True, text=True).stdout
+source_stop = subprocess.run(["osadecompile", stop_app], capture_output=True, text=True).stdout
+check("P2 Start-App ruft 'avery up' auf und meldet Fehler im Dialog",
+      'do shell script "%s up 2>&1"' % stub in source_start and "display dialog" in source_start and "giving up after" in source_start, source_start)
+check("P3 Beenden-App ruft 'avery down' auf", 'do shell script "%s down 2>&1"' % stub in source_stop, source_stop)
+run = subprocess.run(["osascript", os.path.join(start_app, "Contents", "Resources", "Scripts", "main.scpt")], capture_output=True, text=True, timeout=60)
+calls = open(stub_log).read().split("\n") if os.path.exists(stub_log) else []
+check("P4 Start-App fuehrt den Befehl wirklich aus (ohne Dialog im Erfolgsfall)",
+      run.returncode == 0 and calls[0] == "up", (run.stdout, run.stderr, calls))
+proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_dir + "/Applications", "AVERY_APP_COMMAND": stub})
+check("P5 install-app ist wiederholbar", proc.returncode == 0 and os.path.exists(start_app))
+proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_dir + "/x", "AVERY_APP_COMMAND": '/tmp/a"b'})
+check("P6 Pfad mit Anfuehrungszeichen wird abgelehnt", proc.returncode == 1 and "Anfuehrungszeichen" in proc.stderr, proc.stderr)
+proc, _ = avery("help")
+check("P7 help nennt install-app", "avery install-app" in proc.stdout)
+
 # --------------------------------------------------------------- M: versions agree
 version_in_cli = re.search(r'^AVERY_VERSION="([0-9.]+)"', open(AVERY, encoding="utf-8").read(), re.M).group(1)
 check("M1 Versionen in bin/avery und libexec/avery-mail stimmen ueberein", version_in_cli == mm.VERSION, (version_in_cli, mm.VERSION))
