@@ -8,7 +8,7 @@ cask "avery" do
   url "ssh://git@github.com/flavioaiello/avery.git",
       using:    :git,
       tag:      "dmg-v#{version}",
-      revision: "0000000000000000000000000000000000000000"
+      revision: "16f3579a9ae2d14fd9e955732ab328c071bd7452"
   name "Avery"
   desc "Launcher for the private AI agent Avery (Goose, local model, Apple Mail)"
   homepage "https://github.com/flavioaiello/avery"
