@@ -3,8 +3,8 @@ class Avery < Formula
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,
-      tag:      "v0.2.2",
-      revision: "97aa2722849948e5837c1f726a0a1f78ba1ca20c"
+      tag:      "v0.3.0",
+      revision: "0000000000000000000000000000000000000000"
   license "MIT"
   head "git@github.com:flavioaiello/avery.git", using: :git, branch: "main"
 
@@ -38,9 +38,9 @@ class Avery < Formula
         avery mail setup
         avery mail selftest
 
-      Daily use (once: avery install-app, then open "Avery" with Spotlight):
-        avery up     # starts the model as a background service, then opens Goose
-        avery down   # stops the model and frees its memory
+      Daily use: run "avery install-app" once, then open "Avery" with Spotlight or the Dock.
+        It starts the model, opens Goose, and stops the model by itself a few minutes after Goose is closed.
+        The same from a terminal: avery up   (avery down stops the model right away)
 
       The model service holds up to 28 GB of memory while it runs (AVERY_MAX_MEMORY).
       To start it at every login instead: brew services start avery

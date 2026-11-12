@@ -4,7 +4,7 @@
 #   bin/avery  libexec/avery-mail  share/avery/...
 set -euo pipefail
 
-AVERY_VERSION="0.2.2"
+AVERY_VERSION="0.3.0"
 
 resolve_path() {
   local target="$1" dir
@@ -37,7 +37,7 @@ load_env() {
     key="${line%%=*}"
     val="${line#*=}"
     case "$key" in
-      AVERY_MODEL|AVERY_MAX_MEMORY|AVERY_MAX_CONTEXT|AVERY_MAX_CACHE_DISK|AVERY_OFFLINE|AVERY_GOOSE_APP|AVERY_GOOSE_ROOT)
+      AVERY_MODEL|AVERY_MAX_MEMORY|AVERY_MAX_CONTEXT|AVERY_MAX_CACHE_DISK|AVERY_OFFLINE|AVERY_IDLE_MINUTES|AVERY_GOOSE_APP|AVERY_GOOSE_ROOT)
         if [ -z "$(printenv "$key" 2>/dev/null || true)" ]; then export "$key=$val"; fi ;;
     esac
   done < "$file"
@@ -69,6 +69,39 @@ run_cmd() {
 brew_bin() { command -v brew 2>/dev/null || echo /opt/homebrew/bin/brew; }
 
 model_healthy() { curl -s -m 2 -o /dev/null "$MODEL_URL"; }
+
+# Any Goose process (Desktop, its helpers, the CLI) / Goose running with the Avery profile.
+goose_running() { pgrep -f "$GOOSE_APP/Contents/" >/dev/null 2>&1; }
+goose_uses_profile() { pgrep -f "GOOSE_PATH_ROOT\":\"$GOOSE_ROOT\"" >/dev/null 2>&1; }
+
+watch_pidfile() { echo "$AVERY_HOME/watch.pid"; }
+
+# 0 if the pid in the pid file belongs to a running "avery watch".
+watcher_alive() {
+  local pid
+  [ -f "$(watch_pidfile)" ] || return 1
+  pid="$(cat "$(watch_pidfile)" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q " watch"
+}
+
+start_watcher() {
+  if [ "${AVERY_DRY_RUN:-}" = "1" ]; then
+    say "(Trockenlauf) Waechter im Hintergrund: avery watch"
+    return 0
+  fi
+  mkdir -p "$AVERY_HOME"
+  nohup "$SELF" watch </dev/null >>"$AVERY_HOME/watch.log" 2>&1 &
+  disown 2>/dev/null || true
+}
+
+stop_watcher() {
+  local pid
+  if watcher_alive; then
+    pid="$(cat "$(watch_pidfile)")"
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$(watch_pidfile)"
+}
 
 # 0 = valid, 1 = invalid, 2 = cannot check (no ruby)
 yaml_valid() {
@@ -131,9 +164,10 @@ Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
   avery mail <befehl>    Mail-Anbindung verwalten: setup, selftest, write-enable, write-disable,
                          selftest-write, accounts, sendlog, revoke, status, help
-  avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen
-  avery down             Modell-Dienst beenden (gibt den Arbeitsspeicher frei)
-  avery install-app      Avery.app und "Avery beenden.app" in ~/Applications anlegen (Start per Spotlight oder Dock)
+  avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen;
+                         das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist
+  avery down             Modell sofort beenden (gibt den Arbeitsspeicher frei)
+  avery install-app      Avery.app in ~/Applications anlegen (Start per Spotlight oder Dock)
   avery pull             Modell einmalig laden (ca. 17 GB), im Vordergrund; mit Ctrl+C beenden, sobald es 'Ready' meldet
   avery model            lokales Modell im Vordergrund starten (zum Testen, ohne Dienst)
   avery app              Goose Desktop mit dem Avery-Profil starten
@@ -207,8 +241,12 @@ cmd_app() {
     [ -d "$GOOSE_APP" ] || die "Goose Desktop fehlt. Installieren mit: brew install --cask block-goose"
     [ -f "$GOOSE_ROOT/config/config.yaml" ] || die "Profil fehlt. Zuerst: avery init"
     model_healthy || say "Hinweis: Das Modell laeuft nicht. Mit 'avery up' starten." >&2
-    if pgrep -f "$GOOSE_APP/Contents/MacOS/" >/dev/null 2>&1; then
-      die "Goose laeuft bereits (evtl. mit einem anderen Profil). Bitte beenden (Cmd+Q), dann 'avery app'."
+    if goose_running; then
+      if goose_uses_profile; then
+        say "Goose laeuft bereits mit dem Avery-Profil."
+        launch open -a "$GOOSE_APP"
+      fi
+      die "Goose laeuft bereits mit einem anderen Profil (z. B. dem Standardprofil). Bitte beenden (Cmd+Q) und danach erneut starten."
     fi
   fi
   launch open -n -a "$GOOSE_APP" \
@@ -226,7 +264,7 @@ cmd_cli() {
 }
 
 cmd_up() {
-  local waited=0 limit="${AVERY_UP_TIMEOUT:-240}"
+  local waited=0 limit="${AVERY_UP_TIMEOUT:-240}" started=0
   if model_healthy; then
     say "Das Modell laeuft bereits."
   else
@@ -235,6 +273,7 @@ cmd_up() {
     fi
     say "Modell wird als Dienst gestartet (brew services) ..."
     run_cmd "$(brew_bin)" services run avery || die "Der Dienst liess sich nicht starten (ist avery per Homebrew installiert?)."
+    started=1
     if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
       say "Warte auf das Modell, das Laden dauert 1-2 Minuten ..."
       while ! model_healthy; do
@@ -247,17 +286,51 @@ cmd_up() {
       say "Modell bereit."
     fi
   fi
+  # Only a model that "avery up" started is stopped automatically. A model started by hand or with
+  # "brew services start avery" (at login) stays under your control.
+  if [ "$started" = "1" ]; then start_watcher; fi
   cmd_app
 }
 
+# Internal: stops the model service when Goose has been closed for AVERY_IDLE_MINUTES.
+cmd_watch() {
+  local interval="${AVERY_WATCH_INTERVAL:-15}" gone=0 limit pidfile
+  limit="${AVERY_IDLE_SECONDS:-$(( ${AVERY_IDLE_MINUTES:-5} * 60 ))}"
+  pidfile="$(watch_pidfile)"
+  mkdir -p "$AVERY_HOME"
+  if watcher_alive && [ "$(cat "$pidfile")" != "$$" ]; then
+    say "Der Waechter laeuft bereits (PID $(cat "$pidfile"))."
+    return 0
+  fi
+  echo "$$" > "$pidfile"
+  trap 'rm -f "$(watch_pidfile)"' EXIT
+  trap 'exit 0' TERM INT HUP
+  say "$(date '+%H:%M:%S') Waechter gestartet: das Modell stoppt $limit s nach dem Schliessen von Goose."
+  while :; do
+    if goose_running; then gone=0; else gone=$((gone + interval)); fi
+    if ! model_healthy; then
+      say "$(date '+%H:%M:%S') Das Modell laeuft nicht mehr, der Waechter endet."
+      return 0
+    fi
+    if [ "$gone" -ge "$limit" ]; then
+      say "$(date '+%H:%M:%S') Goose ist seit $gone s geschlossen: Modell wird gestoppt."
+      run_cmd "$(brew_bin)" services stop avery
+      return 0
+    fi
+    sleep "$interval"
+  done
+}
+
 cmd_down() {
+  stop_watcher
   run_cmd "$(brew_bin)" services stop avery
-  say "Modell-Dienst beendet. Goose Desktop schliesst du mit Cmd+Q."
+  say "Modell beendet. Goose Desktop schliesst du mit Cmd+Q."
 }
 
 cmd_install_app() {
-  local dir="${AVERY_APP_DIR:-$HOME/Applications}" cmd tmp
+  local dir="${AVERY_APP_DIR:-$HOME/Applications}" cmd tmp app plist
   cmd="${AVERY_APP_COMMAND:-$(command -v avery 2>/dev/null || echo "$SELF")}"
+  app="$dir/Avery.app"
   command -v osacompile >/dev/null 2>&1 || die "osacompile fehlt (gehoert zu macOS)."
   case "$cmd" in
     *'"'*|*'\\'*) die "Der Pfad enthaelt Anfuehrungszeichen oder Backslashes: $cmd" ;;
@@ -271,22 +344,28 @@ on error errMsg
 	display dialog "Avery konnte nicht gestartet werden:" & return & return & errMsg buttons {"OK"} default button "OK" with icon stop with title "Avery" giving up after 300
 end try
 EOF
-  cat > "$tmp/stop.applescript" <<EOF
-try
-	do shell script "$cmd down 2>&1"
-	display dialog "Das Modell wurde beendet. Der Arbeitsspeicher ist wieder frei." buttons {"OK"} default button "OK" with title "Avery" giving up after 5
-on error errMsg
-	display dialog "Avery konnte das Modell nicht beenden:" & return & return & errMsg buttons {"OK"} default button "OK" with icon stop with title "Avery" giving up after 300
-end try
-EOF
-  rm -rf "$dir/Avery.app" "$dir/Avery beenden.app"
-  osacompile -o "$dir/Avery.app" "$tmp/start.applescript"
-  osacompile -o "$dir/Avery beenden.app" "$tmp/stop.applescript"
+  rm -rf "$app"
+  if [ -d "$dir/Avery beenden.app" ]; then
+    rm -rf "$dir/Avery beenden.app"
+    say "Die alte App 'Avery beenden.app' wurde entfernt, das Modell stoppt jetzt von selbst."
+  fi
+  osacompile -o "$app" "$tmp/start.applescript"
   rm -rf "$tmp"
-  say "Angelegt in $dir:"
-  say "  Avery.app          startet das Modell und oeffnet Goose mit dem Avery-Profil"
-  say "  Avery beenden.app  beendet das Modell und gibt den Arbeitsspeicher frei"
-  say "Oeffnen per Spotlight (Cmd+Leertaste, 'Avery') oder ins Dock ziehen."
+  plist="$app/Contents/Info.plist"
+  plist_set() {
+    /usr/libexec/PlistBuddy -c "Set :$1 $2" "$plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :$1 string $2" "$plist"
+  }
+  plist_set CFBundleName Avery
+  plist_set CFBundleDisplayName Avery
+  plist_set CFBundleIdentifier io.github.flavioaiello.avery
+  plist_set CFBundleShortVersionString "$AVERY_VERSION"
+  plist_set CFBundleVersion "$AVERY_VERSION"
+  [ -f "$SHARE/Avery.icns" ] && cp "$SHARE/Avery.icns" "$app/Contents/Resources/applet.icns"
+  codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
+  touch "$app"
+  say "Angelegt: $app"
+  say "Oeffnen per Spotlight (Cmd+Leertaste, 'Avery') oder ins Dock ziehen: startet das Modell und oeffnet Goose."
+  say "Das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist (AVERY_IDLE_MINUTES, Standard 5)."
   say "Das normale Goose-Symbol oeffnet das Standardprofil und nicht das von Avery."
 }
 
@@ -337,6 +416,7 @@ main() {
   case "$cmd" in
     init) cmd_init "$@" ;;
     mail) cmd_mail "$@" ;;
+    watch) cmd_watch "$@" ;;
     install-app) cmd_install_app "$@" ;;
     up) cmd_up "$@" ;;
     down) cmd_down "$@" ;;

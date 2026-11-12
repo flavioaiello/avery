@@ -695,38 +695,153 @@ formula_text = open(os.path.join(ROOT, "Formula", "avery.rb"), encoding="utf-8")
 check("N9 Formel definiert den Modell-Dienst",
       "service do" in formula_text and 'run [opt_bin/"avery", "model"]' in formula_text
       and "keep_alive crashed: true" in formula_text and "std_service_path_env" in formula_text)
-health_server.shutdown()
 
-# ------------------------------------------------------------ P: double-clickable apps
-app_dir = tempfile.mkdtemp(prefix="averytest-")
-TMPDIRS.append(app_dir)
-stub = os.path.join(app_dir, "fake-avery")
-stub_log = os.path.join(app_dir, "calls.log")
+# ------------------------------------------------ P: the Avery app (one icon, own icon)
+import filecmp
+import plistlib
+
+app_root = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(app_root)
+stub = os.path.join(app_root, "fake-avery")
+stub_log = os.path.join(app_root, "calls.log")
 with open(stub, "w") as handle:
     handle.write('#!/bin/sh\necho "$@" >> "%s"\necho "Modell bereit"\nexit 0\n' % stub_log)
 os.chmod(stub, 0o755)
-proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_dir + "/Applications", "AVERY_APP_COMMAND": stub})
-start_app = os.path.join(app_dir, "Applications", "Avery.app")
-stop_app = os.path.join(app_dir, "Applications", "Avery beenden.app")
-check("P1 install-app legt beide Apps an",
-      proc.returncode == 0 and all(os.path.exists(os.path.join(a, "Contents", "Info.plist")) and
-                                   os.path.exists(os.path.join(a, "Contents", "MacOS", "applet")) for a in (start_app, stop_app)),
-      proc.stdout + proc.stderr)
-source_start = subprocess.run(["osadecompile", start_app], capture_output=True, text=True).stdout
-source_stop = subprocess.run(["osadecompile", stop_app], capture_output=True, text=True).stdout
-check("P2 Start-App ruft 'avery up' auf und meldet Fehler im Dialog",
-      'do shell script "%s up 2>&1"' % stub in source_start and "display dialog" in source_start and "giving up after" in source_start, source_start)
-check("P3 Beenden-App ruft 'avery down' auf", 'do shell script "%s down 2>&1"' % stub in source_stop, source_stop)
-run = subprocess.run(["osascript", os.path.join(start_app, "Contents", "Resources", "Scripts", "main.scpt")], capture_output=True, text=True, timeout=60)
+apps = os.path.join(app_root, "Applications")
+os.makedirs(os.path.join(apps, "Avery beenden.app"))  # left over from 0.2.x
+proc, _ = avery("install-app", env={"AVERY_APP_DIR": apps, "AVERY_APP_COMMAND": stub})
+start_app = os.path.join(apps, "Avery.app")
+check("P1 genau eine App; die alte 'Avery beenden.app' ist entfernt",
+      proc.returncode == 0 and os.listdir(apps) == ["Avery.app"] and "entfernt" in proc.stdout, proc.stdout + proc.stderr)
+source = subprocess.run(["osadecompile", start_app], capture_output=True, text=True).stdout
+check("P2 die App ruft 'avery up' auf und zeigt Fehler in einem Dialog",
+      'do shell script "%s up 2>&1"' % stub in source and "display dialog" in source and " down" not in source, source)
+info = plistlib.load(open(os.path.join(start_app, "Contents", "Info.plist"), "rb"))
+check("P3 Name, Kennung und Version sind gesetzt",
+      info.get("CFBundleName") == "Avery" and info.get("CFBundleDisplayName") == "Avery"
+      and info.get("CFBundleIdentifier") == "io.github.flavioaiello.avery"
+      and info.get("CFBundleShortVersionString") == mm.VERSION, info)
+check("P4 eigenes Icon ist eingebaut",
+      filecmp.cmp(os.path.join(ROOT, "share", "avery", "Avery.icns"),
+                  os.path.join(start_app, "Contents", "Resources", "applet.icns"), shallow=False))
+check("P5 die Signatur der App ist gueltig",
+      subprocess.run(["codesign", "--verify", "--deep", "--strict", start_app], capture_output=True).returncode == 0)
+run = subprocess.run(["osascript", os.path.join(start_app, "Contents", "Resources", "Scripts", "main.scpt")],
+                     capture_output=True, text=True, timeout=60)
 calls = open(stub_log).read().split("\n") if os.path.exists(stub_log) else []
-check("P4 Start-App fuehrt den Befehl wirklich aus (ohne Dialog im Erfolgsfall)",
-      run.returncode == 0 and calls[0] == "up", (run.stdout, run.stderr, calls))
-proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_dir + "/Applications", "AVERY_APP_COMMAND": stub})
-check("P5 install-app ist wiederholbar", proc.returncode == 0 and os.path.exists(start_app))
-proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_dir + "/x", "AVERY_APP_COMMAND": '/tmp/a"b'})
-check("P6 Pfad mit Anfuehrungszeichen wird abgelehnt", proc.returncode == 1 and "Anfuehrungszeichen" in proc.stderr, proc.stderr)
+check("P6 die App fuehrt den Befehl aus (im Erfolgsfall ohne Dialog)", run.returncode == 0 and calls[0] == "up", (run.stdout, run.stderr, calls))
+proc, _ = avery("install-app", env={"AVERY_APP_DIR": apps, "AVERY_APP_COMMAND": stub})
+check("P7 install-app ist wiederholbar", proc.returncode == 0 and os.listdir(apps) == ["Avery.app"] and "entfernt" not in proc.stdout, proc.stdout)
+proc, _ = avery("install-app", env={"AVERY_APP_DIR": app_root + "/x", "AVERY_APP_COMMAND": '/tmp/a"b'})
+check("P8 Pfad mit Anfuehrungszeichen wird abgelehnt", proc.returncode == 1 and "Anfuehrungszeichen" in proc.stderr, proc.stderr)
 proc, _ = avery("help")
-check("P7 help nennt install-app", "avery install-app" in proc.stdout)
+check("P9 help nennt install-app, nicht mehr 'beenden.app'", "avery install-app" in proc.stdout and "beenden.app" not in proc.stdout)
+
+# ---------------------------------------- G: opening Goose with the right profile (fake Goose processes)
+import signal
+
+
+def fake_goose(app_path, root=None, seconds=120):
+    args = ["python3", "-c", "import time; time.sleep(%d)" % seconds, os.path.join(app_path, "Contents", "MacOS", "Goose")]
+    if root:
+        args.append('{"GOOSE_PATH_ROOT":"%s"}' % root)
+    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.6)
+    return process
+
+
+def stop_process(process):
+    process.kill()
+    process.wait()
+
+
+goose_root = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(goose_root)
+fake_app = os.path.join(goose_root, "Fake.app")
+os.makedirs(os.path.join(fake_app, "Contents", "MacOS"))
+profile = os.path.join(goose_root, "profile")
+os.makedirs(os.path.join(profile, "config"))
+open(os.path.join(profile, "config", "config.yaml"), "w").write("x: 1\n")
+stubs = os.path.join(goose_root, "stubs")
+os.makedirs(stubs)
+open_log = os.path.join(goose_root, "open.log")
+with open(os.path.join(stubs, "open"), "w") as handle:
+    handle.write('#!/bin/sh\necho "$@" >> "%s"\n' % open_log)
+os.chmod(os.path.join(stubs, "open"), 0o755)
+env_g = {"AVERY_GOOSE_APP": fake_app, "AVERY_GOOSE_ROOT": profile, "AVERY_MODEL_URL": dead_url,
+         "PATH": stubs + ":" + os.environ.get("PATH", "")}
+
+
+def open_calls():
+    return open(open_log).read().strip() if os.path.exists(open_log) else ""
+
+
+gp = fake_goose(fake_app, root=profile)
+proc, _ = avery("app", env=env_g)
+check("G1 Goose laeuft schon mit dem Avery-Profil: nur in den Vordergrund holen",
+      proc.returncode == 0 and "laeuft bereits mit dem Avery-Profil" in proc.stdout and open_calls() == "-a %s" % fake_app,
+      (proc.stdout, proc.stderr, open_calls()))
+stop_process(gp)
+os.remove(open_log)
+gp = fake_goose(fake_app, root=os.path.join(goose_root, "anderes-profil"))
+proc, _ = avery("app", env=env_g)
+check("G2 Goose laeuft mit einem anderen Profil: klare Meldung, nichts gestartet",
+      proc.returncode == 1 and "anderen Profil" in proc.stderr and open_calls() == "", (proc.stdout, proc.stderr, open_calls()))
+stop_process(gp)
+proc, _ = avery("app", env=env_g)
+check("G3 Goose laeuft nicht: Start mit dem Avery-Profil",
+      proc.returncode == 0 and open_calls() == "-n -a %s --env GOOSE_PATH_ROOT=%s --env GOOSE_MOIM_MESSAGE_FILE=%s/top-of-mind.md"
+      % (fake_app, profile, profile), (proc.stdout, proc.stderr, open_calls()))
+
+# ------------------------------------------------ W: the watcher stops the model after Goose was closed
+def avery_popen(*args, env=None, home=None):
+    environment = {k: v for k, v in os.environ.items() if not k.startswith(("MAIL_MCP_", "AVERY_"))}
+    home = home or tempfile.mkdtemp(prefix="averytest-")
+    TMPDIRS.append(home)
+    environment["HOME"] = home
+    environment.update(env or {})
+    return subprocess.Popen([AVERY] + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment), home
+
+
+env_w = {"AVERY_DRY_RUN": "1", "AVERY_WATCH_INTERVAL": "1", "AVERY_IDLE_SECONDS": "3", "AVERY_GOOSE_APP": fake_app,
+         "AVERY_MODEL_URL": alive_url}
+proc, home_w1 = avery("watch", env=env_w)
+check("W1 ohne Goose: das Modell wird nach der Wartezeit gestoppt",
+      proc.returncode == 0 and "services stop avery" in proc.stdout and "Modell wird gestoppt" in proc.stdout
+      and not os.path.exists(os.path.join(home_w1, ".avery", "watch.pid")), proc.stdout + proc.stderr)
+gp = fake_goose(fake_app)
+watcher, home_w2 = avery_popen("watch", env=env_w)
+time.sleep(5)
+still_running = watcher.poll() is None
+stop_process(gp)
+output, _ = watcher.communicate(timeout=20)
+check("W2 solange Goose laeuft, bleibt das Modell; nach dem Schliessen wird es gestoppt",
+      still_running and "services stop avery" in output, (still_running, output))
+proc, _ = avery("watch", env=dict(env_w, AVERY_MODEL_URL=dead_url))
+check("W3 laeuft das Modell nicht mehr, endet der Waechter ohne Stopp-Befehl",
+      proc.returncode == 0 and "laeuft nicht mehr" in proc.stdout and "services stop" not in proc.stdout, proc.stdout)
+gp = fake_goose(fake_app)
+watcher, home_w3 = avery_popen("watch", env=env_w)
+time.sleep(2)
+proc, _ = avery("watch", env=env_w, home=home_w3)
+check("W4 es gibt nur einen Waechter", proc.returncode == 0 and "laeuft bereits" in proc.stdout, proc.stdout)
+proc, _ = avery("down", env=env_w, home=home_w3)
+try:
+    watcher.wait(timeout=10)
+    ended = True
+except subprocess.TimeoutExpired:
+    ended = False
+    watcher.kill()
+stop_process(gp)
+check("W5 'avery down' beendet auch den Waechter und stoppt das Modell",
+      ended and "services stop avery" in proc.stdout and not os.path.exists(os.path.join(home_w3, ".avery", "watch.pid")),
+      (ended, proc.stdout))
+proc, _ = avery("up", env={"AVERY_DRY_RUN": "1", "AVERY_MODEL_URL": dead_url})
+check("W6 up startet den Waechter nur, wenn es das Modell selbst gestartet hat", "Waechter im Hintergrund" in proc.stdout, proc.stdout)
+proc, _ = avery("up", env={"AVERY_DRY_RUN": "1", "AVERY_MODEL_URL": alive_url})
+check("W7 ein schon laufendes Modell bleibt unter deiner Kontrolle (kein Waechter)", "Waechter" not in proc.stdout and "laeuft bereits" in proc.stdout, proc.stdout)
+
+health_server.shutdown()
 
 # --------------------------------------------------------------- M: versions agree
 version_in_cli = re.search(r'^AVERY_VERSION="([0-9.]+)"', open(AVERY, encoding="utf-8").read(), re.M).group(1)

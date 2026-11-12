@@ -54,23 +54,23 @@ avery mail selftest-write  # test the approval dialog, a draft, and optionally a
 ## Daily use
 
 ```sh
-avery up      # starts the model as a background service, waits until it is ready, opens Goose
-avery down    # stops the model service and frees its memory
+avery install-app   # once: creates Avery.app in ~/Applications
 ```
 
-```sh
-avery install-app   # once: creates Avery.app and "Avery beenden.app" in ~/Applications
-```
+Open **Avery** with Spotlight (Cmd+Space) or drag it to the Dock. It starts the model, waits until it is ready and opens
+Goose with the Avery profile. If Goose is already open with that profile, it just brings it to the front.
+When Goose has been closed for a few minutes (`AVERY_IDLE_MINUTES`, default 5), the model stops by itself and frees its
+memory. There is nothing to quit and no second icon.
 
-After that, open **Avery** with Spotlight (Cmd+Space) or drag it to the Dock: it starts the model and opens Goose with the
-Avery profile. **Avery beenden** stops the model. Do not start Goose from its own Dock icon for this setup: that opens
-Goose's default profile, and the model is not running.
+The same works from a terminal: `avery up`. `avery down` stops the model right away.
 
-Only the model needs to run in the background. Goose Desktop is a normal app and starts the mail server itself when
-it needs it. `avery up` uses `brew services run avery`, so the model is not started at login. The model holds up to
-28 GB of memory while it runs; to have it start at every login anyway, use `brew services start avery`.
-`avery model` runs the model in the foreground instead (for testing). `avery doctor` shows what is missing and
-reports a Goose configuration that cannot be parsed.
+Do not start Goose from its own Dock icon for this setup: that opens Goose's default profile, and the model is not running.
+
+Only the model runs in the background; Goose Desktop is a normal app and starts the mail server itself when it needs it.
+`avery up` uses `brew services run avery`, so the model is not started at login. A model that you started yourself, or
+with `brew services start avery` (at login), is never stopped automatically. The model holds up to 28 GB of memory while
+it runs. `avery model` runs it in the foreground instead (for testing). `avery doctor` shows what is missing and reports
+a Goose configuration that cannot be parsed.
 
 Restart Goose after changing accounts or permissions.
 
@@ -102,8 +102,8 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | `avery mail write-enable` / `write-disable` | Allow or forbid drafts and sending per account |
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialog and drafts |
 | `avery mail status` / `accounts` / `sendlog` | Show configuration, Mail accounts, recent send attempts |
-| `avery install-app` | Create `Avery.app` and `Avery beenden.app` in `~/Applications` |
-| `avery up` / `avery down` | Start the model as a background service and open Goose / stop the service |
+| `avery install-app` | Create `Avery.app` in `~/Applications` (Spotlight/Dock launcher with its own icon) |
+| `avery up` / `avery down` | Start the model service and open Goose (it stops by itself after Goose is closed) / stop it now |
 | `avery pull` | Download the model once (online, foreground; Ctrl+C when it says Ready) |
 | `avery model` | Run the local model server in the foreground (no service) |
 | `avery app` / `avery cli` | Start Goose Desktop / the Goose CLI with the Avery profile |
@@ -114,7 +114,7 @@ The command line output is German for now.
 ## Configuration
 
 `avery init` creates `~/.avery/avery.env` (a commented template). Known keys: `AVERY_MODEL`, `AVERY_MAX_MEMORY`,
-`AVERY_MAX_CONTEXT`, `AVERY_MAX_CACHE_DISK`, `AVERY_OFFLINE`, `AVERY_GOOSE_APP`, `AVERY_GOOSE_ROOT`. The file is parsed,
+`AVERY_MAX_CONTEXT`, `AVERY_MAX_CACHE_DISK`, `AVERY_OFFLINE`, `AVERY_IDLE_MINUTES`, `AVERY_GOOSE_APP`, `AVERY_GOOSE_ROOT`. The file is parsed,
 not executed, and real environment variables win. The defaults are tuned for a 48 GB Mac.
 
 The model runs offline by default (`AVERY_OFFLINE=1`): Avery never downloads anything on its own, so a service start
@@ -138,10 +138,12 @@ Set `AVERY_HOME` to use another base folder.
 ## Development
 
 ```sh
-python3 tests/test_mail.py        # about 120 checks against synthetic demo data, no Mail access
+python3 tests/test_mail.py        # about 150 checks against synthetic demo data, no Mail access
 MAIL_MCP_FAKE=1 libexec/avery-mail status
 AVERY_DRY_RUN=1 bin/avery model   # print the command instead of running it
 ```
+
+The app icon is drawn by `tools/make-icon.js`; `tools/make-icon.sh` rebuilds `share/avery/Avery.icns`.
 
 ## License
 
