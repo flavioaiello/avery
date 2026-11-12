@@ -1,0 +1,36 @@
+{
+  "name": "custom_splash",
+  "engine": "openai",
+  "display_name": "Splash",
+  "description": "Custom Splash provider",
+  "api_key_env": "",
+  "base_url": "http://127.0.0.1:8000/v1/chat/completions",
+  "models": [
+    {
+      "name": "splash-local",
+      "context_limit": 100000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "reasoning": false
+    }
+  ],
+  "headers": null,
+  "session_id_header_override": null,
+  "timeout_seconds": null,
+  "supports_streaming": true,
+  "requires_auth": false,
+  "catalog_provider_id": null,
+  "base_path": null,
+  "env_vars": null,
+  "auth": null,
+  "dynamic_models": null,
+  "skip_canonical_filtering": false,
+  "model_doc_link": null,
+  "setup_steps": [],
+  "toolshim": false,
+  "preserves_thinking": true,
+  "emit_clear_thinking": false,
+  "setup": null
+}

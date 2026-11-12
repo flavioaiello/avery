@@ -1,0 +1,239 @@
+#!/bin/bash
+# avery - private AI agent on macOS: Goose Desktop + local model (Splash) + Apple Mail bridge.
+# Layout (same in the git checkout and in the Homebrew prefix):
+#   bin/avery  libexec/avery-mail  share/avery/...
+set -euo pipefail
+
+AVERY_VERSION="0.1.0"
+
+resolve_path() {
+  local target="$1" dir
+  while [ -L "$target" ]; do
+    dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    case "$target" in /*) ;; *) target="$dir/$target" ;; esac
+  done
+  echo "$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+}
+
+SELF="$(resolve_path "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+LIBEXEC="$ROOT/libexec"
+SHARE="$ROOT/share/avery"
+
+AVERY_HOME="${AVERY_HOME:-$HOME/.avery}"
+export AVERY_HOME
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'avery: %s\n' "$*" >&2; exit 1; }
+
+# $AVERY_HOME/avery.env holds KEY=VALUE lines. Only known keys are read and the real
+# environment wins. The file is parsed, not executed.
+load_env() {
+  local file="$AVERY_HOME/avery.env" line key val
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    case "$key" in
+      AVERY_MODEL|AVERY_MAX_MEMORY|AVERY_MAX_CONTEXT|AVERY_MAX_CACHE_DISK|AVERY_OFFLINE|AVERY_GOOSE_APP|AVERY_GOOSE_ROOT)
+        if [ -z "$(printenv "$key" 2>/dev/null || true)" ]; then export "$key=$val"; fi ;;
+    esac
+  done < "$file"
+}
+load_env
+
+GOOSE_ROOT="${AVERY_GOOSE_ROOT:-$AVERY_HOME/goose}"
+GOOSE_APP="${AVERY_GOOSE_APP:-/Applications/Goose.app}"
+MODEL_URL="http://127.0.0.1:8000/health"
+
+# AVERY_DRY_RUN=1 prints the command instead of running it (used by the tests).
+launch() {
+  if [ "${AVERY_DRY_RUN:-}" = "1" ]; then
+    printf '%s\n' "$*"
+    return 0
+  fi
+  exec "$@"
+}
+
+mail_bin() {
+  local stable=""
+  case "$ROOT" in
+    */Cellar/*)
+      stable="$(command -v avery-mail 2>/dev/null || true)"
+      if [ -n "$stable" ]; then
+        echo "$stable"
+        return 0
+      fi ;;
+  esac
+  echo "$LIBEXEC/avery-mail"
+}
+
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+
+render() {
+  local template="$1" dest="$2" goose mail
+  goose="$(sed_escape "$GOOSE_ROOT")"
+  mail="$(sed_escape "$(mail_bin)")"
+  sed -e "s|@GOOSE_ROOT@|$goose|g" -e "s|@AVERY_MAIL@|$mail|g" "$template" > "$dest"
+}
+
+FORCE=0
+install_file() {
+  local template="$1" dest="$2" mode="${3:-copy}" backup
+  mkdir -p "$(dirname "$dest")"
+  if [ -e "$dest" ]; then
+    if [ "$FORCE" = 1 ]; then
+      backup="$dest.bak-$(date +%Y%m%d%H%M%S)"
+      cp -p "$dest" "$backup"
+      say "  Sicherung: $backup"
+    else
+      say "  vorhanden, nicht ueberschrieben: $dest"
+      return 0
+    fi
+  fi
+  if [ "$mode" = render ]; then render "$template" "$dest"; else cp "$template" "$dest"; fi
+  say "  geschrieben: $dest"
+}
+
+usage() {
+  cat <<EOF
+avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Apple-Mail-Anbindung)
+
+Befehle:
+  avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
+  avery mail <befehl>    Mail-Anbindung verwalten: setup, selftest, write-enable, write-disable,
+                         selftest-write, accounts, sendlog, revoke, status, help
+  avery model            lokales Modell starten (Splash), in einem eigenen Terminal
+  avery app              Goose Desktop mit dem Avery-Profil starten
+  avery cli [args]       Goose CLI mit dem Avery-Profil
+  avery doctor           Voraussetzungen und Einrichtung pruefen
+  avery version          Version anzeigen
+
+Erster Start: avery init, avery mail setup, avery mail selftest, avery model, avery app
+Einstellungen: $AVERY_HOME/avery.env (siehe README)
+EOF
+}
+
+cmd_init() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) FORCE=1 ;;
+      -h|--help) say "Aufruf: avery init [--force]   (--force ueberschreibt Dateien, mit Sicherung)"; return 0 ;;
+      *) die "Unbekannte Option: $1" ;;
+    esac
+    shift
+  done
+  [ "$(uname -s)" = "Darwin" ] || die "Avery laeuft nur auf macOS."
+  say "Avery-Profil einrichten: $GOOSE_ROOT"
+  install_file "$SHARE/goose/config.yaml.tmpl" "$GOOSE_ROOT/config/config.yaml" render
+  install_file "$SHARE/goose/permission.yaml" "$GOOSE_ROOT/config/permission.yaml"
+  install_file "$SHARE/goose/custom_splash.json" "$GOOSE_ROOT/config/custom_providers/custom_splash.json"
+  install_file "$SHARE/goose/top-of-mind.md" "$GOOSE_ROOT/top-of-mind.md"
+  install_file "$SHARE/avery.env" "$AVERY_HOME/avery.env"
+  mkdir -p "$AVERY_HOME/mail"
+  chmod 700 "$AVERY_HOME" "$AVERY_HOME/mail" 2>/dev/null || true
+  say ""
+  [ -d "$GOOSE_APP" ] || say "Hinweis: Goose Desktop fehlt. Installieren mit: brew install --cask block-goose"
+  command -v splash >/dev/null 2>&1 || say "Hinweis: Splash fehlt. Installieren mit: brew install incoai/tap/splash"
+  say ""
+  say "Weiter mit:"
+  say "  avery mail setup       (private Mail-Konten waehlen)"
+  say "  avery mail selftest    (Lesezugriff pruefen)"
+  say "  avery model            (in einem eigenen Terminal, laeuft im Vordergrund)"
+  say "  avery app              (Goose starten)"
+}
+
+cmd_mail() {
+  if [ $# -eq 0 ]; then set -- help; fi
+  launch /usr/bin/python3 "$LIBEXEC/avery-mail" "$@"
+}
+
+cmd_model() {
+  local splash
+  splash="$(command -v splash 2>/dev/null || true)"
+  if [ -z "$splash" ]; then
+    [ "${AVERY_DRY_RUN:-}" = "1" ] || die "Splash fehlt. Installieren mit: brew install incoai/tap/splash"
+    splash="splash"
+  fi
+  local args=(serve
+    --model "${AVERY_MODEL:-unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M}"
+    --served-model-name splash-local
+    --max-memory "${AVERY_MAX_MEMORY:-28G}"
+    --max-context "${AVERY_MAX_CONTEXT:-100K}"
+    --max-cache-disk "${AVERY_MAX_CACHE_DISK:-4G}")
+  if [ "${AVERY_OFFLINE:-0}" = "1" ]; then args+=(--offline); fi
+  launch "$splash" "${args[@]}" "$@"
+}
+
+cmd_app() {
+  if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
+    [ -d "$GOOSE_APP" ] || die "Goose Desktop fehlt. Installieren mit: brew install --cask block-goose"
+    [ -f "$GOOSE_ROOT/config/config.yaml" ] || die "Profil fehlt. Zuerst: avery init"
+    curl -s -m 2 -o /dev/null "$MODEL_URL" || say "Hinweis: Das Modell laeuft nicht. In einem eigenen Terminal 'avery model' starten." >&2
+    if pgrep -f "$GOOSE_APP/Contents/MacOS/" >/dev/null 2>&1; then
+      die "Goose laeuft bereits (evtl. mit einem anderen Profil). Bitte beenden (Cmd+Q), dann 'avery app'."
+    fi
+  fi
+  launch open -n -a "$GOOSE_APP" \
+    --env "GOOSE_PATH_ROOT=$GOOSE_ROOT" \
+    --env "GOOSE_MOIM_MESSAGE_FILE=$GOOSE_ROOT/top-of-mind.md"
+}
+
+cmd_cli() {
+  local bin="$GOOSE_APP/Contents/Resources/bin/goose"
+  if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
+    [ -x "$bin" ] || die "Goose CLI nicht gefunden: $bin"
+  fi
+  export GOOSE_PATH_ROOT="$GOOSE_ROOT" GOOSE_MOIM_MESSAGE_FILE="$GOOSE_ROOT/top-of-mind.md"
+  launch "$bin" "$@"
+}
+
+cmd_doctor() {
+  local missing=0 version
+  ok()   { printf '  ok      %s\n' "$*"; }
+  miss() { printf '  FEHLT   %s\n' "$*"; missing=$((missing + 1)); }
+  say "Avery $AVERY_VERSION"
+  if [ "$(uname -s)" = "Darwin" ]; then ok "macOS $(sw_vers -productVersion 2>/dev/null || echo '?')"; else miss "kein macOS"; fi
+  if [ -d "$GOOSE_APP" ]; then
+    version="$(defaults read "$GOOSE_APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo '?')"
+    ok "Goose Desktop $version ($GOOSE_APP)"
+  else
+    miss "Goose Desktop -> brew install --cask block-goose"
+  fi
+  if command -v splash >/dev/null 2>&1; then ok "Splash ($(command -v splash))"; else miss "Splash -> brew install incoai/tap/splash"; fi
+  if curl -s -m 2 -o /dev/null "$MODEL_URL"; then ok "Modellserver laeuft"; else miss "Modellserver laeuft nicht -> avery model (eigenes Terminal)"; fi
+  if [ -f "$GOOSE_ROOT/config/config.yaml" ]; then
+    ok "Goose-Profil ($GOOSE_ROOT)"
+    if grep -q "mail__send_message" "$GOOSE_ROOT/config/permission.yaml" 2>/dev/null; then
+      ok "Senden in Goose auf 'nachfragen' gestellt"
+    else
+      miss "permission.yaml: mail__send_message fehlt unter ask_before (avery init --force)"
+    fi
+  else
+    miss "Goose-Profil -> avery init"
+  fi
+  /usr/bin/python3 "$LIBEXEC/avery-mail" status | sed 's/^/  /'
+  say ""
+  if [ "$missing" -eq 0 ]; then say "Alles bereit."; else say "$missing Punkt(e) offen."; return 1; fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  if [ $# -gt 0 ]; then shift; fi
+  cmd="${cmd%[.,;:]}"
+  case "$cmd" in
+    init) cmd_init "$@" ;;
+    mail) cmd_mail "$@" ;;
+    model) cmd_model "$@" ;;
+    app) cmd_app "$@" ;;
+    cli) cmd_cli "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    version|-V|--version) say "avery $AVERY_VERSION" ;;
+    help|-h|--help) usage ;;
+    *) printf 'avery: unbekannter Befehl: %s\n\n' "$cmd" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"

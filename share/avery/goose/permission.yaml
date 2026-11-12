@@ -1,0 +1,16 @@
+user:
+  always_allow:
+  - mail__list_accounts
+  - mail__list_mailboxes
+  - mail__list_messages
+  - mail__search_messages
+  - mail__read_message
+  - mail__create_draft
+  - todo__todo_write
+  ask_before:
+  - mail__send_message
+  never_allow: []
+smart_approve:
+  always_allow: []
+  ask_before: []
+  never_allow: []
