@@ -4,7 +4,7 @@
 #   bin/avery  libexec/avery-mail  share/avery/...
 set -euo pipefail
 
-AVERY_VERSION="0.2.0"
+AVERY_VERSION="0.2.1"
 
 resolve_path() {
   local target="$1" dir
@@ -76,6 +76,13 @@ yaml_valid() {
   ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$1" >/dev/null 2>&1
 }
 
+# Is the model already in the Hugging Face cache? Offline mode cannot start without it.
+model_cached() {
+  local model="${AVERY_MODEL:-unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M}" repo
+  repo="${model%%:*}"
+  [ -d "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${repo//\//--}/snapshots" ]
+}
+
 mail_bin() {
   local stable=""
   case "$ROOT" in
@@ -126,13 +133,14 @@ Befehle:
                          selftest-write, accounts, sendlog, revoke, status, help
   avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen
   avery down             Modell-Dienst beenden (gibt den Arbeitsspeicher frei)
+  avery pull             Modell einmalig laden (ca. 17 GB), im Vordergrund; mit Ctrl+C beenden, sobald es 'Ready' meldet
   avery model            lokales Modell im Vordergrund starten (zum Testen, ohne Dienst)
   avery app              Goose Desktop mit dem Avery-Profil starten
   avery cli [args]       Goose CLI mit dem Avery-Profil
   avery doctor           Voraussetzungen und Einrichtung pruefen
   avery version          Version anzeigen
 
-Erster Start: avery init, avery mail setup, avery mail selftest
+Erster Start: avery init, avery pull, avery mail setup, avery mail selftest
 Taeglich:     avery up   (und am Ende avery down)
 Einstellungen: $AVERY_HOME/avery.env (siehe README)
 EOF
@@ -184,8 +192,13 @@ cmd_model() {
     --max-memory "${AVERY_MAX_MEMORY:-28G}"
     --max-context "${AVERY_MAX_CONTEXT:-100K}"
     --max-cache-disk "${AVERY_MAX_CACHE_DISK:-4G}")
-  if [ "${AVERY_OFFLINE:-0}" = "1" ]; then args+=(--offline); fi
+  if [ "${AVERY_OFFLINE:-1}" = "1" ]; then args+=(--offline); fi
   launch "$splash" "${args[@]}" "$@"
+}
+
+cmd_pull() {
+  say "Das Modell wird einmalig geladen (ca. 17 GB). Sobald 'Ready' erscheint, mit Ctrl+C beenden."
+  AVERY_OFFLINE=0 cmd_model "$@"
 }
 
 cmd_app() {
@@ -216,6 +229,9 @@ cmd_up() {
   if model_healthy; then
     say "Das Modell laeuft bereits."
   else
+    if [ "${AVERY_OFFLINE:-1}" = "1" ] && [ "${AVERY_DRY_RUN:-}" != "1" ] && ! model_cached; then
+      die "Das Modell ist noch nicht geladen. Einmalig 'avery pull' ausfuehren (laedt ca. 17 GB, mit Ctrl+C beenden, sobald es 'Ready' meldet)."
+    fi
     say "Modell wird als Dienst gestartet (brew services) ..."
     run_cmd "$(brew_bin)" services run avery || die "Der Dienst liess sich nicht starten (ist avery per Homebrew installiert?)."
     if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
@@ -251,6 +267,7 @@ cmd_doctor() {
     miss "Goose Desktop -> brew install --cask block-goose"
   fi
   if command -v splash >/dev/null 2>&1; then ok "Splash ($(command -v splash))"; else miss "Splash -> brew install incoai/tap/splash"; fi
+  if model_cached; then ok "Modell im Cache"; else miss "Modell nicht im Cache -> avery pull"; fi
   if model_healthy; then ok "Modellserver laeuft"; else miss "Modellserver laeuft nicht -> avery up"; fi
   if [ -f "$GOOSE_ROOT/config/config.yaml" ]; then
     ok "Goose-Profil ($GOOSE_ROOT)"
@@ -286,6 +303,7 @@ main() {
     mail) cmd_mail "$@" ;;
     up) cmd_up "$@" ;;
     down) cmd_down "$@" ;;
+    pull) cmd_pull "$@" ;;
     model) cmd_model "$@" ;;
     app) cmd_app "$@" ;;
     cli) cmd_cli "$@" ;;

@@ -543,10 +543,13 @@ check("J16 AVERY_HOME bestimmt den Konfigurationspfad des Mail-Servers",
 expected_model = ("serve --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --served-model-name splash-local "
                   "--max-memory 28G --max-context 100K --max-cache-disk 4G")
 proc, _ = avery("model", env={"AVERY_DRY_RUN": "1"})
-check("J17 model: Standardwerte wie im bisherigen Setup, nicht offline",
-      proc.stdout.strip().endswith(expected_model) and "--offline" not in proc.stdout, proc.stdout)
-proc, _ = avery("model", env={"AVERY_DRY_RUN": "1", "AVERY_OFFLINE": "1"})
-check("J18 model: AVERY_OFFLINE=1 fuegt --offline hinzu", proc.stdout.strip().endswith("--offline"), proc.stdout)
+check("J17 model: Standardwerte wie im bisherigen Setup, offline",
+      proc.stdout.strip().endswith(expected_model + " --offline"), proc.stdout)
+proc, _ = avery("model", env={"AVERY_DRY_RUN": "1", "AVERY_OFFLINE": "0"})
+check("J18 model: AVERY_OFFLINE=0 laesst --offline weg", proc.stdout.strip().endswith(expected_model), proc.stdout)
+proc, _ = avery("pull", env={"AVERY_DRY_RUN": "1", "AVERY_OFFLINE": "1"})
+check("J18b pull laedt immer online, auch bei AVERY_OFFLINE=1",
+      proc.stdout.strip().endswith(expected_model) and "einmalig" in proc.stdout and "--offline" not in proc.stdout, proc.stdout)
 home4 = tempfile.mkdtemp(prefix="averytest-")
 TMPDIRS.append(home4)
 os.makedirs(home4 + "/.avery")
@@ -659,6 +662,22 @@ proc, _ = avery("doctor", env={"AVERY_MODEL_URL": alive_url})
 check("N4 doctor: Modell erreichbar", "ok      Modellserver laeuft" in proc.stdout, proc.stdout)
 proc, _ = avery("help")
 check("N5 help nennt up und down", "avery up" in proc.stdout and "avery down" in proc.stdout)
+
+empty_cache = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(empty_cache)
+proc, _ = avery("up", env={"AVERY_MODEL_URL": dead_url, "HF_HOME": empty_cache})
+check("N5b up ohne geladenes Modell: sofortiger Hinweis auf 'avery pull', kein Dienststart",
+      proc.returncode == 1 and "avery pull" in proc.stderr and "services run" not in proc.stdout, proc.stdout + proc.stderr)
+full_cache = tempfile.mkdtemp(prefix="averytest-")
+TMPDIRS.append(full_cache)
+os.makedirs(os.path.join(full_cache, "hub", "models--unsloth--Qwen3.8-27B-GGUF", "snapshots"))
+proc, _ = avery("doctor", env={"AVERY_MODEL_URL": dead_url, "HF_HOME": full_cache})
+check("N5c doctor: Modell im Cache erkannt", "ok      Modell im Cache" in proc.stdout, proc.stdout)
+proc, _ = avery("doctor", env={"AVERY_MODEL_URL": dead_url, "HF_HOME": empty_cache})
+check("N5d doctor: fehlendes Modell mit Hinweis auf pull", "Modell nicht im Cache -> avery pull" in proc.stdout, proc.stdout)
+os.makedirs(os.path.join(full_cache, "hub", "models--foo--bar", "snapshots"))
+proc, _ = avery("doctor", env={"AVERY_MODEL_URL": dead_url, "HF_HOME": full_cache, "AVERY_MODEL": "foo/bar:Q4"})
+check("N5e Cache-Pruefung folgt AVERY_MODEL", "ok      Modell im Cache" in proc.stdout, proc.stdout)
 
 if shutil.which("ruby"):
     proc, home_y = avery("init")

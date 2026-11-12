@@ -39,6 +39,7 @@ If the repository is public, tap it with `https://github.com/flavioaiello/avery`
 
 ```sh
 avery init            # create the Goose profile in ~/.avery/goose
+avery pull            # download the model once (about 17 GB); stop it with Ctrl+C when it says Ready
 avery mail setup      # choose which Mail accounts the agent may read
 avery mail selftest   # check read access (macOS asks once to let Terminal control Mail)
 ```
@@ -94,6 +95,7 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialog and drafts |
 | `avery mail status` / `accounts` / `sendlog` | Show configuration, Mail accounts, recent send attempts |
 | `avery up` / `avery down` | Start the model as a background service and open Goose / stop the service |
+| `avery pull` | Download the model once (online, foreground; Ctrl+C when it says Ready) |
 | `avery model` | Run the local model server in the foreground (no service) |
 | `avery app` / `avery cli` | Start Goose Desktop / the Goose CLI with the Avery profile |
 | `avery doctor` | Check prerequisites and setup |
@@ -105,6 +107,9 @@ The command line output is German for now.
 `avery init` creates `~/.avery/avery.env` (a commented template). Known keys: `AVERY_MODEL`, `AVERY_MAX_MEMORY`,
 `AVERY_MAX_CONTEXT`, `AVERY_MAX_CACHE_DISK`, `AVERY_OFFLINE`, `AVERY_GOOSE_APP`, `AVERY_GOOSE_ROOT`. The file is parsed,
 not executed, and real environment variables win. The defaults are tuned for a 48 GB Mac.
+
+The model runs offline by default (`AVERY_OFFLINE=1`): Avery never downloads anything on its own, so a service start
+cannot pull a new multi-gigabyte model revision. `avery pull` is the one command that goes online.
 
 | Path | Content |
 |---|---|

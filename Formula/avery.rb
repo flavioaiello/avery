@@ -3,8 +3,8 @@ class Avery < Formula
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,
-      tag:      "v0.2.0",
-      revision: "1173517e8cadf29504252d320e30bc7d34c7836d"
+      tag:      "v0.2.1",
+      revision: "0000000000000000000000000000000000000000"
   license "MIT"
   head "git@github.com:flavioaiello/avery.git", using: :git, branch: "main"
 
@@ -34,6 +34,7 @@ class Avery < Formula
 
       First run:
         avery init
+        avery pull     # downloads the model once (about 17 GB); Ctrl+C when it says Ready
         avery mail setup
         avery mail selftest
 
