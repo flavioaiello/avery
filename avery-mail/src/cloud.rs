@@ -734,4 +734,135 @@ mod tests {
         assert!(api(&transport).get_many(&[]).is_empty());
         Ok(())
     }
+    struct Never;
+
+    impl Host for Never {
+        fn ensure_running(&self, _app: crate::osascript::App) {}
+
+        fn run(
+            &self,
+            _app: crate::osascript::App,
+            _payload: &str,
+            _timeout: Duration,
+        ) -> crate::osascript::Finished {
+            crate::osascript::Finished::NotStarted
+        }
+    }
+
+    fn account(id: &str) -> Account {
+        crate::account::with_labels(vec![MailAccount {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: String::new(),
+            addresses: Vec::new(),
+        }])
+        .remove(0)
+    }
+
+    fn mail_with(vault: crate::vault::memory::Memory) -> CloudMail {
+        CloudMail::new(Box::new(Scripted::new()), Box::new(vault), Box::new(Never))
+    }
+
+    fn query() -> MessageQuery {
+        MessageQuery {
+            mailbox: None,
+            since_days: 3,
+            unread_only: false,
+            query: None,
+            field: "both".to_string(),
+            limit: 5,
+        }
+    }
+
+    #[test]
+    fn cloud_mail_needs_a_cloud_account_and_a_stored_sign_in() -> TestResult {
+        let mail = mail_with(crate::vault::memory::Memory::new());
+        let apple = account("5F3E-4C");
+        let nonsense = account("google:nonsense");
+        let unlinked = account("google:alice@gmail.example");
+        for subject in [&apple, &nonsense] {
+            let Err(error) = mail.mailboxes(subject) else {
+                return Err("expected an error".into());
+            };
+            assert!(
+                error
+                    .message()
+                    .contains("not a linked Gmail or Outlook.com account"),
+                "{error}"
+            );
+        }
+        for result in [
+            mail.mailboxes(&unlinked).map(|_| ()),
+            mail.messages(&unlinked, &query()).map(|_| ()),
+            mail.account_info(&unlinked).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&result, Err(ToolError::Msg(text)) if text.contains("not linked") && text.contains("avery mail link google")),
+                "{result:?}"
+            );
+        }
+        assert_eq!(mail.all_accounts(), Ok(Vec::new()));
+        Ok(())
+    }
+
+    #[test]
+    fn the_mail_router_sends_apple_accounts_to_apple_and_the_rest_to_the_cloud() -> TestResult {
+        let router = MailRouter::new(
+            Box::new(crate::fake::FakeBackend::new(
+                crate::fake::FakeOptions::default(),
+            )),
+            mail_with(crate::vault::memory::Memory::new()),
+        );
+        let demo = account("FAKE-GMAIL");
+        assert!(router.mailboxes(&demo).is_ok());
+        assert!(!router.all_accounts()?.is_empty());
+        let cloud = account("microsoft:bob@outlook.example");
+        assert!(matches!(
+            router.mailboxes(&cloud),
+            Err(ToolError::Msg(text)) if text.contains("not linked")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cloud_calendars_need_a_stored_sign_in_and_apple_ones_stay_with_apple() -> TestResult {
+        let calendar = CloudCalendar::new(
+            Box::new(Scripted::new()),
+            Box::new(crate::vault::memory::Memory::new()),
+            Box::new(Never),
+        );
+        let router = CalendarRouter::new(
+            Box::new(crate::calendar::FakeCalendar::new(
+                crate::fake::FakeOptions::default(),
+            )),
+            calendar,
+        );
+        assert!(!router.calendars(Source::Apple, "")?.is_empty());
+        assert!(matches!(
+            router.calendars(Source::Google, "alice@gmail.example"),
+            Err(ToolError::Msg(text)) if text.contains("not linked")
+        ));
+        let window = Window {
+            from: crate::civil::DateTime::parse("2030-05-06 00:00").ok_or("from")?,
+            to: crate::civil::DateTime::parse("2030-05-07 00:00").ok_or("to")?,
+        };
+        let cloud = Calendar {
+            id: "google:alice@gmail.example:alice@gmail.example".to_string(),
+            name: "alice@gmail.example".to_string(),
+            label: "alice@gmail.example".to_string(),
+        };
+        assert!(matches!(
+            router.events(&cloud, window),
+            Err(ToolError::Msg(text)) if text.contains("not linked") || text.contains("time zone")
+        ));
+        let broken = Calendar {
+            id: "google:nonsense".to_string(),
+            ..cloud
+        };
+        assert!(matches!(
+            router.event(&broken, "x"),
+            Err(ToolError::Msg(text)) if text.contains("not a linked")
+        ));
+        Ok(())
+    }
 }
