@@ -122,8 +122,9 @@ dialogs cannot be shown or are cancelled, Avery still starts. `avery mail onboar
 
 The dialogs come from the helper `/usr/bin/osascript` and show only on the Mac's screen; the agent can neither start
 them nor answer them (the server `avery-mail serve` has no code path to them). They run inside that helper and send no
-Apple event to another app. macOS may still ask for a permission, for example to show notifications now, or Automation
-later for the approval dialogs: allow it (System Settings > Privacy & Security).
+Apple event to another app, and neither do the approval dialogs. macOS may ask for permission to show notifications
+(System Settings > Notifications). Only the optional Apple bridge makes macOS ask once for Automation, because it
+controls Mail and Calendar (System Settings > Privacy & Security): allow what Avery should use.
 
 If a step fails (for example macOS blocks the dialogs, the *Nicht mehr fragen* marker cannot be saved or `config.json`
 cannot be read), the setup ends and says why: as `Fehler: ...` in a terminal and, where macOS shows notifications, as a

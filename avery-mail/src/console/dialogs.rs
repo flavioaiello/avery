@@ -257,7 +257,7 @@ fn failure(text: &str, _op: Option<&str>, _uncertain: bool) -> ToolError {
     if low.contains("-1743") || low.contains("not authorized") || low.contains("nicht berechtigt") {
         return ToolError::msg(concat!(
             "macOS erlaubt die Dialoge nicht. Bitte in den Systemeinstellungen unter Datenschutz & Sicherheit die ",
-            "Berechtigung erlauben (Automation oder Benachrichtigungen) und Avery neu starten."
+            "Automation erlauben (Benachrichtigungen unter Mitteilungen) und Avery neu starten."
         ));
     }
     if low.contains("bad_request") {
