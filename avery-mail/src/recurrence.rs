@@ -500,6 +500,7 @@ pub(crate) fn expand(
     excluded: &[Date],
     window: (Date, Date),
     max: usize,
+    budget: &mut i64,
 ) -> Result<Expansion, Exceeded> {
     let (from, to) = window;
     let origin = start.date();
@@ -524,7 +525,8 @@ pub(crate) fn expand(
     let mut periods: i64 = 0;
     'periods: loop {
         periods += 1;
-        if periods > MAX_PERIODS {
+        *budget -= 1;
+        if periods > MAX_PERIODS || *budget < 0 {
             return Err(Exceeded);
         }
         let Some(begin) = period_start(rule, origin, index) else {
@@ -565,6 +567,26 @@ mod tests {
     use super::*;
     use crate::testutil::TestResult;
 
+    fn expand_all(
+        rule: &Rule,
+        start: DateTime,
+        utc_offset_minutes: i64,
+        excluded: &[Date],
+        window: (Date, Date),
+        max: usize,
+    ) -> Result<Expansion, Exceeded> {
+        let mut budget = 1_000_000;
+        expand(
+            rule,
+            start,
+            utc_offset_minutes,
+            excluded,
+            window,
+            max,
+            &mut budget,
+        )
+    }
+
     fn rule(text: &str) -> Result<Rule, String> {
         parse(text).map_err(|error| format!("{text}: {error:?}"))
     }
@@ -586,7 +608,7 @@ mod tests {
         for text in excluded {
             skipped.push(day(text)?);
         }
-        let result = expand(&parsed, start, 0, &skipped, (day(from)?, day(to)?), 1000)
+        let result = expand_all(&parsed, start, 0, &skipped, (day(from)?, day(to)?), 1000)
             .map_err(|_| "exceeded")?;
         Ok(result.dates.iter().map(Date::to_string).collect())
     }
@@ -869,9 +891,9 @@ mod tests {
         let rule = rule("FREQ=DAILY;UNTIL=20261103T080000Z")?;
         let start = DateTime::parse("2026-11-01 09:00").ok_or("start")?;
         let window = (day("2026-11-01")?, day("2026-12-01")?);
-        let in_winter = expand(&rule, start, 60, &[], window, 100).map_err(|_| "exceeded")?;
+        let in_winter = expand_all(&rule, start, 60, &[], window, 100).map_err(|_| "exceeded")?;
         assert_eq!(in_winter.dates.len(), 3);
-        let shifted = expand(&rule, start, 0, &[], window, 100).map_err(|_| "exceeded")?;
+        let shifted = expand_all(&rule, start, 0, &[], window, 100).map_err(|_| "exceeded")?;
         assert_eq!(shifted.dates.len(), 2);
         Ok(())
     }
@@ -931,7 +953,7 @@ mod tests {
     fn at_most_max_dates_and_a_flag() -> TestResult {
         let rule = rule("FREQ=DAILY")?;
         let start = DateTime::parse("2026-01-01 09:00").ok_or("start")?;
-        let result = expand(
+        let result = expand_all(
             &rule,
             start,
             0,
@@ -942,7 +964,7 @@ mod tests {
         .map_err(|_| "exceeded")?;
         assert_eq!(result.dates.len(), 10);
         assert!(result.truncated);
-        let none = expand(
+        let none = expand_all(
             &rule,
             start,
             0,
@@ -952,7 +974,7 @@ mod tests {
         )
         .map_err(|_| "exceeded")?;
         assert!(none.dates.is_empty() && none.truncated);
-        let exact = expand(
+        let exact = expand_all(
             &rule,
             start,
             0,
@@ -970,7 +992,7 @@ mod tests {
     fn rules_that_never_match_stop_with_an_error() -> TestResult {
         let counted = rule("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;COUNT=5")?;
         let start = DateTime::parse("2026-02-10 09:00").ok_or("start")?;
-        let outcome = expand(
+        let outcome = expand_all(
             &counted,
             start,
             0,
@@ -980,7 +1002,7 @@ mod tests {
         );
         assert!(outcome.is_ok() || outcome == Err(Exceeded));
         let open = rule("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30")?;
-        let outcome = expand(
+        let outcome = expand_all(
             &open,
             start,
             0,
@@ -990,6 +1012,35 @@ mod tests {
         )
         .map_err(|_| "exceeded")?;
         assert_eq!(outcome.dates, [day("2026-02-10")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_shared_budget_stops_the_work_of_many_expensive_series() -> TestResult {
+        let counted = rule("FREQ=DAILY;COUNT=50000")?;
+        let start = DateTime::parse("2000-01-01 09:00").ok_or("start")?;
+        let window = (day("2026-11-01")?, day("2026-11-08")?);
+        let mut budget = 25_000;
+        let first = expand(&counted, start, 0, &[], window, 100, &mut budget);
+        assert!(first.is_ok());
+        assert!(budget < 25_000 - 9000 && budget > 0, "{budget}");
+        let second = expand(&counted, start, 0, &[], window, 100, &mut budget);
+        assert!(second.is_ok());
+        let third = expand(&counted, start, 0, &[], window, 100, &mut budget);
+        assert_eq!(third, Err(Exceeded));
+        let mut empty = 0;
+        assert_eq!(
+            expand(&counted, start, 0, &[], window, 100, &mut empty),
+            Err(Exceeded)
+        );
+        let open = rule("FREQ=DAILY")?;
+        let mut small = 50;
+        assert!(expand(&open, start, 0, &[], window, 100, &mut small).is_ok());
+        let mut tiny = 3;
+        assert_eq!(
+            expand(&open, start, 0, &[], window, 100, &mut tiny),
+            Err(Exceeded)
+        );
         Ok(())
     }
 

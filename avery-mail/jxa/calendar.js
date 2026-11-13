@@ -227,7 +227,9 @@ function changeEvent(cal, req) {
     ev = verifiedEvent(cal, req);
     if (req.action === 'update') { localDate(after.start); localDate(after.end); }
   }
-  decision = showDialog(req.undo ? 'Goose: \u00c4nderung r\u00fcckg\u00e4ngig machen' : 'Goose m\u00f6chte einen Termin \u00e4ndern',
+  decision = showDialog(req.undo ? 'Goose: \u00c4nderung r\u00fcckg\u00e4ngig machen' :
+                        {create: 'Goose m\u00f6chte einen Termin anlegen', update: 'Goose m\u00f6chte einen Termin \u00e4ndern',
+                         'delete': 'Goose m\u00f6chte einen Termin l\u00f6schen'}[req.action],
                         dialogLines(req, before, after),
                         {create: 'Anlegen', update: '\u00c4ndern', 'delete': 'L\u00f6schen'}[req.action], req.seconds);
   if (decision === 'declined') { return {status: 'declined'}; }

@@ -12,6 +12,7 @@ const MAX_DAYS: i64 = 60;
 const DEFAULT_LIMIT: i64 = 30;
 const MAX_LIMIT: i64 = 100;
 const MAX_OCCURRENCES_PER_EVENT: usize = 400;
+const PERIOD_BUDGET: i64 = 400_000;
 const MAX_NOTES_SHOWN: usize = 4000;
 const MAX_PEOPLE_SHOWN: usize = 20;
 const FIRST_YEAR: i64 = 1970;
@@ -93,6 +94,7 @@ fn expand<'a>(
     window: Window,
     unexpanded: &mut Vec<String>,
     truncated: &mut bool,
+    budget: &mut i64,
 ) -> Vec<Occurrence<'a>> {
     let single = |repeats: Option<String>| -> Vec<Occurrence<'a>> {
         if overlaps(event.start, event.end, window) {
@@ -131,6 +133,7 @@ fn expand<'a>(
         &event.excluded,
         (first, last),
         MAX_OCCURRENCES_PER_EVENT,
+        budget,
     ) else {
         unexpanded.push(one_line_str(&event.summary, 80));
         return single(Some(format!(
@@ -236,6 +239,7 @@ pub(crate) fn list_events(ctx: &Context, args: &Object) -> ToolResult<String> {
     }
     let mut unexpanded: Vec<String> = Vec::new();
     let mut truncated = false;
+    let mut budget = PERIOD_BUDGET;
     let mut rows: Vec<Occurrence> = Vec::new();
     for (calendar, events) in &fetched {
         for event in events {
@@ -245,6 +249,7 @@ pub(crate) fn list_events(ctx: &Context, args: &Object) -> ToolResult<String> {
                 window,
                 &mut unexpanded,
                 &mut truncated,
+                &mut budget,
             ));
         }
     }
@@ -676,6 +681,46 @@ mod tests {
         assert!(text.contains("Titel a, Titel b"));
         assert!(text.contains("attendees unknown"));
         assert!(text.contains("repeats every day"));
+        Ok(())
+    }
+
+    #[test]
+    fn many_expensive_series_cannot_use_up_unbounded_time_and_are_flagged() -> TestResult {
+        let mut events = Vec::new();
+        for index in 0..120 {
+            let mut event = raw(
+                &format!("s{index}"),
+                "2000-01-01 09:00",
+                "2000-01-01 10:00",
+                "FREQ=DAILY;COUNT=50000",
+            )?;
+            event.summary = format!("Serie {index}");
+            events.push(event);
+        }
+        let ctx = stubbed(events);
+        let started = std::time::Instant::now();
+        let text = list_events(
+            &ctx,
+            &args(r#"{"start": "2026-11-03", "days": 1, "calendar": "privat", "limit": 100}"#)?,
+        )?;
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert!(
+            text.contains("Note: these recurring events use a rule that cannot be expanded"),
+            "{text}"
+        );
+        assert!(text.contains("Serie 119"), "{text}");
+        let few = stubbed(vec![raw(
+            "one",
+            "2000-01-01 09:00",
+            "2000-01-01 10:00",
+            "FREQ=DAILY;COUNT=50000",
+        )?]);
+        let text = list_events(
+            &few,
+            &args(r#"{"start": "2026-11-03", "days": 1, "calendar": "privat"}"#)?,
+        )?;
+        assert!(!text.contains("too many occurrences"), "{text}");
+        assert!(text.contains("repeats every day"), "{text}");
         Ok(())
     }
 
