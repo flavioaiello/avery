@@ -10,6 +10,27 @@ use crate::server::{self, Line};
 
 pub(crate) use dialogs::{Buttons, Dialogs, Icon, List, Stop, Talk};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Area {
+    Mail,
+    Calendar,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GrantChange {
+    pub(crate) area: Area,
+    pub(crate) title: String,
+    pub(crate) was: Option<Level>,
+    pub(crate) now: Option<Level>,
+}
+
+pub(crate) struct Recap {
+    pub(crate) mail: String,
+    pub(crate) calendars: String,
+    pub(crate) changes: Vec<GrantChange>,
+    pub(crate) command: String,
+}
+
 const MAX_ANSWER_BYTES: usize = 8192;
 const LEVEL_ATTEMPTS: usize = 3;
 const INVALID: &str = "Ungueltige Eingabe.";
@@ -71,6 +92,13 @@ impl<'a> Console<'a> {
         }
     }
 
+    pub(crate) fn confirm_grants(&mut self, recap: &Recap) -> bool {
+        match self {
+            Console::Terminal(terminal) => terminal.confirm_grants(recap),
+            Console::Dialogs(dialogs) => dialogs.confirm_grants(recap),
+        }
+    }
+
     pub(crate) fn explain(&mut self, topic: Topic) -> bool {
         match self {
             Console::Terminal(terminal) => terminal.explain(topic),
@@ -129,6 +157,13 @@ impl Terminal<'_> {
                     "j" | "ja" | "y" | "yes"
                 )
             })
+    }
+
+    fn confirm_grants(&mut self, recap: &Recap) -> bool {
+        self.say("\nNeue Freigaben:");
+        self.say(&format!("  Mail:     {}", recap.mail));
+        self.say(&format!("  Kalender: {}", recap.calendars));
+        self.confirm("Korrekt?")
     }
 
     fn explain(&mut self, topic: Topic) -> bool {

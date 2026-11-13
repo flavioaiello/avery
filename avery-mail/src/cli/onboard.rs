@@ -372,7 +372,13 @@ impl<'a> Flow<'a> {
                     None
                 }
                 Some(listed) => match setup_calendars(&mut console, account, listed) {
-                    Ok(()) => Some(finish(self.ctx, &mut console, &before, &rights)),
+                    Ok(()) => Some(finish(
+                        self.ctx,
+                        &mut console,
+                        &before,
+                        &rights,
+                        "avery mail setup",
+                    )),
                     Err(code) => Some(code),
                 },
             }

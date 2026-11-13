@@ -12,7 +12,8 @@ use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
 use crate::config::{UpdateError, WriteSettings};
 use crate::console::{
-    failed, level_word, Choice, Console, Screen, Topic, PRIVATE_ONLY, RESTART_GOOSE,
+    failed, level_word, Area, Choice, Console, GrantChange, Recap, Screen, Topic, PRIVATE_ONLY,
+    RESTART_GOOSE,
 };
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
@@ -350,18 +351,91 @@ fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
     0
 }
 
-fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights) -> u8 {
+struct Held {
+    id: String,
+    title: String,
+    level: Level,
+}
+
+fn mail_held(rights: &Rights) -> Vec<Held> {
+    rights
+        .mail_entries()
+        .into_iter()
+        .map(|(account, level)| Held {
+            id: account.id,
+            title: account.name,
+            level,
+        })
+        .collect()
+}
+
+fn calendar_held(rights: &Rights) -> Vec<Held> {
+    rights
+        .calendar_entries()
+        .into_iter()
+        .map(|(calendar, level)| Held {
+            id: calendar.id,
+            title: calendar.name,
+            level,
+        })
+        .collect()
+}
+
+fn changes_between(area: Area, before: &[Held], after: &[Held]) -> Vec<GrantChange> {
+    let mut changes: Vec<GrantChange> = Vec::new();
+    for now in after {
+        let was = before.iter().find(|known| known.id == now.id);
+        if was.is_some_and(|known| known.level == now.level && known.title == now.title) {
+            continue;
+        }
+        changes.push(GrantChange {
+            area,
+            title: now.title.clone(),
+            was: was.map(|known| known.level),
+            now: Some(now.level),
+        });
+    }
+    for was in before {
+        if !after.iter().any(|now| now.id == was.id) {
+            changes.push(GrantChange {
+                area,
+                title: was.title.clone(),
+                was: Some(was.level),
+                now: None,
+            });
+        }
+    }
+    changes
+}
+
+fn grant_changes(before: &Rights, after: &Rights) -> Vec<GrantChange> {
+    let mut changes = changes_between(Area::Mail, &mail_held(before), &mail_held(after));
+    changes.extend(changes_between(
+        Area::Calendar,
+        &calendar_held(before),
+        &calendar_held(after),
+    ));
+    changes
+}
+
+fn finish(
+    ctx: &Context,
+    console: &mut Console,
+    before: &Rights,
+    rights: &Rights,
+    command: &str,
+) -> u8 {
     if rights == before {
         console.say("Unveraendert.");
         return 0;
     }
-    console.say("\nNeue Freigaben:");
-    console.say(&format!("  Mail:     {}", granted(&mail_grants(rights))));
-    console.say(&format!(
-        "  Kalender: {}",
-        granted(&calendar_grants(rights))
-    ));
-    if !console.confirm("Korrekt?") {
+    let recap = Recap {
+        mail: granted(&mail_grants(rights)),
+        calendars: granted(&calendar_grants(rights)),
+        changes: grant_changes(before, rights),
+        command: command.to_string(),
+    };
+    if !console.confirm_grants(&recap) {
         console.say("Abgebrochen.");
         return 1;
     }
@@ -453,7 +527,7 @@ fn setup_calendars(
         .map(|grant| grant.name.clone())
         .collect();
     if !gone.is_empty() {
-        console.say(&format!(
+        console.hint(&format!(
             "Nicht mehr vorhanden, wird entfernt: {}",
             gone.join(", ")
         ));
@@ -573,7 +647,7 @@ fn setup_accounts(ctx: &Context, console: &mut Console) -> u8 {
             return code;
         }
     }
-    let code = finish(ctx, console, &before, &rights);
+    let code = finish(ctx, console, &before, &rights, "avery mail setup");
     if code == 0 && !rights.apple.enabled() {
         console.say(&apple_hint());
     }
@@ -703,7 +777,7 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
         .map(|(_, name)| name.to_string())
         .collect();
     if !gone.is_empty() {
-        console.say(&format!(
+        console.hint(&format!(
             "Nicht mehr vorhanden, wird entfernt: {}",
             gone.join(", ")
         ));
@@ -731,7 +805,7 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
             .collect(),
     };
     rights.apple = apple;
-    let code = finish(ctx, console, &before, &rights);
+    let code = finish(ctx, console, &before, &rights, &apple_command());
     if code == 0 && before.apple.enabled() && !rights.apple.enabled() {
         console.say(&format!(
             "{} sind wieder aus: Avery startet sie nicht mehr.",
@@ -2099,7 +2173,9 @@ mod tests {
     use crate::journal;
     use crate::json::Json;
     use crate::provider::Linker;
-    use crate::testutil::{dark, gm, j, log_entry, settings_at, TempDir, TestResult, Untouchable};
+    use crate::testutil::{
+        args, dark, gm, j, log_entry, settings_at, TempDir, TestResult, Untouchable,
+    };
     use std::fs;
     use std::io::{BufRead, Cursor, Read};
 
@@ -2198,6 +2274,69 @@ mod tests {
             }
             assert_eq!(apple.calls(), 0, "{config:?}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn the_changes_between_two_states_are_the_new_the_moved_the_renamed_and_the_removed_grants(
+    ) -> TestResult {
+        let before = Rights::parse(&args(
+            r#"{"version": 3,
+                "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "read",
+                    "calendars": [{"id": "c1", "name": "Eins", "level": "read"},
+                                  {"id": "c2", "name": "Zwei", "level": "write"},
+                                  {"id": "c3", "name": "Drei", "level": "read"},
+                                  {"id": "c6", "name": "Sechs", "level": "read"}]}],
+                "apple": {"calendars": [{"id": "A1", "name": "Privat", "level": "read"}]}}"#,
+        )?)?;
+        let after = Rights::parse(&args(
+            r#"{"version": 3,
+                "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write",
+                    "calendars": [{"id": "c1", "name": "Eins", "level": "read"},
+                                  {"id": "c2", "name": "Zwei", "level": "read"},
+                                  {"id": "c3", "name": "Drei neu", "level": "read"},
+                                  {"id": "c4", "name": "Vier", "level": "write"}]}],
+                "apple": {"calendars": [{"id": "A1", "name": "Privat", "level": "read"},
+                                        {"id": "A2", "name": "Neu", "level": "write"}]}}"#,
+        )?)?;
+        let changes = grant_changes(&before, &after);
+        let found: Vec<(Area, &str, Option<Level>, Option<Level>)> = changes
+            .iter()
+            .map(|change| (change.area, change.title.as_str(), change.was, change.now))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    Area::Mail,
+                    "alice@gmail.example",
+                    Some(Level::Read),
+                    Some(Level::Write)
+                ),
+                (
+                    Area::Calendar,
+                    "Zwei",
+                    Some(Level::Write),
+                    Some(Level::Read)
+                ),
+                (
+                    Area::Calendar,
+                    "Drei neu",
+                    Some(Level::Read),
+                    Some(Level::Read)
+                ),
+                (Area::Calendar, "Vier", None, Some(Level::Write)),
+                (Area::Calendar, "Neu", None, Some(Level::Write)),
+                (Area::Calendar, "Sechs", Some(Level::Read), None),
+            ]
+        );
+        assert!(grant_changes(&before, &before).is_empty());
+        assert!(grant_changes(&after, &after).is_empty());
+        let reversed = grant_changes(&after, &before);
+        assert_eq!(reversed.len(), 6);
+        assert!(reversed
+            .iter()
+            .any(|change| change.title == "Neu" && change.now.is_none()));
         Ok(())
     }
 

@@ -97,10 +97,14 @@ setup before Goose starts. They are a thin layer over the very same code as `ave
    the client ID (for Gmail also the client secret, which is typed hidden), the level (*Nur lesen* or *Lesen und mit Freigabe
    schreiben*), the sign-in in the browser (Avery waits at most 3 minutes and says so in a notification, if macOS shows
    notifications), and a dialog with the result: the address that is now linked, or the reason why not.
-4. **Calendars.** Choose the calendars Avery may read, then which of them it may also write. A last dialog shows what will be
-   saved; only *Ja* saves it.
+4. **Calendars.** Choose the calendars Avery may read, then which of them it may also write. A last dialog lists exactly what
+   will be saved: one line for every grant that changes (not for the ones that stay as they are), the write grants first,
+   under a count such as "3 Kalender zum Schreiben, 9 zum Lesen". Only *Ja* saves it. If the list does not fit into one
+   dialog, it is not shown and cannot be confirmed: nothing is saved, and the next dialog says to use `avery mail setup` in a
+   terminal.
 5. **Apple** (only if you chose it). It first explains that macOS asks once for permission to control Mail and Calendar, then
-   asks for the levels like `avery mail setup apple`.
+   asks for the levels like `avery mail setup apple`, and ends with the same kind of final dialog (the terminal command for
+   a list that does not fit is `avery mail setup apple`).
 6. **Summary.** What is linked, and the offer to run the read check (`avery mail selftest`) now and show its result.
 
 Every dialog can be cancelled, and cancelling means: stop, nothing more is saved. What was completed before stays

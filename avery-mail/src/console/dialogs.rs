@@ -1,13 +1,13 @@
 use std::fmt;
 
-use super::{Choice, Topic};
+use super::{level_word, Area, Choice, GrantChange, Recap, Topic};
 use crate::error::ToolError;
 use crate::json::{Json, Object};
 use crate::jxa::exchange;
 use crate::osascript::{App, Host};
 use crate::provider::{Page, Provider};
-use crate::rights::Level;
-use crate::text::{clean_str, one_line_str};
+use crate::rights::{Level, MAX_NAME};
+use crate::text::{char_len, clean_str, one_line_str};
 
 const SLACK: u64 = 60;
 const ANSWER_SECONDS: u64 = 600;
@@ -26,6 +26,8 @@ const MAX_CLIENT: usize = 400;
 const MAX_NOTE_LINE: usize = 400;
 const MAX_NOTE_LINES: usize = 200;
 const MAX_NOTE_CHARS: usize = 1500;
+const MAX_RECAP_LINES: usize = 30;
+const ANY_COMMAND: &str = "avery mail setup (bzw. avery mail setup apple)";
 const CUT: &str = "[...]";
 const TIMED_OUT: &str = "Keine Antwort im Dialog.";
 const TOO_LONG: &str = "Die Eingabe war zu lang.";
@@ -72,10 +74,25 @@ struct Notes {
     cut: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Taken {
+    text: String,
+    cut: bool,
+}
+
+struct Framed {
+    text: String,
+    cut: bool,
+}
+
 impl Notes {
     fn push(&mut self, text: &str) {
         for line in text.split('\n') {
-            self.lines.push(clean_str(line, Some(MAX_NOTE_LINE)));
+            let cleaned = clean_str(line, None);
+            if char_len(&cleaned) > MAX_NOTE_LINE {
+                self.cut = true;
+            }
+            self.lines.push(clean_str(&cleaned, Some(MAX_NOTE_LINE)));
             if self.lines.len() > MAX_NOTE_LINES {
                 self.lines.remove(0);
                 self.cut = true;
@@ -83,7 +100,7 @@ impl Notes {
         }
     }
 
-    fn take(&mut self) -> String {
+    fn take(&mut self) -> Taken {
         let mut cut = std::mem::take(&mut self.cut);
         let lines = std::mem::take(&mut self.lines);
         let mut kept: Vec<&str> = Vec::new();
@@ -99,9 +116,18 @@ impl Notes {
         kept.reverse();
         let body = clean_str(&kept.join("\n"), None);
         match (cut, body.is_empty()) {
-            (_, true) => String::new(),
-            (true, false) => format!("{CUT}\n{body}"),
-            (false, false) => body,
+            (_, true) => Taken {
+                text: String::new(),
+                cut: false,
+            },
+            (true, false) => Taken {
+                text: format!("{CUT}\n{body}"),
+                cut: true,
+            },
+            (false, false) => Taken {
+                text: body,
+                cut: false,
+            },
         }
     }
 }
@@ -130,7 +156,7 @@ impl Talk {
     }
 
     pub(crate) fn take_notes(&mut self) -> String {
-        self.notes.take()
+        self.notes.take().text
     }
 }
 
@@ -269,6 +295,85 @@ fn numbered(index: usize, text: &str) -> String {
     format!("{}. {}", index + 1, one_line_str(text, MAX_ITEM))
 }
 
+fn too_many(command: &str) -> String {
+    format!("Es sind zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: {command}")
+}
+
+fn rank(level: Option<Level>) -> u8 {
+    match level {
+        Some(Level::Write) => 2,
+        Some(Level::Read) => 1,
+        None => 0,
+    }
+}
+
+fn counted(changes: &[&GrantChange], area: Area) -> Option<String> {
+    let (one, many) = match area {
+        Area::Mail => ("Konto", "Konten"),
+        Area::Calendar => ("Kalender", "Kalender"),
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for (level, label) in [
+        (Some(Level::Write), "zum Schreiben"),
+        (Some(Level::Read), "zum Lesen"),
+        (None, "entzogen"),
+    ] {
+        let count = changes
+            .iter()
+            .filter(|change| change.area == area && change.now == level)
+            .count();
+        if count == 0 {
+            continue;
+        }
+        let noun = match (parts.is_empty(), count) {
+            (false, _) => "",
+            (true, 1) => &format!(" {one}"),
+            (true, _) => &format!(" {many}"),
+        };
+        parts.push(format!("{count}{noun} {label}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+fn recap_text(changes: &[GrantChange]) -> Option<String> {
+    if changes.len() > MAX_RECAP_LINES {
+        return None;
+    }
+    let mut ordered: Vec<&GrantChange> = changes.iter().collect();
+    ordered.sort_by_key(|change| std::cmp::Reverse(rank(change.now)));
+    let header: Vec<String> = [Area::Mail, Area::Calendar]
+        .into_iter()
+        .filter_map(|area| counted(&ordered, area))
+        .collect();
+    let mut text = if header.is_empty() {
+        "Neue Freigaben: keine Aenderung".to_string()
+    } else {
+        format!("Neue Freigaben: {}", header.join("; "))
+    };
+    for change in ordered {
+        let title = one_line_str(&change.title, usize::MAX);
+        if char_len(&title) > MAX_NAME {
+            return None;
+        }
+        let area = match change.area {
+            Area::Mail => "Mail",
+            Area::Calendar => "Kalender",
+        };
+        let before = change
+            .was
+            .filter(|was| Some(*was) != change.now)
+            .map_or_else(String::new, |was| {
+                format!(" [bisher: {}]", level_word(Some(was)))
+            });
+        text.push_str(&format!(
+            "\n{area}: {title} ({}){before}",
+            level_word(change.now)
+        ));
+    }
+    text.push_str("\n\nKorrekt?");
+    (char_len(&text) <= MAX_TEXT).then_some(text)
+}
+
 pub(crate) struct Dialogs<'a> {
     host: &'a dyn Host,
     talk: &'a mut Talk,
@@ -287,14 +392,27 @@ impl<'a> Dialogs<'a> {
         request
     }
 
-    fn framed(&mut self, text: &str) -> String {
+    fn framed(&mut self, text: &str) -> Framed {
         let own = clean_str(text, Some(MAX_TEXT));
+        let own_cut = char_len(&clean_str(text, None)) > MAX_TEXT;
         let notes = self.talk.notes.take();
         let room = MAX_TEXT.saturating_sub(own.chars().count() + 2);
-        if notes.is_empty() || room < CUT.len() + 8 {
-            return own;
+        if notes.text.is_empty() {
+            return Framed {
+                text: own,
+                cut: own_cut,
+            };
         }
-        format!("{}\n\n{own}", tail(&notes, room))
+        if room < CUT.len() + 8 {
+            return Framed {
+                text: own,
+                cut: true,
+            };
+        }
+        Framed {
+            text: format!("{}\n\n{own}", tail(&notes.text, room)),
+            cut: own_cut || notes.cut || char_len(&notes.text) > room,
+        }
     }
 
     fn converse(&self, request: Object, wait: u64) -> Result<Parsed, Stop> {
@@ -326,7 +444,7 @@ impl<'a> Dialogs<'a> {
 
     pub(crate) fn ask_text(&mut self, ask: &Text) -> Result<String, Stop> {
         let max = ask.max.clamp(1, MAX_ANSWER);
-        let text = self.framed(ask.text);
+        let text = self.framed(ask.text).text;
         let mut request = self.base("ask_text", &text);
         request.insert("default", one_line_str(ask.default, max));
         request.insert("hidden", ask.hidden);
@@ -354,8 +472,12 @@ impl<'a> Dialogs<'a> {
         if !valid {
             return Err(self.fail(BAD_REQUEST));
         }
-        let text = self.framed(ask.text);
-        let mut request = self.base("ask_buttons", &text);
+        let text = self.framed(ask.text).text;
+        self.buttons_asked(&text, ask)
+    }
+
+    fn buttons_asked(&mut self, text: &str, ask: &Buttons) -> Result<usize, Stop> {
+        let mut request = self.base("ask_buttons", text);
         let names: Vec<String> = ask.buttons.iter().map(|name| label(name)).collect();
         request.insert("buttons", names);
         request.insert("default", ask.default);
@@ -372,7 +494,7 @@ impl<'a> Dialogs<'a> {
         if ask.items.is_empty() || ask.items.len() > MAX_ITEMS {
             return Err(self.fail(BAD_REQUEST));
         }
-        let text = self.framed(ask.text);
+        let text = self.framed(ask.text).text;
         let mut request = self.base("choose_list", &text);
         let items: Vec<String> = ask
             .items
@@ -447,16 +569,33 @@ impl<'a> Dialogs<'a> {
     }
 
     pub(crate) fn confirm(&mut self, question: &str) -> bool {
-        matches!(
-            self.ask_buttons(&Buttons {
-                text: question,
-                buttons: &["Nein", "Ja"],
-                default: 0,
-                cancel: Some(0),
-                icon: Icon::Note,
-            }),
-            Ok(1)
-        )
+        self.confirmed(question, ANY_COMMAND)
+    }
+
+    pub(crate) fn confirm_grants(&mut self, recap: &Recap) -> bool {
+        match recap_text(&recap.changes) {
+            Some(text) => self.confirmed(&text, &recap.command),
+            None => {
+                self.say(&too_many(&recap.command));
+                false
+            }
+        }
+    }
+
+    fn confirmed(&mut self, text: &str, command: &str) -> bool {
+        let framed = self.framed(text);
+        if framed.cut {
+            self.say(&too_many(command));
+            return false;
+        }
+        let ask = Buttons {
+            text: &framed.text,
+            buttons: &["Nein", "Ja"],
+            default: 0,
+            cancel: Some(0),
+            icon: Icon::Note,
+        };
+        matches!(self.buttons_asked(&framed.text, &ask), Ok(1))
     }
 
     pub(crate) fn explain(&mut self, topic: Topic) -> bool {
@@ -935,7 +1074,13 @@ mod tests {
         let mut notes = Notes::default();
         notes.push("");
         notes.push("\n\n");
-        assert_eq!(notes.take(), "");
+        assert_eq!(
+            notes.take(),
+            Taken {
+                text: String::new(),
+                cut: false
+            }
+        );
         Ok(())
     }
 
@@ -1352,6 +1497,293 @@ mod tests {
             Some(json::parse("[\"Nein\", \"Ja\"]")?)
         );
         Ok(())
+    }
+
+    fn grant(area: Area, title: &str, was: Option<Level>, now: Option<Level>) -> GrantChange {
+        GrantChange {
+            area,
+            title: title.to_string(),
+            was,
+            now,
+        }
+    }
+
+    fn recap_of(changes: Vec<GrantChange>, command: &str) -> Recap {
+        Recap {
+            mail: String::new(),
+            calendars: String::new(),
+            changes,
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_recap_has_one_line_per_changed_grant_with_the_writes_first_and_a_count_header(
+    ) -> TestResult {
+        let changes = vec![
+            grant(Area::Mail, "me@gmail.example", None, Some(Level::Read)),
+            grant(Area::Calendar, "Feiertage", None, Some(Level::Read)),
+            grant(
+                Area::Calendar,
+                "Privat",
+                Some(Level::Read),
+                Some(Level::Write),
+            ),
+            grant(Area::Calendar, "Familie", None, Some(Level::Write)),
+            grant(Area::Calendar, "Alt", Some(Level::Write), None),
+            grant(
+                Area::Calendar,
+                "Neu benannt",
+                Some(Level::Read),
+                Some(Level::Read),
+            ),
+        ];
+        let text = recap_text(&changes).ok_or("it fits")?;
+        let expected = [
+            "Neue Freigaben: 1 Konto zum Lesen; 2 Kalender zum Schreiben, 2 zum Lesen, 1 entzogen",
+            "Kalender: Privat (schreiben) [bisher: lesen]",
+            "Kalender: Familie (schreiben)",
+            "Mail: me@gmail.example (lesen)",
+            "Kalender: Feiertage (lesen)",
+            "Kalender: Neu benannt (lesen)",
+            "Kalender: Alt (aus) [bisher: schreiben]",
+            "",
+            "Korrekt?",
+        ];
+        assert_eq!(text, expected.join("\n"));
+        let one = [grant(Area::Mail, "a@b.example", None, Some(Level::Write))];
+        assert_eq!(
+            recap_text(&one),
+            Some(
+                "Neue Freigaben: 1 Konto zum Schreiben\nMail: a@b.example (schreiben)\n\nKorrekt?"
+                    .to_string()
+            )
+        );
+        let two = [
+            grant(Area::Mail, "a", None, Some(Level::Write)),
+            grant(Area::Mail, "b", None, Some(Level::Write)),
+        ];
+        assert!(recap_text(&two)
+            .ok_or("fits")?
+            .starts_with("Neue Freigaben: 2 Konten zum Schreiben\n"));
+        assert_eq!(
+            recap_text(&[]),
+            Some("Neue Freigaben: keine Aenderung\n\nKorrekt?".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn twelve_calendars_with_long_names_are_all_shown_and_nothing_is_cut() -> TestResult {
+        let names: Vec<String> = (0..12)
+            .map(|number| format!("{number:02} {}", "k".repeat(57)))
+            .collect();
+        assert!(names.iter().all(|name| chars(name) == 60));
+        let changes: Vec<GrantChange> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let level = if index >= 9 {
+                    Level::Write
+                } else {
+                    Level::Read
+                };
+                grant(Area::Calendar, name, None, Some(level))
+            })
+            .collect();
+        let text = recap_text(&changes).ok_or("it fits")?;
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Neue Freigaben: 3 Kalender zum Schreiben, 9 zum Lesen"
+        );
+        assert_eq!(lines.len(), 1 + 12 + 2, "{text}");
+        for (at, name) in names[9..].iter().chain(names[..9].iter()).enumerate() {
+            let level = if at < 3 { "schreiben" } else { "lesen" };
+            assert_eq!(lines[at + 1], format!("Kalender: {name} ({level})"));
+        }
+        assert!(chars(&text) <= MAX_TEXT, "{}", chars(&text));
+        Ok(())
+    }
+
+    #[test]
+    fn a_recap_is_either_complete_within_every_bound_or_refused() {
+        for count in [0usize, 1, 5, 12, 22, 23, 29, 30, 31, 100] {
+            for length in [1usize, 10, 60, 120, 121, 400] {
+                let changes: Vec<GrantChange> = (0..count)
+                    .map(|number| {
+                        let title = format!("{number:03}{}", "t".repeat(length.saturating_sub(3)));
+                        grant(Area::Calendar, &title, None, Some(Level::Read))
+                    })
+                    .collect();
+                match recap_text(&changes) {
+                    Some(text) => {
+                        assert!(chars(&text) <= MAX_TEXT, "{count} x {length}");
+                        assert!(count <= MAX_RECAP_LINES && (count == 0 || length <= MAX_NAME));
+                        for change in &changes {
+                            assert!(text.contains(&change.title), "{count} x {length}");
+                        }
+                        assert_eq!(text.lines().count(), count + 3, "{count} x {length}");
+                    }
+                    None => {
+                        let lines: usize = changes
+                            .iter()
+                            .map(|change| chars(&change.title) + "Kalender:  (lesen)\n".len())
+                            .sum();
+                        assert!(
+                            count > MAX_RECAP_LINES || length > MAX_NAME || lines + 80 > MAX_TEXT,
+                            "{count} x {length}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_recap_dialog_shows_exactly_the_text_and_only_yes_confirms() -> TestResult {
+        let script = Script::new()
+            .then("ask_buttons", Reply::Button(1))
+            .then("ask_buttons", Reply::Button(0))
+            .then("ask_buttons", Reply::Cancel);
+        let mut talk = Talk::new();
+        let mut dialogs = Dialogs::new(&script, &mut talk);
+        let recap = recap_of(
+            vec![grant(Area::Calendar, "Privat", None, Some(Level::Write))],
+            "avery mail setup",
+        );
+        assert!(dialogs.confirm_grants(&recap));
+        assert!(!dialogs.confirm_grants(&recap));
+        assert!(!dialogs.confirm_grants(&recap));
+        assert_eq!(talk.take_stop(), Some(Stop::Cancelled));
+        let seen = script.seen();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            seen[0].text("text"),
+            "Neue Freigaben: 1 Kalender zum Schreiben\nKalender: Privat (schreiben)\n\nKorrekt?"
+        );
+        assert_eq!(
+            seen[0].field("buttons"),
+            Some(json::parse("[\"Nein\", \"Ja\"]")?)
+        );
+        assert_eq!(seen[0].field("default"), Some(Json::Int(0)));
+        assert_eq!(seen[0].field("cancel"), Some(Json::Int(0)));
+        assert!(script.mismatches().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_recap_that_does_not_fit_offers_no_yes_explains_and_returns_false() -> TestResult {
+        let many: Vec<GrantChange> = (0..=MAX_RECAP_LINES)
+            .map(|number| {
+                grant(
+                    Area::Calendar,
+                    &format!("K{number}"),
+                    None,
+                    Some(Level::Read),
+                )
+            })
+            .collect();
+        let long: Vec<GrantChange> = (0..24)
+            .map(|number| {
+                let title = format!("{number:02}{}", "l".repeat(98));
+                grant(Area::Calendar, &title, None, Some(Level::Read))
+            })
+            .collect();
+        for changes in [many, long] {
+            for command in ["avery mail setup", "avery mail setup apple"] {
+                let script = Script::new();
+                let mut talk = Talk::new();
+                let mut dialogs = Dialogs::new(&script, &mut talk);
+                assert!(!dialogs.confirm_grants(&recap_of(changes.clone(), command)));
+                assert!(script.seen().is_empty());
+                assert_eq!(talk.take_stop(), None);
+                let notes = talk.take_notes();
+                assert!(
+                    notes.contains(
+                        "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: "
+                    ),
+                    "{notes}"
+                );
+                assert!(notes.ends_with(command), "{notes}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_confirmation_after_notes_that_had_to_be_cut_is_refused_and_one_that_fits_is_asked(
+    ) -> TestResult {
+        let one_long_line = vec!["x".repeat(500)];
+        let many_lines: Vec<String> = (0..40)
+            .map(|number| format!("Zeile {number} {}", "y".repeat(80)))
+            .collect();
+        let too_many_lines: Vec<String> = (0..250).map(|number| format!("z{number}")).collect();
+        for lines in [one_long_line, many_lines, too_many_lines] {
+            let script = Script::new();
+            let mut talk = Talk::new();
+            let mut dialogs = Dialogs::new(&script, &mut talk);
+            for line in &lines {
+                dialogs.say(line);
+            }
+            assert!(!dialogs.confirm("Korrekt?"));
+            assert!(script.seen().is_empty());
+            let notes = talk.take_notes();
+            assert!(
+                notes.contains("zu viele Eintraege fuer einen Dialog, nichts gespeichert"),
+                "{notes}"
+            );
+            assert!(notes.contains("avery mail setup"), "{notes}");
+        }
+        let script = Script::new();
+        let mut talk = Talk::new();
+        let mut dialogs = Dialogs::new(&script, &mut talk);
+        assert!(!dialogs.confirm(&"q".repeat(2000)));
+        assert!(script.seen().is_empty());
+        let fits = Script::new().then("ask_buttons", Reply::Button(1));
+        let mut talk = Talk::new();
+        let mut dialogs = Dialogs::new(&fits, &mut talk);
+        dialogs.say("Eins");
+        dialogs.say("Zwei");
+        assert!(dialogs.confirm("Korrekt?"));
+        assert_eq!(fits.seen()[0].text("text"), "Eins\nZwei\n\nKorrekt?");
+        Ok(())
+    }
+
+    #[test]
+    fn the_notes_report_whether_anything_was_cut() {
+        let mut notes = Notes::default();
+        notes.push("kurz");
+        notes.push("");
+        assert_eq!(
+            notes.take(),
+            Taken {
+                text: "kurz".to_string(),
+                cut: false
+            }
+        );
+        notes.push(&"a".repeat(MAX_NOTE_LINE + 1));
+        assert!(notes.take().cut);
+        for number in 0..=MAX_NOTE_LINES {
+            notes.push(&format!("{number}"));
+        }
+        assert!(notes.take().cut);
+        for _ in 0..8 {
+            notes.push(&"b".repeat(MAX_NOTE_LINE));
+        }
+        assert!(notes.take().cut);
+        notes.push(&"c".repeat(MAX_NOTE_LINE));
+        assert!(!notes.take().cut);
+        for _ in 0..300 {
+            notes.push("");
+        }
+        assert_eq!(
+            notes.take(),
+            Taken {
+                text: String::new(),
+                cut: false
+            }
+        );
     }
 
     #[test]

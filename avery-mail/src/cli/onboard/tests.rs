@@ -1835,6 +1835,275 @@ fn gmail_station_with_list(status: u16, list: &str) -> Result<Station, Box<dyn E
     station(None, transport, Visit::Good("c"), Orchard::empty())
 }
 
+fn gmail_station_listing(write: bool, list: &str) -> Result<Station, Box<dyn Error>> {
+    let transport = google_transport(&google_tokens(write))
+        .json(
+            Method::Post,
+            "oauth2.googleapis.com/token",
+            200,
+            &google_tokens(write),
+        )
+        .json(Method::Get, "/users/me/calendarList", 200, list);
+    station(None, transport, Visit::Good("c"), Orchard::empty())
+}
+
+fn long_calendars(count: usize, length: usize) -> (String, Vec<String>) {
+    let names: Vec<String> = (0..count)
+        .map(|number| format!("{number:02} {}", "k".repeat(length - 3)))
+        .collect();
+    let items: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(number, name)| {
+            format!(
+                r#"{{"id": "cal{number}@group.example", "summary": "{name}", "accessRole": "owner"}}"#
+            )
+        })
+        .collect();
+    (
+        format!(
+            r#"{{"kind": "calendar#calendarList", "items": [{}]}}"#,
+            items.join(", ")
+        ),
+        names,
+    )
+}
+
+#[test]
+fn twelve_calendars_with_long_names_are_all_in_the_final_dialog_with_the_writes_first() -> TestResult
+{
+    let (list, names) = long_calendars(12, 60);
+    let station = gmail_station_listing(true, &list)?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0]),
+        link_google(true),
+        vec![
+            ("choose_list", Reply::List((0..12).collect())),
+            ("choose_list", Reply::List(vec![9, 10, 11])),
+            ("ask_buttons", Reply::Button(1)),
+        ],
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let recap = script.seen()[10].text("text");
+    let shown = |name: &String| format!("{name} ({})", alice());
+    let mut lines = vec!["Neue Freigaben: 3 Kalender zum Schreiben, 9 zum Lesen".to_string()];
+    for name in &names[9..] {
+        lines.push(format!("Kalender: {} (schreiben)", shown(name)));
+    }
+    for name in &names[..9] {
+        lines.push(format!("Kalender: {} (lesen)", shown(name)));
+    }
+    lines.push(String::new());
+    lines.push("Korrekt?".to_string());
+    assert_eq!(recap, lines.join("\n"));
+    let rights = station.rights()?;
+    assert_eq!(rights.calendars_at(Level::Read).len(), 12);
+    assert_eq!(rights.calendars_at(Level::Write).len(), 3);
+    assert!(!recap.contains("[...]"));
+    Ok(())
+}
+
+#[test]
+fn the_apple_step_after_eight_existing_grants_lists_only_what_changes() -> TestResult {
+    let old: Vec<String> = (1..=8).map(|number| format!("Alt {number}")).collect();
+    let entries: Vec<String> = old
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            format!(r#"{{"id": "OLD-{index}", "name": "{name}", "level": "read"}}"#)
+        })
+        .collect();
+    let config = format!(
+        r#"{{"version": 3, "apple": {{"calendars": [{}]}}}}"#,
+        entries.join(", ")
+    );
+    let mut calendars: Vec<CalendarInfo> = old
+        .iter()
+        .enumerate()
+        .map(|(index, name)| CalendarInfo {
+            id: format!("OLD-{index}"),
+            name: name.clone(),
+            writable: true,
+        })
+        .collect();
+    calendars.push(CalendarInfo {
+        id: "NEW-1".to_string(),
+        name: "Privat".to_string(),
+        writable: true,
+    });
+    let station = gmail_station(
+        Some(&config),
+        Visit::Nothing,
+        false,
+        Orchard::new(Vec::new(), calendars),
+    )?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[2]),
+        vec![
+            ("ask_buttons", Reply::Button(1)),
+            ("choose_list", Reply::List((0..9).collect())),
+            ("choose_list", Reply::List(vec![8])),
+            ("ask_buttons", Reply::Button(1)),
+        ],
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let recap = script.seen()[5].text("text");
+    assert_eq!(
+        recap,
+        "Neue Freigaben: 1 Kalender zum Schreiben\nKalender: Privat (schreiben)\n\nKorrekt?"
+    );
+    for name in &old {
+        assert!(!recap.contains(name.as_str()), "{recap}");
+    }
+    let rights = station.rights()?;
+    assert_eq!(rights.apple.calendars.len(), 9);
+    assert_eq!(rights.calendar_level("NEW-1"), Some(Level::Write));
+    for index in 0..8 {
+        assert_eq!(
+            rights.calendar_level(&format!("OLD-{index}")),
+            Some(Level::Read)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_calendar_that_vanished_is_a_removed_line_and_not_a_note() -> TestResult {
+    let config = r#"{"version": 3, "apple": {"calendars": [
+        {"id": "KEEP", "name": "Bleibt", "level": "read"},
+        {"id": "GONE", "name": "Weg", "level": "read"}]}}"#;
+    let calendars = vec![
+        CalendarInfo {
+            id: "KEEP".to_string(),
+            name: "Bleibt".to_string(),
+            writable: true,
+        },
+        CalendarInfo {
+            id: "NEW".to_string(),
+            name: "Neu".to_string(),
+            writable: true,
+        },
+    ];
+    let station = gmail_station(
+        Some(config),
+        Visit::Nothing,
+        false,
+        Orchard::new(Vec::new(), calendars),
+    )?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[2]),
+        vec![
+            ("ask_buttons", Reply::Button(1)),
+            ("choose_list", Reply::List(vec![0, 1])),
+            ("choose_list", Reply::List(Vec::new())),
+            ("ask_buttons", Reply::Button(1)),
+        ],
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let seen = script.seen();
+    assert_eq!(
+        seen[5].text("text"),
+        "Neue Freigaben: 1 Kalender zum Lesen, 1 entzogen\nKalender: Neu (lesen)\nKalender: Weg (aus) [bisher: lesen]\n\nKorrekt?"
+    );
+    assert!(seen
+        .iter()
+        .all(|dialog| !dialog.text("text").contains("Nicht mehr vorhanden")));
+    let rights = station.rights()?;
+    assert_eq!(rights.apple.calendars.len(), 2);
+    assert_eq!(rights.calendar_level("GONE"), None);
+    Ok(())
+}
+
+#[test]
+fn a_recap_that_would_be_cut_is_refused_before_any_yes_and_nothing_is_saved() -> TestResult {
+    let (list, _) = long_calendars(24, 100);
+    let station = gmail_station_listing(false, &list)?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0]),
+        link_google(false),
+        vec![("choose_list", Reply::List((0..24).collect()))],
+        vec![("ask_buttons", Reply::Cancel)],
+        vec![("ask_buttons", Reply::Button(0))],
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let seen = script.seen();
+    for dialog in &seen {
+        assert!(!dialog.text("text").contains("Korrekt?"), "{}", dialog.op());
+    }
+    let failure = seen[9].text("text");
+    assert!(
+        failure.contains(
+            "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: avery mail setup"
+        ),
+        "{failure}"
+    );
+    assert!(!failure.contains("setup apple"), "{failure}");
+    let rights = station.rights()?;
+    assert_eq!(rights.accounts.len(), 1);
+    assert!(rights.calendars_at(Level::Read).is_empty());
+    assert_eq!(station.tokens(), 1);
+    Ok(())
+}
+
+#[test]
+fn an_apple_recap_that_would_be_cut_is_refused_and_names_the_apple_command() -> TestResult {
+    let calendars: Vec<CalendarInfo> = (0..40)
+        .map(|number| CalendarInfo {
+            id: format!("CAL-{number}"),
+            name: format!("Kalender {number:02} {}", "a".repeat(40)),
+            writable: true,
+        })
+        .collect();
+    let station = gmail_station(
+        None,
+        Visit::Nothing,
+        false,
+        Orchard::new(Vec::new(), calendars),
+    )?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[2]),
+        vec![
+            ("ask_buttons", Reply::Button(1)),
+            ("choose_list", Reply::List((0..40).collect())),
+            ("choose_list", Reply::List(Vec::new())),
+        ],
+        vec![("ask_buttons", Reply::Cancel), ("notify", Reply::Done)],
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let seen = script.seen();
+    for dialog in &seen {
+        assert!(!dialog.text("text").contains("Korrekt?"), "{}", dialog.op());
+    }
+    let failure = seen[5].text("text");
+    assert!(
+        failure.contains(
+            "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: avery mail setup apple"
+        ),
+        "{failure}"
+    );
+    assert!(!Path::new(&station.ctx.settings.config_path).exists());
+    assert!(station.apple_calls() >= 2);
+    Ok(())
+}
+
 #[test]
 fn an_unreadable_calendar_list_is_reported_and_the_account_stays_linked() -> TestResult {
     let station = gmail_station_with_list(403, r#"{"error": {"message": "API not enabled"}}"#)?;
