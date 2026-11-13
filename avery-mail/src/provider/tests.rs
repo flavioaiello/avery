@@ -352,6 +352,7 @@ struct Wired {
     ctx: Context,
     transport: Arc<Scripted>,
     clicks: Clicks,
+    apple: Untouchable,
     _dir: TempDir,
 }
 
@@ -377,15 +378,15 @@ fn wired(
     let memory = Arc::new(memory);
     let transport = Arc::new(transport);
     let clicks = Clicks::new(click);
-    let options = crate::fake::FakeOptions::default();
+    let apple = Untouchable::default();
     let mail = Mail::new(
-        Box::new(crate::fake::FakeBackend::new(options.clone())),
+        Box::new(apple.clone()),
         Box::new(Shared(Arc::clone(&transport))),
         Box::new(SharedVault(Arc::clone(&memory))),
         Box::new(clicks.clone()),
     );
     let calendar = Calendars::new(
-        Box::new(crate::calendar::FakeCalendar::new(options)),
+        Box::new(apple.clone()),
         Box::new(Shared(Arc::clone(&transport))),
         Box::new(SharedVault(Arc::clone(&memory))),
         Box::new(clicks.clone()),
@@ -400,6 +401,7 @@ fn wired(
         ctx,
         transport,
         clicks,
+        apple,
         _dir: dir,
     })
 }
@@ -1129,5 +1131,238 @@ fn userinfo_answers_are_turned_into_lower_case_addresses() -> TestResult {
         r#"{"mail": "", "userPrincipalName": "live.com#x"}"#
     )?)
     .is_err());
+    Ok(())
+}
+
+const BOTH: &str = r#"{"version": 3, "accounts": [
+    {"provider": "google", "address": "alice@gmail.example", "mail": "read",
+     "calendars": [
+        {"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "write"},
+        {"id": "gone@group", "name": "Weg", "level": "read"}]},
+    {"provider": "microsoft", "address": "bob@outlook.example", "mail": "read",
+     "calendars": [{"id": "AQMkCAL", "name": "Calendar (bob@outlook.example)", "level": "read"}]}]}"#;
+
+fn run_cli(ctx: &Context, args: &[&str]) -> (u8, String) {
+    let args: Vec<String> = args.iter().map(|argument| argument.to_string()).collect();
+    let mut out = Vec::new();
+    let code = crate::cli::dispatch(&args, ctx, &mut std::io::Cursor::new(Vec::new()), &mut out);
+    (code, String::from_utf8_lossy(&out).into_owned())
+}
+
+#[test]
+fn the_list_calendars_tool_asks_each_calendar_its_own_provider_and_never_apple() -> TestResult {
+    let transport = Scripted::new()
+        .json(Method::Post, "/token", 200, TOKEN)
+        .json(
+            Method::Get,
+            "/users/me/calendarList",
+            200,
+            r#"{"kind": "calendar#calendarList", "items": [
+                {"id": "alice@gmail.example", "summary": "alice@gmail.example", "accessRole": "reader"}]}"#,
+        )
+        .json(
+            Method::Get,
+            "/me/calendars",
+            200,
+            r#"{"value": [{"id": "AQMkCAL", "name": "Calendar", "canEdit": true}]}"#,
+        );
+    let wired = wired(
+        BOTH,
+        &[
+            ("google:alice@gmail.example", GOOGLE_SCOPES),
+            ("microsoft:bob@outlook.example", MICROSOFT_SCOPES),
+        ],
+        transport,
+        "no",
+    )?;
+    let listed = crate::calendar::list_calendars(&wired.ctx, &args("{}")?)?;
+    assert_eq!(
+        listed,
+        "- alice@gmail.example [write] (read-only)\n- Weg [read] (not found)\n- Calendar (bob@outlook.example) [read]"
+    );
+    assert_eq!(
+        calls(&wired, Method::Get, "/users/me/calendarList").len(),
+        1
+    );
+    assert_eq!(calls(&wired, Method::Get, "/me/calendars").len(), 1);
+    assert_eq!(wired.apple.calls(), 0);
+    Ok(())
+}
+
+#[test]
+fn the_cli_of_a_cloud_only_setup_never_touches_apple() -> TestResult {
+    let transport = Scripted::new()
+        .json(Method::Post, "/token", 200, TOKEN)
+        .json(
+            Method::Get,
+            "/users/me/calendarList",
+            200,
+            r#"{"kind": "calendar#calendarList", "items": [
+                {"id": "alice@gmail.example", "summary": "alice@gmail.example", "accessRole": "owner"}]}"#,
+        )
+        .json(
+            Method::Get,
+            "/me/calendars",
+            200,
+            r#"{"value": [{"id": "AQMkCAL", "name": "Calendar", "canEdit": false}]}"#,
+        );
+    let wired = wired(
+        BOTH,
+        &[
+            ("google:alice@gmail.example", GOOGLE_SCOPES),
+            ("microsoft:bob@outlook.example", MICROSOFT_SCOPES),
+        ],
+        transport,
+        "no",
+    )?;
+    for args in [
+        vec!["accounts"],
+        vec!["calendars"],
+        vec!["status"],
+        vec!["sendlog"],
+        vec!["changes"],
+    ] {
+        let (code, out) = run_cli(&wired.ctx, &args);
+        assert_eq!(code, 0, "{args:?}: {out}");
+        assert!(!out.contains("BACKEND TOUCHED"), "{args:?}: {out}");
+    }
+    let (_, out) = run_cli(&wired.ctx, &["calendars"]);
+    assert!(
+        out.contains("* 1) alice@gmail.example  [schreiben]"),
+        "{out}"
+    );
+    assert!(out.contains("* 2) Calendar (bob@outlook.example)"), "{out}");
+    assert_eq!(wired.apple.calls(), 0);
+    Ok(())
+}
+
+#[test]
+fn the_selftest_of_a_cloud_only_setup_reads_through_the_provider_and_never_touches_apple(
+) -> TestResult {
+    let transport = Scripted::new()
+        .json(Method::Post, "/token", 200, TOKEN)
+        .json(
+            Method::Get,
+            "/profile",
+            200,
+            r#"{"emailAddress": "alice@gmail.example"}"#,
+        )
+        .json(
+            Method::Get,
+            "/labels/INBOX",
+            200,
+            r#"{"id": "INBOX", "messagesUnread": 2}"#,
+        )
+        .json(
+            Method::Get,
+            "/labels",
+            200,
+            r#"{"labels": [{"id": "INBOX", "name": "INBOX", "type": "system"}]}"#,
+        )
+        .json(
+            Method::Get,
+            "/messages?maxResults",
+            200,
+            r#"{"messages": [{"id": "m1", "threadId": "t-m1"}], "resultSizeEstimate": 1}"#,
+        )
+        .json(
+            Method::Get,
+            "/messages/m1?format=metadata",
+            200,
+            &gmail_metadata("m1", "Hallo Alice"),
+        )
+        .json(
+            Method::Get,
+            "/messages/m1?format=full",
+            200,
+            &gmail_full("m1", "Zeile eins"),
+        );
+    let wired = wired(
+        GOOGLE_READ,
+        &[(
+            "google:alice@gmail.example",
+            "https://www.googleapis.com/auth/gmail.readonly",
+        )],
+        transport,
+        "no",
+    )?;
+    let (code, out) = run_cli(&wired.ctx, &["selftest"]);
+    assert_eq!(code, 0, "{out}");
+    for step in [
+        "PASS  Konto 1  Konto erreichbar",
+        "PASS  Konto 1  Mailboxen lesen",
+        "PASS  Konto 1  Posteingang listen",
+        "PASS  Konto 1  Nachricht lesen",
+        "PASS  Konto 1  Suche",
+    ] {
+        assert!(out.contains(step), "{step}: {out}");
+    }
+    assert!(
+        !out.contains("Hallo Alice") && !out.contains("Zeile eins"),
+        "{out}"
+    );
+    assert_eq!(wired.apple.calls(), 0);
+    Ok(())
+}
+
+#[test]
+fn the_tools_of_a_cloud_only_setup_never_touch_apple() -> TestResult {
+    let wired = wired(BOTH, &[], Scripted::new(), "no")?;
+    let answers: Vec<String> = vec![
+        crate::read_tools::list_accounts(&wired.ctx, &args("{}")?),
+        crate::read_tools::list_mailboxes(&wired.ctx, &args("{}")?),
+        crate::read_tools::list_messages(&wired.ctx, &args("{}")?),
+        crate::read_tools::search_messages(&wired.ctx, &args(r#"{"query": "x"}"#)?),
+        crate::read_tools::read_message(
+            &wired.ctx,
+            &args(r#"{"id": "m1", "account": "alice@gmail.example"}"#)?,
+        ),
+        crate::calendar::list_calendars(&wired.ctx, &args("{}")?),
+        crate::calendar::list_events(&wired.ctx, &args("{}")?),
+        crate::calendar::get_event(&wired.ctx, &args(r#"{"id": "e1", "calendar": "Weg"}"#)?),
+    ]
+    .into_iter()
+    .map(|result| result.unwrap_or_else(|error| error.message()))
+    .collect();
+    for answer in &answers {
+        assert!(!answer.contains("BACKEND TOUCHED"), "{answer}");
+    }
+    assert!(
+        answers
+            .iter()
+            .filter(|answer| answer.contains("not linked"))
+            .count()
+            >= 4,
+        "{answers:?}"
+    );
+    assert_eq!(wired.apple.calls(), 0);
+    assert!(wired
+        .transport
+        .seen()
+        .iter()
+        .all(|request| request.url.contains("/token")
+            || request.url.contains("googleapis.com")
+            || request.url.contains("graph.microsoft.com")));
+    Ok(())
+}
+
+#[test]
+fn only_a_configured_apple_section_ever_reaches_the_apple_backend() -> TestResult {
+    let apple_only = r#"{"version": 3, "apple": {"mail": [{"id": "ACC-1", "name": "Privat", "level": "read"}], "calendars": [{"id": "CAL-1", "name": "Privat", "level": "read"}]}}"#;
+    let wired = wired(apple_only, &[], Scripted::new(), "no")?;
+    assert_eq!(wired.apple.calls(), 0);
+    let mailboxes = crate::read_tools::list_mailboxes(&wired.ctx, &args("{}")?);
+    assert!(
+        matches!(&mailboxes, Ok(text) if text.contains("! Privat: BACKEND TOUCHED")),
+        "{mailboxes:?}"
+    );
+    assert_eq!(wired.apple.calls(), 1);
+    let calendars = crate::calendar::list_events(&wired.ctx, &args("{}")?);
+    assert!(
+        matches!(&calendars, Err(ToolError::Msg(text)) if text.contains("BACKEND TOUCHED")),
+        "{calendars:?}"
+    );
+    assert_eq!(wired.apple.calls(), 2);
+    assert!(wired.transport.seen().is_empty());
     Ok(())
 }
