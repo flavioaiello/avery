@@ -18,7 +18,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -73,6 +73,7 @@ pub(crate) fn settings_at(path: &str) -> Settings {
         config_path: path.to_string(),
         fake: false,
         fake_write: String::new(),
+        lock_wait: Duration::from_millis(300),
     }
 }
 

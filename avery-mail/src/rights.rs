@@ -34,6 +34,12 @@ impl Level {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    Changed,
+    Full,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CalendarGrant {
     pub(crate) id: String,
@@ -81,6 +87,17 @@ impl RemoteAccount {
 
     pub(crate) fn calendar_id(&self, provider_id: &str) -> Option<String> {
         calendar_id(self.provider, &self.address, provider_id)
+    }
+
+    pub(crate) fn lower(&mut self, write_mail: bool, write_calendar: bool) {
+        if !write_mail {
+            self.mail = self.mail.map(|level| level.min(Level::Read));
+        }
+        if !write_calendar {
+            for grant in &mut self.calendars {
+                grant.level = grant.level.min(Level::Read);
+            }
+        }
     }
 
     fn calendar_entries(&self) -> impl Iterator<Item = (CalendarEntry, Level)> + '_ {
@@ -454,6 +471,43 @@ impl Rights {
         self.accounts
             .iter_mut()
             .find(|account| account.provider == provider && account.address == address)
+    }
+
+    pub(crate) fn add_account(&mut self, account: RemoteAccount) -> Result<(), Refusal> {
+        if self.accounts.len() >= MAX_ACCOUNTS {
+            return Err(Refusal::Full);
+        }
+        self.accounts.push(account);
+        Ok(())
+    }
+
+    pub(crate) fn remove_account(&mut self, provider: Provider, address: &str) -> bool {
+        let known = self.accounts.len();
+        self.accounts
+            .retain(|account| !(account.provider == provider && account.address == address));
+        self.accounts.len() != known
+    }
+
+    pub(crate) fn apply(&mut self, before: &Rights, after: &Rights) -> Result<(), Refusal> {
+        for wanted in &after.accounts {
+            let Some(old) = before.account(wanted.provider, &wanted.address) else {
+                continue;
+            };
+            if old == wanted {
+                continue;
+            }
+            match self.account_mut(wanted.provider, &wanted.address) {
+                Some(current) if *current == *old => *current = wanted.clone(),
+                _ => return Err(Refusal::Changed),
+            }
+        }
+        if after.apple != before.apple {
+            if self.apple != before.apple {
+                return Err(Refusal::Changed);
+            }
+            self.apple = after.apple.clone();
+        }
+        Ok(())
     }
 
     pub(crate) fn revoke(&mut self) {
@@ -987,5 +1041,138 @@ mod tests {
             &apple(MAX_APPLE + 1),
             "apple.mail has more than 200 entries",
         );
+    }
+
+    #[test]
+    fn a_change_is_applied_only_to_entries_that_are_still_as_they_were() -> TestResult {
+        let before = parsed(FULL)?;
+        let mut after = before.clone();
+        after
+            .account_mut(Provider::Google, "alice@gmail.example")
+            .ok_or("alice")?
+            .mail = Some(Level::Read);
+        let mut fresh = before.clone();
+        assert_eq!(fresh.apply(&before, &after), Ok(()));
+        assert_eq!(fresh, after);
+
+        let mut fresh = before.clone();
+        fresh
+            .account_mut(Provider::Microsoft, "bob@outlook.example")
+            .ok_or("bob")?
+            .mail = None;
+        fresh.sends_per_hour = 11;
+        assert_eq!(fresh.apply(&before, &after), Ok(()));
+        assert_eq!(
+            fresh.mail_level("google:alice@gmail.example"),
+            Some(Level::Read)
+        );
+        assert_eq!(fresh.mail_level("microsoft:bob@outlook.example"), None);
+        assert_eq!(fresh.sends_per_hour, 11);
+
+        let mut fresh = before.clone();
+        fresh.revoke();
+        let revoked = fresh.clone();
+        assert_eq!(fresh.apply(&before, &after), Err(Refusal::Changed));
+        assert_eq!(fresh.mail_level("google:alice@gmail.example"), None);
+        let mut untouched = revoked.clone();
+        assert_eq!(untouched.apply(&before, &before), Ok(()));
+        assert_eq!(untouched, revoked);
+
+        let mut fresh = before.clone();
+        assert!(fresh.remove_account(Provider::Google, "alice@gmail.example"));
+        assert_eq!(fresh.apply(&before, &after), Err(Refusal::Changed));
+        assert!(fresh
+            .account(Provider::Google, "alice@gmail.example")
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_apple_section_is_replaced_only_when_it_is_still_as_it_was() -> TestResult {
+        let before = parsed(FULL)?;
+        let mut after = before.clone();
+        after.apple.mail.truncate(1);
+        let mut fresh = before.clone();
+        assert_eq!(fresh.apply(&before, &after), Ok(()));
+        assert_eq!(fresh.apple.mail.len(), 1);
+
+        let mut fresh = before.clone();
+        fresh.apple = Apple::default();
+        assert_eq!(fresh.apply(&before, &after), Err(Refusal::Changed));
+        assert!(!fresh.apple.enabled());
+
+        let mut other = before.clone();
+        other.apple.calendars.truncate(1);
+        assert_eq!(other.apply(&before, &after), Err(Refusal::Changed));
+
+        let mut unrelated = before.clone();
+        unrelated.apple = Apple::default();
+        let mut changes_accounts_only = before.clone();
+        changes_accounts_only
+            .account_mut(Provider::Google, "carol@gmail.example")
+            .ok_or("carol")?
+            .mail = Some(Level::Read);
+        assert_eq!(unrelated.apply(&before, &changes_accounts_only), Ok(()));
+        assert!(!unrelated.apple.enabled());
+        assert_eq!(
+            unrelated.mail_level("google:carol@gmail.example"),
+            Some(Level::Read)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accounts_are_added_up_to_the_limit_and_removed_by_provider_and_address() -> TestResult {
+        let mut rights = Rights::empty();
+        for n in 0..MAX_ACCOUNTS {
+            let account = RemoteAccount::new(Provider::Google, &format!("u{n}@gmail.example"))
+                .ok_or("account")?;
+            assert_eq!(rights.add_account(account), Ok(()));
+        }
+        let one_more =
+            RemoteAccount::new(Provider::Microsoft, "x@outlook.example").ok_or("account")?;
+        assert_eq!(rights.add_account(one_more), Err(Refusal::Full));
+        assert_eq!(rights.accounts.len(), MAX_ACCOUNTS);
+        assert!(!rights.remove_account(Provider::Microsoft, "u0@gmail.example"));
+        assert!(!rights.remove_account(Provider::Google, "nobody@gmail.example"));
+        assert!(rights.remove_account(Provider::Google, "u0@gmail.example"));
+        assert!(!rights.remove_account(Provider::Google, "u0@gmail.example"));
+        assert_eq!(rights.accounts.len(), MAX_ACCOUNTS - 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lowering_never_raises_and_follows_the_two_write_capabilities() -> TestResult {
+        let full = parsed(FULL)?;
+        let alice = full
+            .account(Provider::Google, "alice@gmail.example")
+            .ok_or("alice")?;
+        let mut same = alice.clone();
+        same.lower(true, true);
+        assert_eq!(&same, alice);
+        let mut mail = alice.clone();
+        mail.lower(false, true);
+        assert_eq!(mail.mail, Some(Level::Read));
+        assert_eq!(mail.calendars, alice.calendars);
+        let mut calendar = alice.clone();
+        calendar.lower(true, false);
+        assert_eq!(calendar.mail, Some(Level::Write));
+        assert!(calendar
+            .calendars
+            .iter()
+            .all(|grant| grant.level == Level::Read));
+        let carol = full
+            .account(Provider::Google, "carol@gmail.example")
+            .ok_or("carol")?;
+        let mut none = carol.clone();
+        none.lower(false, false);
+        assert_eq!(&none, carol);
+        let bob = full
+            .account(Provider::Microsoft, "bob@outlook.example")
+            .ok_or("bob")?;
+        let mut read = bob.clone();
+        read.lower(false, false);
+        assert_eq!(&read, bob);
+        Ok(())
     }
 }

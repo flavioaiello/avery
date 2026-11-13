@@ -10,7 +10,7 @@ use crate::calendar::{
 };
 use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
-use crate::config::WriteSettings;
+use crate::config::{UpdateError, WriteSettings};
 use crate::console::{ask_levels, failed, level_word, Choice, Console};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
@@ -18,7 +18,7 @@ use crate::localtime;
 use crate::provider::{calendar_origin, Client, Provider};
 use crate::recurrence;
 use crate::rights::{
-    Apple, CalendarGrant, Level, RemoteAccount, Rights, MAX_ACCOUNTS, MAX_APPLE, MAX_NAME,
+    Apple, CalendarGrant, Level, Refusal, RemoteAccount, Rights, MAX_ACCOUNTS, MAX_APPLE, MAX_NAME,
 };
 use crate::sendlog::{self, Outcome};
 use crate::server;
@@ -76,17 +76,28 @@ fn sanitized(account: MailAccount) -> MailAccount {
     }
 }
 
-fn save_rights(ctx: &Context, console: &mut Console, rights: &Rights) -> u8 {
-    match ctx.settings.save_rights(rights) {
-        Ok(()) => 0,
-        Err(error) => {
-            console.say(&format!(
-                "Fehler: config.json nicht schreibbar ({:?})",
-                error.kind()
-            ));
-            1
-        }
+fn update_failed(ctx: &Context, console: &mut Console, error: &UpdateError) -> u8 {
+    match error {
+        UpdateError::Unreadable(error) => return failed(console, error),
+        UpdateError::Busy => console.say(&format!(
+            "Fehler: Ein anderer Avery-Befehl aendert gerade die Konfiguration ({}). Nichts gespeichert, gleich noch einmal versuchen.",
+            ctx.settings.lock_path()
+        )),
+        UpdateError::Lock(kind) => console.say(&format!(
+            "Fehler: {} nicht sperrbar ({kind:?}). Nichts gespeichert.",
+            ctx.settings.lock_path()
+        )),
+        UpdateError::Write(kind) => console.say(&format!(
+            "Fehler: config.json nicht schreibbar ({kind:?})"
+        )),
+        UpdateError::Refused(Refusal::Changed) => console.say(
+            "Die Konfiguration wurde inzwischen geaendert (anderes Terminal?). Nichts gespeichert, den Befehl bitte erneut ausfuehren.",
+        ),
+        UpdateError::Refused(Refusal::Full) => console.say(&format!(
+            "Es sind schon {MAX_ACCOUNTS} Konten verbunden. Zuerst eines trennen: avery mail unlink <adresse>"
+        )),
     }
+    1
 }
 
 fn granted(entries: &[(String, Level)]) -> String {
@@ -294,12 +305,17 @@ fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights
         console.say("Abgebrochen.");
         return 1;
     }
-    let code = save_rights(ctx, console, rights);
-    if code == 0 {
-        console.say(&format!("Gespeichert in {}", ctx.settings.config_path));
-        console.say("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
+    match ctx
+        .settings
+        .update_rights(|fresh| fresh.apply(before, rights))
+    {
+        Ok(()) => {
+            console.say(&format!("Gespeichert in {}", ctx.settings.config_path));
+            console.say("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
+            0
+        }
+        Err(error) => update_failed(ctx, console, &error),
     }
-    code
 }
 
 fn explain_levels(ctx: &Context, console: &mut Console, rights: &Rights) {
@@ -642,24 +658,26 @@ fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
 }
 
 fn cmd_revoke(ctx: &Context, console: &mut Console) -> u8 {
-    let mut rights = match ctx.settings.stored_rights() {
-        Ok(rights) => rights,
-        Err(error) => return failed(console, &error),
+    let revoked = ctx.settings.update_rights(|rights| {
+        let had_apple = rights.apple.enabled();
+        rights.revoke();
+        Ok((had_apple, !rights.accounts.is_empty()))
+    });
+    let (had_apple, linked) = match revoked {
+        Ok(done) => done,
+        Err(error) => return update_failed(ctx, console, &error),
     };
-    let had_apple = rights.apple.enabled();
-    rights.revoke();
-    let code = save_rights(ctx, console, &rights);
-    if code == 0 {
-        console.say("Alle Freigaben entfernt (Mail und Kalender, auch Schreiben). Der Agent sieht keine Konten und Kalender mehr.");
-        if !rights.accounts.is_empty() {
-            console.say("Direkt verbundene Konten (Gmail/Outlook.com) bleiben verbunden; ihre Anmeldung liegt im Schluesselbund.");
-            console.say("Verbindung ganz loesen: avery mail unlink <adresse>");
-        }
-        if had_apple {
-            console.say("Apple Mail und Kalender sind wieder aus. Wieder einbeziehen: avery mail setup apple");
-        }
+    console.say("Alle Freigaben entfernt (Mail und Kalender, auch Schreiben). Der Agent sieht keine Konten und Kalender mehr.");
+    if linked {
+        console.say("Direkt verbundene Konten (Gmail/Outlook.com) bleiben verbunden; ihre Anmeldung liegt im Schluesselbund.");
+        console.say("Verbindung ganz loesen: avery mail unlink <adresse>");
     }
-    code
+    if had_apple {
+        console.say(
+            "Apple Mail und Kalender sind wieder aus. Wieder einbeziehen: avery mail setup apple",
+        );
+    }
+    0
 }
 
 fn prompt_level(console: &mut Console) -> Option<bool> {
@@ -684,7 +702,7 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         console.say("Dieser Anbieter braucht keine Anmeldung.");
         return 2;
     };
-    let mut rights = match ctx.settings.stored_rights() {
+    let rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
@@ -739,58 +757,45 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         console.say("Fehler: Die Adresse des Kontos ist nicht verwendbar.");
         return 1;
     };
-    let relinked = rights.account(provider, &linked.address).is_some();
-    let level = match rights.account_mut(provider, &linked.address) {
-        Some(known) => {
-            known.mail = known.mail.map(|level| {
-                if linked.write_mail {
-                    level
-                } else {
-                    Level::Read
-                }
-            });
-            if !linked.write_calendar {
-                for grant in &mut known.calendars {
-                    grant.level = Level::Read;
-                }
-            }
-            known.mail
+    fresh.mail = Some(if write && linked.write_mail {
+        Level::Write
+    } else {
+        Level::Read
+    });
+    let saved = ctx.settings.update_rights(|rights| {
+        if let Some(known) = rights.account_mut(provider, &linked.address) {
+            known.lower(linked.write_mail, linked.write_calendar);
+            return Ok((true, known.mail));
         }
-        None => {
-            let level = if write && linked.write_mail {
-                Level::Write
-            } else {
-                Level::Read
-            };
-            fresh.mail = Some(level);
-            rights.accounts.push(fresh);
-            Some(level)
-        }
+        let level = fresh.mail;
+        rights.add_account(fresh)?;
+        Ok((false, level))
+    });
+    let (relinked, level) = match saved {
+        Ok(done) => done,
+        Err(error) => return update_failed(ctx, console, &error),
     };
-    let code = save_rights(ctx, console, &rights);
-    if code == 0 {
-        console.say(&format!(
-            "\n{}: {} ({}). Mail: {}.",
-            if relinked {
-                "Erneut verbunden"
-            } else {
-                "Verbunden"
-            },
-            linked.address,
-            provider.kind(),
-            level_word(level)
-        ));
+    console.say(&format!(
+        "\n{}: {} ({}). Mail: {}.",
         if relinked {
-            console.say("Freigaben bleiben wie sie waren, hoechstens abgesenkt auf das, was die neue Anmeldung erlaubt.");
-        }
-        console.say("Kalender freigeben: avery mail setup. Pruefen: avery mail selftest");
-        console.say("Goose danach neu starten.");
+            "Erneut verbunden"
+        } else {
+            "Verbunden"
+        },
+        linked.address,
+        provider.kind(),
+        level_word(level)
+    ));
+    if relinked {
+        console.say("Freigaben bleiben wie sie waren, hoechstens abgesenkt auf das, was die neue Anmeldung erlaubt.");
     }
-    code
+    console.say("Kalender freigeben: avery mail setup. Pruefen: avery mail selftest");
+    console.say("Goose danach neu starten.");
+    0
 }
 
 fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
-    let mut rights = match ctx.settings.stored_rights() {
+    let rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
@@ -836,21 +841,26 @@ fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 
             return 1;
         }
     };
-    let account = rights.accounts.remove(index);
+    let Some(account) = rights.accounts.get(index) else {
+        return 1;
+    };
+    let (provider, address) = (account.provider(), account.address().to_string());
     if !console.confirm(&format!(
-        "{} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht. [j/N] ",
-        account.address()
+        "{address} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht. [j/N] "
     )) {
         console.say("Abgebrochen.");
         return 1;
     }
-    let code = save_rights(ctx, console, &rights);
-    if code != 0 {
-        return code;
+    let removed = ctx.settings.update_rights(|rights| {
+        rights.remove_account(provider, &address);
+        Ok(())
+    });
+    if let Err(error) = removed {
+        return update_failed(ctx, console, &error);
     }
-    match ctx.linker.unlink(account.provider(), account.address()) {
+    match ctx.linker.unlink(provider, &address) {
         Ok(()) => {
-            console.say(&format!("{} getrennt.", account.address()));
+            console.say(&format!("{address} getrennt."));
             console.say("Zugriff der App auch im Konto widerrufen (Google: myaccount.google.com/permissions, Microsoft: account.live.com/consent/Manage).");
             0
         }
@@ -1927,7 +1937,7 @@ mod tests {
     use crate::provider::Linker;
     use crate::testutil::{j, log_entry, settings_at, TempDir, TestResult, Untouchable};
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{BufRead, Cursor, Read};
 
     const ACCOUNT_1: &str = r#"{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"}"#;
     const ACCOUNT_2: &str = r#"{"id": "ACC-2", "name": "Outlook", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"}"#;
@@ -3146,6 +3156,28 @@ mod tests {
         apple: Untouchable,
     }
 
+    struct Meddling {
+        inner: crate::vault::memory::Shared,
+        on_store: Option<Box<dyn Fn()>>,
+    }
+
+    impl crate::vault::Vault for Meddling {
+        fn load(&self, name: &str) -> Result<Option<String>, crate::vault::VaultError> {
+            self.inner.load(name)
+        }
+
+        fn store(&self, name: &str, secret: &str) -> Result<(), crate::vault::VaultError> {
+            if let Some(hook) = &self.on_store {
+                hook();
+            }
+            self.inner.store(name, secret)
+        }
+
+        fn delete(&self, name: &str) -> Result<(), crate::vault::VaultError> {
+            self.inner.delete(name)
+        }
+    }
+
     fn cloudy(
         dir: &TempDir,
         config: &str,
@@ -3153,6 +3185,18 @@ mod tests {
         remote: Remote,
         visit: crate::provider::fakes::Visit,
         transport: crate::http::scripted::Scripted,
+    ) -> Result<Cloudy, Box<dyn std::error::Error>> {
+        meddled(dir, config, records, remote, visit, transport, None)
+    }
+
+    fn meddled(
+        dir: &TempDir,
+        config: &str,
+        records: &[(&str, &str)],
+        remote: Remote,
+        visit: crate::provider::fakes::Visit,
+        transport: crate::http::scripted::Scripted,
+        on_store: Option<Box<dyn Fn()>>,
     ) -> Result<Cloudy, Box<dyn std::error::Error>> {
         let settings = settings_at(&dir.path("config.json"));
         fs::write(&settings.config_path, config)?;
@@ -3163,7 +3207,10 @@ mod tests {
         let vault = std::sync::Arc::new(memory);
         let linker = Linker::new(
             Box::new(transport),
-            Box::new(crate::vault::memory::Shared(std::sync::Arc::clone(&vault))),
+            Box::new(Meddling {
+                inner: crate::vault::memory::Shared(std::sync::Arc::clone(&vault)),
+                on_store,
+            }),
             Box::new(crate::provider::fakes::Visitor {
                 visit,
                 seen: Default::default(),
@@ -3822,6 +3869,332 @@ mod tests {
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("Fehler: Apple Mail ist nicht lesbar"), "{out}");
         assert_eq!(cloud.apple.calls(), 1);
+        Ok(())
+    }
+
+    struct Typed<'a> {
+        data: Cursor<Vec<u8>>,
+        after: Vec<(usize, Box<dyn FnOnce() + 'a>)>,
+        lines: usize,
+    }
+
+    impl<'a> Typed<'a> {
+        fn new(text: &str) -> Typed<'a> {
+            Typed {
+                data: Cursor::new(text.as_bytes().to_vec()),
+                after: Vec::new(),
+                lines: 0,
+            }
+        }
+
+        fn after_line(mut self, line: usize, hook: impl FnOnce() + 'a) -> Typed<'a> {
+            self.after.push((line, Box::new(hook)));
+            self
+        }
+    }
+
+    impl Read for Typed<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.data.read(buffer)
+        }
+    }
+
+    impl BufRead for Typed<'_> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.data.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            if let Ok(available) = self.data.fill_buf() {
+                let taken = available.get(..amount).unwrap_or(available);
+                self.lines += taken.iter().filter(|byte| **byte == b'\n').count();
+            }
+            self.data.consume(amount);
+            while let Some(index) = self.after.iter().position(|(line, _)| *line <= self.lines) {
+                let (_, hook) = self.after.remove(index);
+                hook();
+            }
+        }
+    }
+
+    fn run_typed(ctx: &Context, args: &[&str], input: &mut Typed) -> (u8, String) {
+        let args: Vec<String> = args.iter().map(|argument| argument.to_string()).collect();
+        let mut out = Vec::new();
+        let code = dispatch(&args, ctx, input, &mut out);
+        (code, String::from_utf8_lossy(&out).into_owned())
+    }
+
+    fn second_terminal(dir: &TempDir) -> Context {
+        Context::demo(
+            settings_at(&dir.path("config.json")),
+            FakeOptions::default(),
+        )
+    }
+
+    fn setup_answers() -> (Remote, &'static str) {
+        let remote: Remote = vec![
+            (
+                "alice@gmail.example",
+                Ok(vec![info(
+                    "alice@gmail.example",
+                    "alice@gmail.example",
+                    true,
+                )]),
+            ),
+            ("bob@outlook.example", Err(ToolError::msg("offline"))),
+        ];
+        (remote, "1\n\n\nj\n")
+    }
+
+    #[test]
+    fn a_revoke_from_another_terminal_while_setup_waits_is_not_undone() -> TestResult {
+        let dir = TempDir::new()?;
+        let (remote, answers) = setup_answers();
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &[("google:alice@gmail.example", WRITE_SCOPE)],
+            remote,
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let other = second_terminal(&dir);
+        let mut input = Typed::new(answers).after_line(4, || {
+            let _ = run(&other, &["revoke"], "");
+        });
+        let (code, out) = run_typed(&cloud.ctx, &["setup"], &mut input);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Neue Freigaben:"), "{out}");
+        assert!(
+            out.contains("Die Konfiguration wurde inzwischen geaendert"),
+            "{out}"
+        );
+        assert!(!out.contains("Gespeichert"), "{out}");
+        let rights = stored(&cloud)?;
+        assert!(rights.mail_at(Level::Read).is_empty());
+        assert!(rights.calendars_at(Level::Read).is_empty());
+        assert_eq!(rights.accounts.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn setup_saves_only_what_it_asked_about_and_keeps_other_changes_made_meanwhile() -> TestResult {
+        let dir = TempDir::new()?;
+        let (remote, answers) = setup_answers();
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &[("google:alice@gmail.example", WRITE_SCOPE)],
+            remote,
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let other = second_terminal(&dir);
+        let mut input = Typed::new(answers).after_line(4, || {
+            let _ = other.settings.update_rights(|rights| {
+                rights.sends_per_hour = 7;
+                if let Some(bob) = rights.account_mut(Provider::Microsoft, "bob@outlook.example") {
+                    bob.mail = Some(Level::Read);
+                }
+                Ok(())
+            });
+        });
+        let (code, out) = run_typed(&cloud.ctx, &["setup"], &mut input);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Gespeichert in"), "{out}");
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.sends_per_hour, 7);
+        assert_eq!(
+            rights.mail_level("google:alice@gmail.example"),
+            Some(Level::Read)
+        );
+        assert_eq!(
+            rights.mail_level("microsoft:bob@outlook.example"),
+            Some(Level::Read)
+        );
+        assert_eq!(
+            rights.calendar_level("google:alice@gmail.example:alice@gmail.example"),
+            Some(Level::Write)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_apple_does_not_bring_back_an_apple_section_that_was_revoked_meanwhile() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = real(&dir, Some(&base()))?;
+        let other = second_terminal(&dir);
+        let mut input = Typed::new("\n\n\n\n\n\n\nj\n").after_line(8, || {
+            let _ = run(&other, &["revoke"], "");
+        });
+        let (code, out) = run_typed(&ctx, &["setup", "apple"], &mut input);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("Die Konfiguration wurde inzwischen geaendert"),
+            "{out}"
+        );
+        let config = saved(&ctx)?;
+        assert!(section(&config, "apple").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_keeps_what_another_terminal_changed_during_the_browser_flow() -> TestResult {
+        let dir = TempDir::new()?;
+        let other = second_terminal(&dir);
+        let cloud = meddled(
+            &dir,
+            LINKED,
+            &[("google:alice@gmail.example", WRITE_SCOPE)],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(true)),
+            Some(Box::new(move || {
+                let _ = run(&other, &["revoke"], "");
+            })),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n2\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("Erneut verbunden: alice@gmail.example (gmail). Mail: aus."),
+            "{out}"
+        );
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 2);
+        assert!(rights.mail_at(Level::Read).is_empty());
+        assert!(rights.calendars_at(Level::Read).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_does_not_overwrite_accounts_added_meanwhile_and_respects_the_limit() -> TestResult {
+        let dir = TempDir::new()?;
+        let path = dir.path("config.json");
+        let accounts = |count: usize| {
+            let entries: Vec<String> = (0..count)
+                .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
+                .collect();
+            format!(r#"{{"version": 3, "accounts": [{}]}}"#, entries.join(","))
+        };
+        let crowded = accounts(15);
+        let cloud = meddled(
+            &dir,
+            r#"{"version": 3}"#,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+            Some(Box::new(move || {
+                let _ = fs::write(&path, &crowded);
+            })),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(stored(&cloud)?.accounts.len(), 16);
+        let again = TempDir::new()?;
+        let path = again.path("config.json");
+        let full = accounts(16);
+        let cloud = meddled(
+            &again,
+            r#"{"version": 3}"#,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+            Some(Box::new(move || {
+                let _ = fs::write(&path, &full);
+            })),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Es sind schon 16 Konten verbunden"), "{out}");
+        assert_eq!(stored(&cloud)?.accounts.len(), 16);
+        assert!(stored(&cloud)?
+            .account(Provider::Google, "alice@gmail.example")
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn an_unlink_removes_only_its_account_and_keeps_changes_made_while_it_asked() -> TestResult {
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &[
+                ("google:alice@gmail.example", READ_SCOPE),
+                ("microsoft:bob@outlook.example", "Mail.Read"),
+            ],
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let other = second_terminal(&dir);
+        let mut input = Typed::new("j\n").after_line(1, || {
+            let _ = other.settings.update_rights(|rights| {
+                rights.sends_per_hour = 7;
+                if let Some(alice) = rights.account_mut(Provider::Google, "alice@gmail.example") {
+                    alice.mail = Some(Level::Read);
+                }
+                Ok(())
+            });
+        });
+        let (code, out) = run_typed(&cloud.ctx, &["unlink", "bob@outlook.example"], &mut input);
+        assert_eq!(code, 0, "{out}");
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 1);
+        assert_eq!(rights.sends_per_hour, 7);
+        assert_eq!(
+            rights.mail_level("google:alice@gmail.example"),
+            Some(Level::Read)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_config_command_gives_up_cleanly_when_another_one_holds_the_lock() -> TestResult {
+        for (args, input) in [
+            (vec!["revoke"], ""),
+            (vec!["unlink", "bob@outlook.example"], "j\n"),
+            (vec!["link", "google"], "id1\nsecret1\n1\n"),
+            (vec!["setup"], "1\n\n\nj\n"),
+        ] {
+            let dir = TempDir::new()?;
+            let (remote, _) = setup_answers();
+            let cloud = meddled(
+                &dir,
+                LINKED,
+                &[
+                    ("google:alice@gmail.example", WRITE_SCOPE),
+                    ("microsoft:bob@outlook.example", "Mail.Read"),
+                ],
+                remote,
+                crate::provider::fakes::Visit::Good("c"),
+                crate::provider::fakes::google_transport(&google_tokens(false)),
+                None,
+            )?;
+            let held = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(cloud.ctx.settings.lock_path())?;
+            held.lock()?;
+            let (code, out) = run(&cloud.ctx, &args, input);
+            assert_eq!(code, 1, "{args:?}: {out}");
+            assert!(
+                out.contains("Ein anderer Avery-Befehl aendert gerade die Konfiguration")
+                    && out.contains("config.lock")
+                    && out.contains("Nichts gespeichert"),
+                "{args:?}: {out}"
+            );
+            assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, LINKED);
+            held.unlock()?;
+            drop(held);
+            if args.first() == Some(&"revoke") {
+                let (code, _) = run(&cloud.ctx, &args, input);
+                assert_eq!(code, 0);
+            }
+        }
         Ok(())
     }
 }

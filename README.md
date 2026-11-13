@@ -29,7 +29,8 @@ and Avery never sees them (see [Apple Mail and Calendar](#apple-mail-and-calenda
 - Apple silicon Mac with macOS
 - A personal Gmail and/or Outlook.com account, and an app registration of your own for it (free, a few minutes, see
   [below](#gmail-and-outlookcom)). Mail.app is needed only for the optional Apple bridge
-- [Homebrew](https://brew.sh); it builds the mail server from source with Rust, installed as a build dependency
+- [Homebrew](https://brew.sh); it builds the mail server from source with Rust (1.89 or newer, installed as a build
+  dependency)
 - Goose Desktop (cask `block-goose`) and Splash (`incoai/tap/splash`, installed as a dependency)
 
 ## Install
@@ -233,7 +234,8 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 | Path | Content |
 |---|---|
 | `~/.avery/goose` | Goose profile (`config/`, `top-of-mind.md`, sessions) |
-| `~/.avery/mail/config.json` | Linked accounts with their levels and calendars, the optional `apple` section, hourly limits (format version 3, written by `avery mail link`, `setup` and `unlink`) |
+| `~/.avery/mail/config.json` | Linked accounts with their levels and calendars, the optional `apple` section, hourly limits (format version 3, written by `avery mail link`, `unlink`, `setup` and `revoke`) |
+| `~/.avery/mail/config.lock` | Empty lock file: those commands hold it only while they re-read and save `config.json` (a few milliseconds, never while you answer prompts or sign in), so two terminals never overwrite each other; a command that cannot get it within 5 seconds stops and saves nothing |
 | Keychain item `avery-mail` | One OAuth token per linked Gmail or Outlook.com account (never in a file) |
 | `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
 | `~/.avery/mail/changes.jsonl` | Log of calendar changes with the event before and after (format version 1; used by `avery mail undo`) |

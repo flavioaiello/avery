@@ -1,25 +1,50 @@
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::account::{self, Account};
 use crate::calendar::{self, Calendar};
 use crate::error::{ToolError, ToolResult};
 use crate::fake;
 use crate::json::{self, Json, Object};
-use crate::rights::{Apple, Level, Rights, CONFIG_VERSION};
+use crate::rights::{Apple, Level, Refusal, Rights, CONFIG_VERSION};
 use crate::text::{clean, text_of};
 use crate::texts::{
     CALENDAR_WRITE_OFF, DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS,
     NO_CALENDARS, WRITE_OFF,
 };
 
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+const LOCK_POLL: Duration = Duration::from_millis(50);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     pub(crate) config_path: String,
     pub(crate) fake: bool,
     pub(crate) fake_write: String,
+    pub(crate) lock_wait: Duration,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UpdateError {
+    Busy,
+    Lock(io::ErrorKind),
+    Unreadable(ToolError),
+    Refused(Refusal),
+    Write(io::ErrorKind),
+}
+
+struct ConfigLock {
+    file: File,
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +79,7 @@ impl Settings {
             config_path: expanduser(&raw, lookup("HOME").as_deref()),
             fake: lookup("MAIL_MCP_FAKE").as_deref() == Some("1"),
             fake_write: lookup("MAIL_MCP_FAKE_WRITE").unwrap_or_default(),
+            lock_wait: LOCK_WAIT,
         }
     }
 
@@ -63,6 +89,10 @@ impl Settings {
 
     pub(crate) fn changes_path(&self) -> String {
         join_path(&dirname(&self.config_path), "changes.jsonl")
+    }
+
+    pub(crate) fn lock_path(&self) -> String {
+        join_path(&dirname(&self.config_path), "config.lock")
     }
 
     pub(crate) fn config_exists(&self) -> bool {
@@ -99,7 +129,7 @@ impl Settings {
         Ok(object)
     }
 
-    pub(crate) fn save_config(&self, data: &Object) -> io::Result<()> {
+    fn save_config(&self, data: &Object) -> io::Result<()> {
         let directory = dirname(&self.config_path);
         make_dirs(&directory, 0o700)?;
         let temporary = format!("{}.tmp", self.config_path);
@@ -134,8 +164,45 @@ impl Settings {
         })
     }
 
-    pub(crate) fn save_rights(&self, rights: &Rights) -> io::Result<()> {
-        self.save_config(&rights.to_config())
+    fn lock(&self) -> Result<ConfigLock, UpdateError> {
+        let failed = |error: io::Error| UpdateError::Lock(error.kind());
+        make_dirs(&dirname(&self.config_path), 0o700).map_err(failed)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(self.lock_path())
+            .map_err(failed)?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(ConfigLock { file }),
+                Err(TryLockError::Error(error)) => return Err(failed(error)),
+                Err(TryLockError::WouldBlock) => {
+                    let left = self.lock_wait.saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        return Err(UpdateError::Busy);
+                    }
+                    thread::sleep(LOCK_POLL.min(left));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn update_rights<T>(
+        &self,
+        change: impl FnOnce(&mut Rights) -> Result<T, Refusal>,
+    ) -> Result<T, UpdateError> {
+        let _lock = self.lock()?;
+        let stored = self.stored_rights().map_err(UpdateError::Unreadable)?;
+        let mut rights = stored.clone();
+        let value = change(&mut rights).map_err(UpdateError::Refused)?;
+        if rights != stored {
+            self.save_config(&rights.to_config())
+                .map_err(|error| UpdateError::Write(error.kind()))?;
+        }
+        Ok(value)
     }
 
     fn fake_rights(&self) -> Rights {
@@ -435,9 +502,29 @@ pub(crate) fn make_dirs(path: &str, mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
+    use crate::rights::RemoteAccount;
     use crate::testutil::{j, settings_at, TempDir, TestResult};
     use std::collections::HashMap;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::sync::mpsc;
+
+    fn account(provider: Provider, address: &str) -> Result<RemoteAccount, String> {
+        RemoteAccount::new(provider, address).ok_or_else(|| format!("account {address}"))
+    }
+
+    fn updated<T>(
+        settings: &Settings,
+        change: impl FnOnce(&mut Rights) -> Result<T, Refusal>,
+    ) -> Result<T, String> {
+        settings
+            .update_rights(change)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    fn hold(settings: &Settings) -> Result<ConfigLock, String> {
+        settings.lock().map_err(|error| format!("{error:?}"))
+    }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -887,7 +974,11 @@ mod tests {
         .ok_or("account")?;
         account.mail = Some(Level::Read);
         rights.accounts.push(account);
-        s.save_rights(&rights)?;
+        let saved = rights.clone();
+        updated(&s, |stored| {
+            *stored = saved;
+            Ok(())
+        })?;
         assert_eq!(s.rights()?, rights);
         Ok(())
     }
@@ -983,6 +1074,271 @@ mod tests {
         s.save_config(&config)?;
         assert_eq!(fs::read_to_string(dir.path("victim"))?, "keep");
         assert!(fs::read_to_string(&s.config_path)?.contains("\"version\": 3"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_update_changes_what_is_stored_and_returns_what_the_change_returns() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, REMOTE)?;
+        let seen = updated(&s, |rights| {
+            let seen = rights.accounts.len();
+            rights.sends_per_hour = 4;
+            Ok(seen)
+        })?;
+        assert_eq!(seen, 2);
+        let rights = s.stored_rights()?;
+        assert_eq!((rights.accounts.len(), rights.sends_per_hour), (2, 4));
+        Ok(())
+    }
+
+    #[test]
+    fn the_change_runs_on_what_another_writer_saved_after_the_snapshot() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, REMOTE)?;
+        let snapshot = s.stored_rights()?;
+        updated(&s, |rights| {
+            rights.sends_per_hour = 9;
+            Ok(())
+        })?;
+        let outcome = s.update_rights(|fresh| {
+            if *fresh != snapshot {
+                return Err(Refusal::Changed);
+            }
+            fresh.sends_per_hour = 1;
+            Ok(())
+        });
+        assert_eq!(outcome, Err(UpdateError::Refused(Refusal::Changed)));
+        assert_eq!(s.stored_rights()?.sends_per_hour, 9);
+        let carried = s.update_rights(|fresh| Ok(fresh.sends_per_hour));
+        assert_eq!(carried, Ok(9));
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_change_and_an_unreadable_config_leave_the_file_alone() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, REMOTE)?;
+        assert_eq!(
+            s.update_rights(|_| Err::<(), _>(Refusal::Full)),
+            Err(UpdateError::Refused(Refusal::Full))
+        );
+        assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE);
+        for text in [
+            "not json",
+            "{\"version\": 2}",
+            "[]",
+            "{\"version\": 3, \"x\": 1}",
+        ] {
+            fs::write(&s.config_path, text)?;
+            let mut ran = false;
+            let outcome = s.update_rights(|_| {
+                ran = true;
+                Ok(())
+            });
+            assert!(
+                matches!(outcome, Err(UpdateError::Unreadable(_))),
+                "{text}: {outcome:?}"
+            );
+            assert!(!ran, "{text}");
+            assert_eq!(fs::read_to_string(&s.config_path)?, text);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_update_that_changes_nothing_writes_nothing() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = settings_at(&dir.path("config.json"));
+        updated(&s, |_| Ok(()))?;
+        assert!(!Path::new(&s.config_path).exists());
+        let handwritten = r#"{"version": 3}"#;
+        fs::write(&s.config_path, handwritten)?;
+        updated(&s, |_| Ok(()))?;
+        assert_eq!(fs::read_to_string(&s.config_path)?, handwritten);
+        Ok(())
+    }
+
+    #[test]
+    fn the_lock_file_is_private_stays_in_place_and_is_not_the_config_file() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = settings_at(&dir.path("sub/config.json"));
+        assert_eq!(s.lock_path(), dir.path("sub/config.lock"));
+        assert_ne!(s.lock_path(), s.config_path);
+        updated(&s, |rights| {
+            rights.sends_per_hour = 2;
+            Ok(())
+        })?;
+        let lock = fs::metadata(s.lock_path())?;
+        assert_eq!(lock.permissions().mode() & 0o777, 0o600);
+        assert_eq!(lock.len(), 0);
+        let directory = fs::metadata(dir.path("sub"))?;
+        assert_eq!(directory.permissions().mode() & 0o777, 0o700);
+        let (lock_inode, config_inode) = (lock.ino(), fs::metadata(&s.config_path)?.ino());
+        updated(&s, |rights| {
+            rights.sends_per_hour = 3;
+            Ok(())
+        })?;
+        assert_eq!(fs::metadata(s.lock_path())?.ino(), lock_inode);
+        assert_ne!(fs::metadata(&s.config_path)?.ino(), config_inode);
+        assert_eq!(s.stored_rights()?.sends_per_hour, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn the_lock_path_follows_the_directory_of_the_config_file() {
+        assert_eq!(
+            settings_at("/etc/avery/other.json").lock_path(),
+            "/etc/avery/config.lock"
+        );
+        assert_eq!(settings_at("config.json").lock_path(), "config.lock");
+        assert_eq!(settings_at("/config.json").lock_path(), "/config.lock");
+    }
+
+    #[test]
+    fn two_handles_never_hold_the_lock_at_once() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = settings_at(&dir.path("config.json"));
+        s.lock_wait = Duration::ZERO;
+        let first = hold(&s)?;
+        assert!(matches!(s.lock(), Err(UpdateError::Busy)));
+        let mut other = settings_at(&dir.path("config.json"));
+        other.lock_wait = Duration::ZERO;
+        assert!(matches!(other.lock(), Err(UpdateError::Busy)));
+        drop(first);
+        let second = hold(&other)?;
+        assert!(matches!(s.lock(), Err(UpdateError::Busy)));
+        drop(second);
+        drop(hold(&s)?);
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_the_lock_releases_it_even_while_a_copy_of_the_descriptor_lives_on() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = settings_at(&dir.path("config.json"));
+        s.lock_wait = Duration::ZERO;
+        let first = hold(&s)?;
+        let inherited = first.file.try_clone()?;
+        drop(first);
+        drop(hold(&s)?);
+        drop(inherited);
+        Ok(())
+    }
+
+    #[test]
+    fn an_update_waits_for_a_lock_that_is_released_in_time() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = write_config(&dir, REMOTE)?;
+        s.lock_wait = Duration::from_secs(10);
+        let holder = s.clone();
+        let (locked, ready) = mpsc::channel();
+        let thread = thread::spawn(move || -> Result<(), String> {
+            let held = hold(&holder)?;
+            locked.send(()).map_err(|_| "send".to_string())?;
+            thread::sleep(Duration::from_millis(250));
+            drop(held);
+            Ok(())
+        });
+        ready.recv_timeout(Duration::from_secs(5))?;
+        let started = Instant::now();
+        updated(&s, |rights| {
+            rights.sends_per_hour = 2;
+            Ok(())
+        })?;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        thread.join().map_err(|_| "thread")??;
+        assert_eq!(s.stored_rights()?.sends_per_hour, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn an_update_gives_up_when_the_lock_stays_taken_and_changes_nothing() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = write_config(&dir, REMOTE)?;
+        s.lock_wait = Duration::from_millis(200);
+        let held = hold(&s)?;
+        let started = Instant::now();
+        let mut ran = false;
+        let outcome = s.update_rights(|rights| {
+            ran = true;
+            rights.sends_per_hour = 1;
+            Ok(())
+        });
+        let waited = started.elapsed();
+        assert_eq!(outcome, Err(UpdateError::Busy));
+        assert!(!ran);
+        assert!(
+            waited >= Duration::from_millis(200) && waited < Duration::from_secs(5),
+            "{waited:?}"
+        );
+        assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE);
+        drop(held);
+        Ok(())
+    }
+
+    #[test]
+    fn the_default_wait_for_the_lock_is_bounded() {
+        let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x")]));
+        assert_eq!(s.lock_wait, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn racing_updates_lose_nothing_and_release_the_lock() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = settings_at(&dir.path("config.json"));
+        s.lock_wait = Duration::from_secs(30);
+        let threads: Vec<_> = (0..12)
+            .map(|n| {
+                let own = s.clone();
+                thread::spawn(move || -> Result<(), String> {
+                    let fresh = account(Provider::Google, &format!("u{n}@gmail.example"))?;
+                    updated(&own, |rights| rights.add_account(fresh))
+                })
+            })
+            .collect();
+        for handle in threads {
+            handle.join().map_err(|_| "thread")??;
+        }
+        assert_eq!(s.stored_rights()?.accounts.len(), 12);
+        s.lock_wait = Duration::ZERO;
+        drop(hold(&s)?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_created_is_an_error_and_not_a_wait() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = settings_at(&dir.path("config.json"));
+        fs::create_dir(s.lock_path())?;
+        let started = Instant::now();
+        assert!(matches!(
+            s.update_rights(|_| Ok(())),
+            Err(UpdateError::Lock(_))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        fs::write(dir.path("file"), "x")?;
+        let blocked = settings_at(&dir.path("file/config.json"));
+        assert!(matches!(
+            blocked.update_rights(|_| Ok(())),
+            Err(UpdateError::Lock(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_write_is_reported_and_releases_the_lock() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = write_config(&dir, REMOTE)?;
+        fs::create_dir(format!("{}.tmp", s.config_path))?;
+        let outcome = s.update_rights(|rights| {
+            rights.sends_per_hour = 3;
+            Ok(())
+        });
+        assert!(matches!(outcome, Err(UpdateError::Write(_))), "{outcome:?}");
+        assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE);
+        s.lock_wait = Duration::ZERO;
+        drop(hold(&s)?);
         Ok(())
     }
 }
