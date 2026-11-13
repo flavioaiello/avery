@@ -17,13 +17,13 @@ Everything runs on your Mac. Mail credentials stay in macOS: Avery drives Mail.a
 |---|---|
 | `Avery.app` | The icon in Spotlight and the Dock: starts the model, waits until it is ready and opens Goose with the Avery profile |
 | `avery` | Command line: creates the Goose profile, starts the model and Goose, checks the setup |
-| `avery-mail` | MCP server for Goose (stdio, Python standard library only) that drives Mail.app through `osascript` |
+| `avery-mail` | MCP server for Goose (stdio, Rust, no dependencies) that drives Mail.app through `osascript` |
 | Goose profile | Config, permissions and a local provider for Splash, created by `avery init` in `~/.avery/goose`; your default Goose profile is not touched |
 
 ## Requirements
 
 - Apple silicon Mac with macOS and Mail.app set up with your accounts
-- [Homebrew](https://brew.sh), `/usr/bin/python3` (Xcode Command Line Tools)
+- [Homebrew](https://brew.sh); it builds the mail server from source with Rust, installed as a build dependency
 - Goose Desktop (cask `block-goose`) and Splash (`incoai/tap/splash`, installed as a dependency)
 
 ## Install
@@ -88,12 +88,22 @@ The agent reads untrusted mail, so the design assumes that a mail can try to tal
 - **Allow list.** Only accounts you chose with `avery mail setup` are ever touched.
 - **Writing is opt-in** per account (`avery mail write-enable`), done by you in a terminal. The model cannot change it.
 - **Approval dialog.** `send_message` builds the mail in Mail.app and reads the content back from it. A native dialog,
-  shown by the server process and not by Goose, lists sender, recipients, subject and the exact text. Only a click on
-  *Senden* sends. Cancel, a timeout (75 s) or any error means nothing is sent. The model cannot operate the dialog.
+  shown by the server process and not by Goose, lists sender, recipients, subject and the exact text. Recipients are
+  never shortened: a sent mail goes only to plain ASCII addresses of at most 254 characters, and the server reads
+  recipients, sender, subject and text again after your click and aborts if anything changed. Only a click on *Senden*
+  sends. Cancel, a timeout (75 s) or any error before the click means nothing is sent. If Mail itself reports an error
+  while it sends, the outcome is unknown: the attempt stays in the log as unclear and counts as sent, and the model is
+  told to ask you to check *Sent*. The model cannot operate the dialog.
 - **Goose asks too.** `permission.yaml` sets `mail__send_message` to `ask_before`.
-- **Limits.** Plain text only, no Bcc, no attachments, at most 5 recipients, at most 1500 characters per sent mail
-  (longer texts must be drafts you send from Mail), 5 sent mails per hour, 6 attempts per 10 minutes, a 20 second
-  cool-down after you decline. Every attempt is logged (`avery mail sendlog`); if the log cannot be written, nothing is sent.
+- **Limits.** Plain text only, no Bcc, no attachments, at most 5 recipients (also for replies to all), at most 1500
+  characters and 40 lines per sent mail (longer texts must be drafts you send from Mail), 5 sent mails per hour,
+  6 attempts per 10 minutes, a 20 second cool-down after you decline, and 30 drafts per hour. Every attempt is logged
+  before anything happens (`avery mail sendlog`). If the log cannot be written or read, contains a line the server does
+  not understand, or is too large to check the last hour, nothing is sent and no draft is made until you look at it
+  and move the file away.
+- **Hidden text.** Control, format and invisible characters (zero-width characters, Unicode tag characters, variation
+  selectors, fillers) are stripped from mail text the model reads and from text it writes, so what the dialog shows is
+  what is sent.
 - **No destructive tools.** There is no code that deletes, moves or flags mail.
 - **Replies** use Mail's reply: Mail picks the recipients and the subject.
 
@@ -131,7 +141,7 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 |---|---|
 | `~/.avery/goose` | Goose profile (`config/`, `top-of-mind.md`, sessions) |
 | `~/.avery/mail/config.json` | Allow list and write settings (created by `avery mail setup`) |
-| `~/.avery/mail/sendlog.jsonl` | Audit log of send attempts (no mail text, only a short hash) |
+| `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
 
 Set `AVERY_HOME` to use another base folder.
 
@@ -146,8 +156,10 @@ Set `AVERY_HOME` to use another base folder.
 ## Development
 
 ```sh
-python3 tests/test_mail.py        # about 185 checks against synthetic demo data, no Mail access
-MAIL_MCP_FAKE=1 libexec/avery-mail status
+cargo test --manifest-path avery-mail/Cargo.toml   # mail server: unit and end-to-end tests on demo data, no Mail access
+tests/cli.sh                                        # bin/avery, app builder, disk image tools, cask and formula
+MAIL_MCP_FAKE=1 cargo run --manifest-path avery-mail/Cargo.toml -- status
+AVERY_MAIL_BIN=$PWD/avery-mail/target/debug/avery-mail bin/avery doctor   # AVERY_MAIL_BIN: use another mail server binary
 AVERY_DRY_RUN=1 bin/avery model   # print the command instead of running it
 ```
 
@@ -172,7 +184,7 @@ Homebrew clones the whole repository, so every published image ends up in every 
 release). If that matters, publish the images in a separate repository or, once the repository is public, as release
 assets and point the cask `url` there.
 
-Release: bump `AVERY_VERSION` in `bin/avery` and `VERSION` in `libexec/avery-mail`, commit, tag `v<version>`, run
+Release: bump `AVERY_VERSION` in `bin/avery` and `version` in `avery-mail/Cargo.toml` (and `Cargo.lock`), commit, tag `v<version>`, run
 `tools/make-dmg.sh`, `tools/verify-dmg.sh` and `tools/publish-dmg.sh`, then pin `revision` of the tag `v<version>` in
 `Formula/avery.rb`, commit and push (`git push origin main v<version>`).
 

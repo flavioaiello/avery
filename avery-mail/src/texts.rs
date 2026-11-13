@@ -53,7 +53,7 @@ pub(crate) const COMMANDS: [&str; 9] = [
 ];
 
 pub(crate) const HELP: &str = concat!(
-    "avery-mail: MCP server (stdio) for Apple Mail: reading, drafts and sending with approval.\n",
+    "MCP server (stdio) for Apple Mail: reading, drafts and sending with approval.\n",
     "\n",
     "- Rust, standard library only; Mail.app is driven through osascript (JXA).\n",
     "- No code path deletes, moves, flags or marks mail.\n",

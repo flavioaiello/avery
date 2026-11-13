@@ -10,13 +10,14 @@ class Avery < Formula
 
   depends_on arch: :arm64
   depends_on "incoai/tap/splash"
+  depends_on "rust" => :build
   depends_on :macos
 
   def install
+    system "cargo", "install", *std_cargo_args(path: "avery-mail")
     bin.install "bin/avery"
-    libexec.install "libexec/avery-mail", "libexec/avery-make-app"
+    libexec.install "libexec/avery-make-app"
     pkgshare.install Dir["share/avery/*"]
-    bin.install_symlink libexec/"avery-mail"
   end
 
   service do

@@ -1,7 +1,7 @@
 #!/bin/bash
 # avery - private AI agent on macOS: Goose Desktop + local model (Splash) + Apple Mail bridge.
 # Layout (same in the git checkout and in the Homebrew prefix):
-#   bin/avery  libexec/avery-mail  share/avery/...
+#   bin/avery  bin/avery-mail  libexec/avery-make-app  share/avery/...
 set -euo pipefail
 
 AVERY_VERSION="0.4.0"
@@ -118,7 +118,11 @@ model_cached() {
 }
 
 mail_bin() {
-  local stable=""
+  local candidate stable=""
+  if [ -n "${AVERY_MAIL_BIN:-}" ]; then
+    echo "$AVERY_MAIL_BIN"
+    return 0
+  fi
   case "$ROOT" in
     */Cellar/*)
       stable="$(command -v avery-mail 2>/dev/null || true)"
@@ -127,7 +131,13 @@ mail_bin() {
         return 0
       fi ;;
   esac
-  echo "$LIBEXEC/avery-mail"
+  for candidate in "$ROOT/bin/avery-mail" "$ROOT/avery-mail/target/release/avery-mail"; do
+    if [ -x "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  echo "$ROOT/bin/avery-mail"
 }
 
 sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
@@ -211,8 +221,13 @@ cmd_init() {
 }
 
 cmd_mail() {
+  local bin
   if [ $# -eq 0 ]; then set -- help; fi
-  launch /usr/bin/python3 "$LIBEXEC/avery-mail" "$@"
+  bin="$(mail_bin)"
+  if [ "${AVERY_DRY_RUN:-}" != "1" ] && [ ! -x "$bin" ]; then
+    die "avery-mail fehlt: $bin (im Checkout: cargo build --release --manifest-path avery-mail/Cargo.toml)"
+  fi
+  launch "$bin" "$@"
 }
 
 cmd_model() {
@@ -359,7 +374,7 @@ cmd_install_app() {
 }
 
 cmd_doctor() {
-  local missing=0 version yaml yaml_rc
+  local missing=0 version yaml yaml_rc mail
   ok()   { printf '  ok      %s\n' "$*"; }
   miss() { printf '  FEHLT   %s\n' "$*"; missing=$((missing + 1)); }
   say "Avery $AVERY_VERSION"
@@ -400,7 +415,15 @@ cmd_doctor() {
   else
     miss "Goose-Profil -> avery init"
   fi
-  /usr/bin/python3 "$LIBEXEC/avery-mail" status | sed 's/^/  /'
+  mail="$(mail_bin)"
+  if [ -x "$mail" ]; then
+    ok "avery-mail ($mail)"
+    if ! "$mail" status | sed 's/^/  /'; then
+      miss "Mail-Konfiguration unlesbar oder in unbekanntem Format (avery mail status)"
+    fi
+  else
+    miss "avery-mail fehlt: $mail"
+  fi
   say ""
   if [ "$missing" -eq 0 ]; then say "Alles bereit."; else say "$missing Punkt(e) offen."; return 1; fi
 }
