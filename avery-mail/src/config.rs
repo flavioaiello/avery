@@ -1227,6 +1227,26 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_lock_file_still_serialises_the_updates() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut s = write_config(&dir, REMOTE)?;
+        s.lock_wait = Duration::from_millis(200);
+        fs::write(s.lock_path(), "")?;
+        fs::set_permissions(s.lock_path(), fs::Permissions::from_mode(0o400))?;
+        updated(&s, |rights| {
+            rights.sends_per_hour = 3;
+            Ok(())
+        })?;
+        assert_eq!(s.stored_rights()?.sends_per_hour, 3);
+        let held = hold(&s)?;
+        assert_eq!(s.update_rights(|_| Ok(())), Err(UpdateError::Busy));
+        drop(held);
+        let mode = fs::metadata(s.lock_path())?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400);
+        Ok(())
+    }
+
+    #[test]
     fn an_update_never_saves_a_config_that_the_reader_would_refuse() -> TestResult {
         type Break = fn(&mut Rights) -> Result<(), Refusal>;
         let breaks: [(&str, Break); 4] = [

@@ -4243,6 +4243,31 @@ mod tests {
     }
 
     #[test]
+    fn revoke_works_when_the_lock_file_is_read_only() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &[("google:alice@gmail.example", READ_SCOPE)],
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let lock = cloud.ctx.settings.lock_path();
+        fs::write(&lock, "")?;
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o400))?;
+        let (code, out) = run(&cloud.ctx, &["revoke"], "");
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("nicht sperrbar"), "{out}");
+        let rights = stored(&cloud)?;
+        assert!(rights.mail_at(Level::Read).is_empty());
+        assert_eq!(rights.accounts.len(), 2);
+        assert_eq!(fs::metadata(&lock)?.permissions().mode() & 0o777, 0o400);
+        Ok(())
+    }
+
+    #[test]
     fn a_cloud_only_configuration_never_touches_apple_but_setup_apple_does() -> TestResult {
         let dir = TempDir::new()?;
         let remote: Remote = vec![

@@ -1006,6 +1006,30 @@ esac"#;
     }
 
     #[test]
+    fn a_read_only_lock_file_still_serialises_store_replace_and_delete() -> TestResult {
+        let dir = TempDir::new()?;
+        fs::write(dir.path("vault.lock"), "")?;
+        fs::set_permissions(dir.path("vault.lock"), fs::Permissions::from_mode(0o400))?;
+        let mut fake = stateful(&dir)?;
+        fake.keychain.wait = Duration::from_millis(100);
+        fake.keychain.store(NAME, "FIRST-TEXT")?;
+        assert!(fake.keychain.replace(NAME, "FIRST-TEXT", "SECOND-TEXT")?);
+        assert_eq!(fake.keychain.load(NAME)?, Some("SECOND-TEXT".to_string()));
+        fake.keychain.delete(NAME)?;
+        assert!(lock_is_free(&dir));
+        let held = lock::acquire(&dir.path("vault.lock"), Duration::ZERO)
+            .map_err(|error| format!("{error:?}"))?;
+        let outcome = fake.keychain.store(NAME, "THIRD-TEXT");
+        assert!(matches!(outcome, Err(VaultError::Busy)), "{outcome:?}");
+        drop(held);
+        assert_eq!(
+            fs::metadata(dir.path("vault.lock"))?.permissions().mode() & 0o777,
+            0o400
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_lock_that_cannot_be_taken_is_reported_without_running_security() -> TestResult {
         let dir = TempDir::new()?;
         let marker = dir.path("ran.txt");

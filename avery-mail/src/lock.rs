@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::thread;
@@ -25,16 +25,28 @@ impl Drop for FileLock {
     }
 }
 
-pub(crate) fn acquire(path: &str, wait: Duration) -> Result<FileLock, LockError> {
-    let failed = |error: io::Error| LockError::Io(error.kind());
-    make_dirs(&dirname(path), 0o700).map_err(failed)?;
-    let file = OpenOptions::new()
+fn open(path: &str) -> io::Result<File> {
+    if let Ok(found) = fs::metadata(path) {
+        if !found.is_file() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        match OpenOptions::new().read(true).open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            opened => return opened,
+        }
+    }
+    OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
         .open(path)
-        .map_err(failed)?;
+}
+
+pub(crate) fn acquire(path: &str, wait: Duration) -> Result<FileLock, LockError> {
+    let failed = |error: io::Error| LockError::Io(error.kind());
+    make_dirs(&dirname(path), 0o700).map_err(failed)?;
+    let file = open(path).map_err(failed)?;
     let started = Instant::now();
     loop {
         match file.try_lock() {
@@ -119,6 +131,59 @@ mod tests {
         }
         drop(taken(&path)?);
         assert_eq!(fs::metadata(&path)?.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_read_only_lock_file_is_locked_and_stays_as_it_is() -> TestResult {
+        let dir = TempDir::new()?;
+        let path = dir.path("a.lock");
+        fs::write(&path, "")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+        let first = taken(&path)?;
+        assert!(matches!(
+            acquire(&path, Duration::ZERO),
+            Err(LockError::Busy)
+        ));
+        drop(first);
+        drop(taken(&path)?);
+        let file = fs::metadata(&path)?;
+        assert_eq!(file.permissions().mode() & 0o777, 0o400);
+        assert_eq!(file.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_lock_file_that_is_missing_is_created_private_and_only_when_it_is_missing() -> TestResult {
+        let dir = TempDir::new()?;
+        let path = dir.path("a.lock");
+        assert!(!std::path::Path::new(&path).exists());
+        drop(taken(&path)?);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o440))?;
+        drop(taken(&path)?);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o440);
+        Ok(())
+    }
+
+    #[test]
+    fn a_lock_path_that_is_no_regular_file_is_refused_without_opening_it() -> TestResult {
+        let dir = TempDir::new()?;
+        let pipe = dir.path("pipe.lock");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status()?;
+        assert!(made.success());
+        let (done, answer) = mpsc::channel();
+        thread::spawn(move || {
+            let outcome = acquire(&pipe, Duration::from_secs(30));
+            let _ = done.send(outcome.err());
+        });
+        let outcome = answer.recv_timeout(Duration::from_secs(5))?;
+        assert_eq!(outcome, Some(LockError::Io(io::ErrorKind::InvalidInput)));
+        fs::create_dir(dir.path("folder.lock"))?;
+        assert_eq!(
+            acquire(&dir.path("folder.lock"), Duration::from_secs(30)).err(),
+            Some(LockError::Io(io::ErrorKind::InvalidInput))
+        );
         Ok(())
     }
 

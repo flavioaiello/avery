@@ -257,7 +257,8 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 | `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
 | `~/.avery/mail/changes.jsonl` | Log of calendar changes with the event before and after (format version 1; used by `avery mail undo`) |
 
-Set `AVERY_HOME` to use another base folder.
+Set `AVERY_HOME` to use another base folder. The two lock files are created (owner-only) when they are missing and never
+written afterwards: an existing one is only opened for reading, so a read-only lock file works and may stay as it is.
 
 `config.json` is written by the commands above; it looks like this (you only edit the two limits by hand):
 
