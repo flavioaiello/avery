@@ -1,14 +1,17 @@
 mod account;
 mod backend;
+mod base64;
 mod calendar;
 mod changelog;
 mod civil;
 mod cli;
+mod cloud;
 mod config;
 mod console;
 mod context;
 mod error;
 mod fake;
+mod http;
 mod journal;
 mod json;
 mod jxa;
@@ -22,10 +25,12 @@ mod rights;
 mod sendlog;
 mod server;
 mod sha256;
+mod source;
 #[cfg(test)]
 mod testutil;
 mod text;
 mod texts;
+mod vault;
 mod write_tools;
 
 use std::io::{self, Write};

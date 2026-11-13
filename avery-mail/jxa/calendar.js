@@ -143,62 +143,6 @@ function guardEvent(ev) {
   if (attendeeCount(ev) !== 0) { throw new Error('has_attendees'); }
 }
 
-function lastDay(f) {
-  var s = f.start.slice(0, 10), e = f.end.slice(0, 10);
-  if (f.end.slice(11) === '00:00' && e > s) {
-    return fmt(new Date(+e.slice(0, 4), +e.slice(5, 7) - 1, +e.slice(8, 10) - 1)).slice(0, 10);
-  }
-  return e < s ? s : e;
-}
-
-function whenText(f) {
-  if (f.allDay) {
-    var last = lastDay(f);
-    return f.start.slice(0, 10) + (last > f.start.slice(0, 10) ? ' bis ' + last : '') + ' (ganzt\u00e4gig)';
-  }
-  return f.start + ' bis ' + f.end;
-}
-
-function noteBlock(label, text, cap) {
-  var body = shown(text).replace(/\r\n?/g, '\n').trim();
-  var chars = Array.from(body);
-  if (chars.length > cap) { body = chars.slice(0, cap).join('') + '\n[\u2026 ' + (chars.length - cap) + ' weitere Zeichen]'; }
-  return [label, '--------------------------------', body === '' ? '(leer)' : body, '--------------------------------'];
-}
-
-function rowOf(label, text) { return (label + ':          ').slice(0, 12) + text; }
-
-function row(label, text) { return rowOf(label, flat(text, 300)); }
-
-function changedRow(label, oldText, newText) {
-  return oldText === newText ? rowOf(label, flat(oldText, 300) + '  (unver\u00e4ndert)')
-                             : rowOf(label, flat(oldText, 300) + '  \u2192  ' + flat(newText, 300));
-}
-
-function dialogLines(req, before, after) {
-  var verbs = {create: 'ANLEGEN', update: '\u00c4NDERN', 'delete': 'L\u00d6SCHEN'};
-  var head = req.undo ? 'Goose m\u00f6chte eine \u00c4nderung R\u00dcCKG\u00c4NGIG machen: Termin ' : 'Goose m\u00f6chte einen Termin ';
-  var lines = [head + verbs[req.action] + '.',
-               'Pr\u00fcfe alle Angaben. Nur best\u00e4tigen, wenn du das gerade selbst veranlasst hast.', '',
-               row('Kalender', req.calendarLabel)];
-  if (req.action === 'create') {
-    lines.push(row('Titel', after.summary), row('Wann', whenText(after)));
-    if (after.location !== '') { lines.push(row('Ort', after.location)); }
-    if (after.notes !== '') { lines = lines.concat(noteBlock('Notizen:', after.notes, 1200)); }
-  } else if (req.action === 'delete') {
-    lines.push(row('Titel', before.summary), row('Wann', whenText(before)));
-    if (before.location !== '') { lines.push(row('Ort', before.location)); }
-    if (before.notes !== '') { lines = lines.concat(noteBlock('Notizen:', before.notes, 600)); }
-  } else {
-    lines.push(changedRow('Titel', before.summary, after.summary), changedRow('Wann', whenText(before), whenText(after)));
-    if (before.location !== '' || after.location !== '') { lines.push(changedRow('Ort', before.location, after.location)); }
-    if (before.notes !== after.notes) {
-      lines = lines.concat(noteBlock('Notizen vorher:', before.notes, 600), noteBlock('Notizen nachher:', after.notes, 1200));
-    }
-  }
-  return lines;
-}
-
 function applyUpdate(ev, before, after) {
   if (before.summary !== after.summary) { ev.summary = after.summary; }
   if (before.location !== after.location) { ev.location = after.location; }
@@ -227,11 +171,7 @@ function changeEvent(cal, req) {
     ev = verifiedEvent(cal, req);
     if (req.action === 'update') { localDate(after.start); localDate(after.end); }
   }
-  decision = showDialog(req.undo ? 'Goose: \u00c4nderung r\u00fcckg\u00e4ngig machen' :
-                        {create: 'Goose m\u00f6chte einen Termin anlegen', update: 'Goose m\u00f6chte einen Termin \u00e4ndern',
-                         'delete': 'Goose m\u00f6chte einen Termin l\u00f6schen'}[req.action],
-                        dialogLines(req, before, after),
-                        {create: 'Anlegen', update: '\u00c4ndern', 'delete': 'L\u00f6schen'}[req.action], req.seconds);
+  decision = changeDecision(req, before, after);
   if (decision === 'declined') { return {status: 'declined'}; }
   if (decision === 'timeout') { return {status: 'timeout'}; }
   if (!cal.writable()) { throw new Error('calendar_read_only'); }

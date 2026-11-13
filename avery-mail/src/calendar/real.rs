@@ -6,6 +6,7 @@ use crate::error::{ToolError, ToolResult};
 use crate::json::{Json, Object};
 use crate::jxa::exchange;
 use crate::osascript::{App, Host, OsascriptHost};
+use crate::source::Source;
 use crate::text::{one_line_str, text_of};
 use crate::texts::JXA_TIMEOUT;
 
@@ -145,7 +146,7 @@ impl RealCalendar {
 }
 
 impl CalendarBackend for RealCalendar {
-    fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
+    fn calendars(&self, _source: Source, _address: &str) -> ToolResult<Vec<CalendarInfo>> {
         let mut request = Object::new();
         request.insert("op", "calendars");
         let data = self.call(request, JXA_TIMEOUT)?;
@@ -294,7 +295,7 @@ mod tests {
         let (backend, script) = backend(vec![ok(
             r#"[{"id": "A", "name": "N", "writable": true}, {"id": "B", "name": "M", "writable": false}, 5]"#,
         )]);
-        let calendars = backend.calendars()?;
+        let calendars = backend.calendars(Source::Apple, "")?;
         assert_eq!(calendars.len(), 2);
         assert!(calendars[0].writable && !calendars[1].writable);
         assert_eq!(script.borrow().checks, 1);
@@ -394,7 +395,7 @@ mod tests {
             },
         ]);
         for _ in 0..5 {
-            let result = backend.calendars();
+            let result = backend.calendars(Source::Apple, "");
             assert!(matches!(result, Err(ToolError::Msg(_))), "{result:?}");
         }
     }

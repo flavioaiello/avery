@@ -17,6 +17,10 @@ pub(crate) fn j(text: &str) -> Result<Json, ParseError> {
     json::parse(text)
 }
 
+pub(crate) fn mid(text: &str) -> Result<crate::backend::MessageId, Box<dyn Error>> {
+    crate::backend::MessageId::parse(text).ok_or_else(|| "message id".into())
+}
+
 pub(crate) struct TempDir {
     root: PathBuf,
 }

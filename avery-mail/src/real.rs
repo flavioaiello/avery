@@ -1,6 +1,6 @@
 use crate::account::{Account, MailAccount};
 use crate::backend::{
-    Backend, ComposeRequest, Mailbox, MessageBody, MessageList, MessageQuery, Preview,
+    Backend, ComposeRequest, Mailbox, MessageBody, MessageId, MessageList, MessageQuery, Preview,
 };
 use crate::error::{ToolError, ToolResult};
 use crate::json::{Json, Object};
@@ -45,6 +45,14 @@ impl RealBackend {
 
     fn unexpected(op: &str) -> ToolError {
         failure("unexpected answer from osascript", Some(op), true)
+    }
+
+    fn number_of(id: &MessageId) -> ToolResult<i64> {
+        id.number().ok_or_else(|| {
+            ToolError::msg(
+                "Message ids of Apple Mail accounts are whole numbers. Use an id from list_messages or search_messages.",
+            )
+        })
     }
 }
 
@@ -92,35 +100,33 @@ impl Backend for RealBackend {
         &self,
         account: &Account,
         mailbox: Option<&str>,
-        id: i64,
+        id: &MessageId,
         max_chars: usize,
     ) -> ToolResult<MessageBody> {
         let mut request = Self::account_request("read", account);
         request.insert("mailbox", mailbox.map_or(Json::Null, Json::from));
-        request.insert("id", id);
+        request.insert("id", Self::number_of(id)?);
         request.insert("maxChars", i64::try_from(max_chars).unwrap_or(i64::MAX));
         let data = self.call(request, JXA_TIMEOUT)?;
         MessageBody::from_json(&data).ok_or_else(|| Self::unexpected("read"))
     }
 
     fn compose(&self, account: &Account, request: &ComposeRequest) -> ToolResult<Preview> {
+        let reply = match &request.reply {
+            Some(reply) => Json::object(vec![
+                ("mailbox", optional_text(&reply.mailbox)),
+                ("id", Json::Int(Self::number_of(&reply.id)?)),
+                ("all", Json::Bool(reply.all)),
+            ]),
+            None => Json::Null,
+        };
         let mut payload = Self::account_request("compose", account);
         payload.insert("mode", request.mode.as_str());
         payload.insert("to", request.to.as_slice());
         payload.insert("cc", request.cc.as_slice());
         payload.insert("subject", request.subject.as_str());
         payload.insert("body", request.body.as_str());
-        payload.insert(
-            "reply",
-            match &request.reply {
-                Some(reply) => Json::object(vec![
-                    ("mailbox", optional_text(&reply.mailbox)),
-                    ("id", Json::Int(reply.id)),
-                    ("all", Json::Bool(reply.all)),
-                ]),
-                None => Json::Null,
-            },
-        );
+        payload.insert("reply", reply);
         payload.insert(
             "seconds",
             i64::try_from(APPROVAL_SECONDS).unwrap_or(i64::MAX),
@@ -151,7 +157,7 @@ mod tests {
     use crate::account::with_labels;
     use crate::backend::{Mode, ReplySpec};
     use crate::osascript::Finished;
-    use crate::testutil::{j, TestResult};
+    use crate::testutil::{j, mid, TestResult};
     use crate::text::text_of;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -289,7 +295,7 @@ mod tests {
             limit: 5,
         };
         backend.messages(&account, &query)?;
-        backend.read(&account, None, 7, 500)?;
+        backend.read(&account, None, &mid("7")?, 500)?;
         let first = payload(&script, 0)?;
         assert_eq!(first, j(r#"{"op": "account_info", "accountId": "ACC-1"}"#)?);
         assert_eq!(
@@ -319,7 +325,7 @@ mod tests {
         let account = gmail();
         let reply = ReplySpec {
             mailbox: Some("INBOX".into()),
-            id: 9,
+            id: mid("9")?,
             all: true,
         };
         backend.compose(&account, &request(Mode::Draft, None))?;

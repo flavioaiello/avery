@@ -1,5 +1,5 @@
 use crate::account::{string_list, Account, MailAccount};
-use crate::error::ToolResult;
+use crate::error::{ToolError, ToolResult};
 use crate::json::{Json, Object};
 use crate::text::text_of;
 
@@ -86,10 +86,51 @@ impl Mode {
     }
 }
 
+pub(crate) const MAX_MESSAGE_ID: usize = 512;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MessageId(String);
+
+impl MessageId {
+    pub(crate) fn parse(text: &str) -> Option<MessageId> {
+        let text = text.trim();
+        (!text.is_empty()
+            && text.len() <= MAX_MESSAGE_ID
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_=+/.-".contains(c)))
+        .then(|| MessageId(text.to_string()))
+    }
+
+    pub(crate) fn argument(value: Option<&Json>, parameter: &str) -> ToolResult<Option<MessageId>> {
+        let invalid = || {
+            ToolError::msg(format!(
+                "Parameter '{parameter}' must be a message id from list_messages or search_messages."
+            ))
+        };
+        match value {
+            None | Some(Json::Null) => Ok(None),
+            Some(Json::Int(number)) if *number >= 1 => MessageId::parse(&number.to_string())
+                .map(Some)
+                .ok_or_else(invalid),
+            Some(Json::Str(text)) => MessageId::parse(text).map(Some).ok_or_else(invalid),
+            Some(_) => Err(invalid()),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn number(&self) -> Option<i64> {
+        self.0.parse::<i64>().ok().filter(|number| *number > 0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReplySpec {
     pub(crate) mailbox: Option<String>,
-    pub(crate) id: i64,
+    pub(crate) id: MessageId,
     pub(crate) all: bool,
 }
 
@@ -170,7 +211,7 @@ pub(crate) trait Backend {
         &self,
         account: &Account,
         mailbox: Option<&str>,
-        id: i64,
+        id: &MessageId,
         max_chars: usize,
     ) -> ToolResult<MessageBody>;
     fn compose(&self, account: &Account, request: &ComposeRequest) -> ToolResult<Preview>;
@@ -287,6 +328,60 @@ impl MessageBody {
 mod tests {
     use super::*;
     use crate::testutil::{j, TestResult};
+
+    #[test]
+    fn message_ids_are_plain_tokens_of_bounded_length() {
+        for good in ["101", "18c3f0a1b2", "AAMkAGI2-_=", "a/b+c.d", " 7 "] {
+            assert!(MessageId::parse(good).is_some(), "{good:?}");
+        }
+        assert_eq!(
+            MessageId::parse(" 7 ").map(|id| id.as_str().to_string()),
+            Some("7".to_string())
+        );
+        for bad in [
+            "", "  ", "a b", "a\"b", "a\nb", "ä", "a;b", "a?b", "a#b", "a%b",
+        ] {
+            assert!(MessageId::parse(bad).is_none(), "{bad:?}");
+        }
+        assert!(MessageId::parse(&"a".repeat(MAX_MESSAGE_ID)).is_some());
+        assert!(MessageId::parse(&"a".repeat(MAX_MESSAGE_ID + 1)).is_none());
+        assert_eq!(
+            MessageId::parse("101").and_then(|id| id.number()),
+            Some(101)
+        );
+        assert_eq!(MessageId::parse("0").and_then(|id| id.number()), None);
+        assert_eq!(MessageId::parse("-5").and_then(|id| id.number()), None);
+        assert_eq!(MessageId::parse("18c3f").and_then(|id| id.number()), None);
+    }
+
+    #[test]
+    fn message_id_arguments_accept_whole_numbers_and_tokens() -> TestResult {
+        let id = |text: &str| -> TestResult {
+            let value = j(text)?;
+            let parsed = MessageId::argument(Some(&value), "id");
+            assert_eq!(
+                parsed.map(|found| found.map(|id| id.as_str().to_string())),
+                Ok(Some("101".to_string())),
+                "{text}"
+            );
+            Ok(())
+        };
+        id("101")?;
+        id("\"101\"")?;
+        id("\" 101 \"")?;
+        assert_eq!(MessageId::argument(None, "id"), Ok(None));
+        assert_eq!(MessageId::argument(Some(&Json::Null), "id"), Ok(None));
+        for text in [
+            "0", "-3", "1.5", "true", "[1]", "{}", "\"\"", "\"a b\"", "\"a;b\"",
+        ] {
+            let value = j(text)?;
+            let Err(error) = MessageId::argument(Some(&value), "reply_to_id") else {
+                return Err(format!("{text} was accepted").into());
+            };
+            assert!(error.message().contains("'reply_to_id'"), "{error}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn decodes_a_message_list() -> TestResult {

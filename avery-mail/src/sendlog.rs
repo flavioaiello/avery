@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::backend::{ComposeRequest, Mode, Preview};
+use crate::backend::{ComposeRequest, MessageId, Mode, Preview};
 use crate::config::Settings;
 use crate::error::{ToolError, ToolResult};
 use crate::journal::{Journal, Messages, View, COOL_DOWN, HOUR, TEN_MINUTES};
@@ -75,7 +75,7 @@ pub(crate) struct LogEntry {
     pub(crate) to: Vec<String>,
     pub(crate) cc: Vec<String>,
     pub(crate) subject: String,
-    pub(crate) reply_to_id: Option<i64>,
+    pub(crate) reply_to_id: Option<String>,
     pub(crate) recipients: usize,
     pub(crate) chars: usize,
     pub(crate) sha256: String,
@@ -130,7 +130,10 @@ impl LogEntry {
             to: logged(to),
             cc: logged(cc),
             subject: one_line_str(subject, MAX_SUBJECT),
-            reply_to_id: request.reply.as_ref().map(|reply| reply.id),
+            reply_to_id: request
+                .reply
+                .as_ref()
+                .map(|reply| reply.id.as_str().to_string()),
             recipients: to.len() + cc.len(),
             chars: char_len(&request.body),
             sha256: digest.chars().take(16).collect(),
@@ -151,7 +154,7 @@ impl LogEntry {
         object.insert("subject", Json::from(&self.subject));
         object.insert(
             "reply_to_id",
-            self.reply_to_id.map_or(Json::Null, Json::Int),
+            self.reply_to_id.as_deref().map_or(Json::Null, Json::from),
         );
         object.insert(
             "recipients",
@@ -197,7 +200,7 @@ impl LogEntry {
             subject: text("subject")?,
             reply_to_id: match object.get("reply_to_id") {
                 Some(Json::Null) => None,
-                Some(Json::Int(number)) => Some(*number),
+                Some(Json::Str(id)) => Some(MessageId::parse(id)?.as_str().to_string()),
                 _ => return None,
             },
             recipients: usize::try_from(whole("recipients")?).ok()?,
@@ -309,7 +312,7 @@ mod tests {
     use super::*;
     use crate::backend::ReplySpec;
     use crate::json;
-    use crate::testutil::{j, log_entry as entry, settings_at, TempDir, TestResult};
+    use crate::testutil::{j, log_entry as entry, mid, settings_at, TempDir, TestResult};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -325,11 +328,11 @@ mod tests {
     }
 
     #[test]
-    fn entries_round_trip_and_carry_the_format_version() {
+    fn entries_round_trip_and_carry_the_format_version() -> TestResult {
         let mut reply = request(Mode::Send);
         reply.reply = Some(ReplySpec {
             mailbox: None,
-            id: 7,
+            id: mid("7")?,
             all: false,
         });
         let original = LogEntry::for_attempt(
@@ -348,8 +351,9 @@ mod tests {
         assert_eq!(LogEntry::from_json(&value), Some(original.clone()));
         assert_eq!(original.chars, 12);
         assert_eq!(original.sha256.len(), 16);
-        assert_eq!(original.reply_to_id, Some(7));
+        assert_eq!(original.reply_to_id, Some("7".to_string()));
         assert!(!json::dumps(&value, false).contains("Kurzer Text"));
+        Ok(())
     }
 
     #[test]
@@ -396,6 +400,10 @@ mod tests {
     fn unknown_versions_modes_and_shapes_are_not_read() -> TestResult {
         let good = r#"{"v": 1, "ts": 5, "mode": "send", "outcome": "sent", "account": "A", "from": "", "to": [], "cc": [], "subject": "", "reply_to_id": null, "recipients": 0, "chars": 1, "sha256": "x"}"#;
         assert!(LogEntry::from_json(&j(good)?).is_some());
+        assert!(LogEntry::from_json(&j(
+            &good.replace(r#""reply_to_id": null"#, r#""reply_to_id": "AAMk-_=""#)
+        )?)
+        .is_some());
         for bad in [
             good.replace(r#""v": 1"#, r#""v": 2"#),
             good.replace(r#""v": 1, "#, ""),
@@ -406,7 +414,9 @@ mod tests {
             good.replace(r#""chars": 1"#, r#""chars": -1"#),
             good.replace(r#""recipients": 0"#, r#""recipients": -1"#),
             good.replace(r#""recipients": 0, "#, ""),
-            good.replace(r#""reply_to_id": null"#, r#""reply_to_id": "x""#),
+            good.replace(r#""reply_to_id": null"#, r#""reply_to_id": 5"#),
+            good.replace(r#""reply_to_id": null"#, r#""reply_to_id": "a b""#),
+            good.replace(r#""reply_to_id": null"#, r#""reply_to_id": """#),
         ] {
             assert_eq!(LogEntry::from_json(&j(&bad)?), None, "{bad}");
         }

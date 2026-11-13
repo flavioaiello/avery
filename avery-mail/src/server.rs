@@ -188,7 +188,7 @@ fn read_tool_list() -> Vec<Json> {
             "read_message",
             "Read one message: headers, attachment names and plain-text body (truncated). Needs the id from list_messages or search_messages; pass the same account and mailbox.",
             vec![
-                ("id", property("integer", "Message id.")),
+                ("id", property("string", "Message id exactly as shown by list_messages or search_messages.")),
                 ("account", account()),
                 ("mailbox", mailbox()),
                 (
@@ -388,8 +388,8 @@ fn compose_properties() -> Vec<(&'static str, Json)> {
         (
             "reply_to_id",
             property(
-                "integer",
-                "Answer to the message with this id (from list_messages / search_messages). Mail then picks recipients and subject.",
+                "string",
+                "Answer to the message with this id (exactly as shown by list_messages / search_messages). The recipients and the subject are taken from it.",
             ),
         ),
         ("mailbox", mailbox()),

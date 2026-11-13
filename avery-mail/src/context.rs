@@ -1,5 +1,6 @@
 use crate::backend::Backend;
 use crate::calendar::{CalendarBackend, FakeCalendar, RealCalendar};
+use crate::cloud::{CalendarRouter, CloudCalendar, CloudMail, MailRouter};
 use crate::config::Settings;
 use crate::fake::FakeBackend;
 #[cfg(test)]
@@ -45,8 +46,14 @@ impl Context {
         }
         Context::new(
             settings,
-            Box::new(RealBackend::system()),
-            Box::new(RealCalendar::system()),
+            Box::new(MailRouter::new(
+                Box::new(RealBackend::system()),
+                CloudMail::system(),
+            )),
+            Box::new(CalendarRouter::new(
+                Box::new(RealCalendar::system()),
+                CloudCalendar::system(),
+            )),
         )
     }
 }

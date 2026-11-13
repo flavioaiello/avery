@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::account::{Account, MailAccount};
 use crate::backend::{
-    Attachment, Backend, ComposeRequest, Mailbox, MessageBody, MessageItem, MessageList,
+    Attachment, Backend, ComposeRequest, Mailbox, MessageBody, MessageId, MessageItem, MessageList,
     MessageQuery, Mode, Person, Preview,
 };
 use crate::error::{ToolError, ToolResult};
@@ -309,13 +309,13 @@ impl Backend for FakeBackend {
         &self,
         account: &Account,
         mailbox: Option<&str>,
-        id: i64,
+        id: &MessageId,
         max_chars: usize,
     ) -> ToolResult<MessageBody> {
         let inbox = Self::mailbox(account, mailbox)?;
         let current = now();
         for message in fake_messages(&account.id, current) {
-            if message.id != id {
+            if Some(message.id) != id.number() {
                 continue;
             }
             let person = |(name, address): (&str, &str)| Person {
@@ -359,7 +359,7 @@ impl Backend for FakeBackend {
             Self::mailbox(account, spec.mailbox.as_deref())?;
             let found = fake_messages(&account.id, now())
                 .into_iter()
-                .find(|message| message.id == spec.id)
+                .find(|message| Some(message.id) == spec.id.number())
                 .ok_or_else(|| ToolError::msg(map_error("can't get message", Some("compose"))))?;
             reply = Some((found.subject.to_string(), found.from.to_string()));
             to = vec![bracketed_address(found.from)];
@@ -408,7 +408,7 @@ mod tests {
     use super::*;
     use crate::account::with_labels;
     use crate::backend::ReplySpec;
-    use crate::testutil::TestResult;
+    use crate::testutil::{mid, TestResult};
 
     fn gmail() -> Account {
         with_labels(accounts()).remove(0)
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn reads_a_message_and_cuts_the_body() -> TestResult {
         let b = backend("no");
-        let body = b.read(&gmail(), None, 102, 10)?;
+        let body = b.read(&gmail(), None, &mid("102")?, 10)?;
         assert_eq!(
             body.attachments,
             [Attachment {
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(body.body, "Guten Tag,");
         assert!(body.body_chars.ok_or("chars")? > 10);
         assert_eq!(
-            b.read(&gmail(), None, 999, 100),
+            b.read(&gmail(), None, &mid("999")?, 100),
             Err(ToolError::msg("Message not found. Use an id from list_messages or search_messages together with the same account and mailbox."))
         );
         Ok(())
@@ -559,7 +559,7 @@ mod tests {
         req.subject = String::new();
         req.reply = Some(ReplySpec {
             mailbox: None,
-            id: 101,
+            id: mid("101")?,
             all: false,
         });
         let preview = backend("no").compose(&gmail(), &req)?;
@@ -574,7 +574,7 @@ mod tests {
         );
         req.reply = Some(ReplySpec {
             mailbox: None,
-            id: 999,
+            id: mid("999")?,
             all: false,
         });
         assert!(

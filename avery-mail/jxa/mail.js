@@ -210,25 +210,6 @@ function squash(value) {
   return String(value === null || value === undefined ? '' : value).replace(/\s+/g, '');
 }
 
-function flatList(list) {
-  var out = [];
-  for (var i = 0; i < list.length; i++) { out.push(flat(list[i], 300)); }
-  return out.join(', ');
-}
-
-function askApproval(p, seconds) {
-  var label = p.sendLabel || 'Senden';
-  var lines = [p.note || 'Pr\u00fcfe Empf\u00e4nger und Text. Nur senden, wenn du das gerade selbst veranlasst hast.', ''];
-  lines.push('Von:        ' + flat(p.from, 200));
-  lines.push('An:         ' + flatList(p.to));
-  if (p.cc.length) { lines.push('Cc:         ' + flatList(p.cc)); }
-  lines.push('Betreff:    ' + flat(p.subject, 300));
-  if (p.reply) { lines.push('Antwort auf: ' + flat(p.reply.subject, 150) + ' (von ' + flat(p.reply.from, 100) + ')'); }
-  lines.push('', '--------------------------------', p.body, '--------------------------------');
-  var decision = showDialog(p.title || 'Goose m\u00f6chte eine E-Mail senden', lines, label, seconds);
-  return decision === 'approved' ? 'send' : decision;
-}
-
 function composeMessage(acc, req) {
   var app = mail(), addrs = [], fullName = '', msg, replyInfo = null, i;
   try { addrs = acc.emailAddresses(); } catch (e) {}

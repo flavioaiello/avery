@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 
 pub(crate) const OSASCRIPT: &str = "/usr/bin/osascript";
 pub(crate) const COMMON_SCRIPT: &str = include_str!("../jxa/common.js");
+pub(crate) const DIALOGS_SCRIPT: &str = include_str!("../jxa/dialogs.js");
+pub(crate) const DIALOG_SCRIPT: &str = include_str!("../jxa/dialog.js");
 pub(crate) const MAIL_SCRIPT: &str = include_str!("../jxa/mail.js");
 pub(crate) const CALENDAR_SCRIPT: &str = include_str!("../jxa/calendar.js");
 
 fn assemble(body: &str) -> String {
     format!(
-        "var INVISIBLE_RANGES = {};\n{COMMON_SCRIPT}\n{body}",
+        "var INVISIBLE_RANGES = {};\n{COMMON_SCRIPT}\n{DIALOGS_SCRIPT}\n{body}",
         crate::text::hidden_ranges_js()
     )
 }
@@ -26,10 +28,15 @@ pub(crate) fn calendar_script() -> String {
     assemble(CALENDAR_SCRIPT)
 }
 
+pub(crate) fn dialog_script() -> String {
+    assemble(DIALOG_SCRIPT)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum App {
     Mail,
     Calendar,
+    Dialog,
 }
 
 impl App {
@@ -37,6 +44,7 @@ impl App {
         match self {
             App::Mail => "Mail",
             App::Calendar => "Calendar",
+            App::Dialog => "System Events",
         }
     }
 
@@ -44,6 +52,7 @@ impl App {
         match self {
             App::Mail => mail_script(),
             App::Calendar => calendar_script(),
+            App::Dialog => dialog_script(),
         }
     }
 }
@@ -99,9 +108,24 @@ pub(crate) fn run_limited(
     stdout_limit: usize,
     stderr_limit: usize,
 ) -> Finished {
+    run_fed(program, args, &[], timeout, stdout_limit, stderr_limit)
+}
+
+pub(crate) fn run_fed(
+    program: &str,
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Finished {
     let spawned = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -112,6 +136,12 @@ pub(crate) fn run_limited(
         stop(&mut child);
         return Finished::NotStarted;
     };
+    if let Some(mut stdin) = child.stdin.take() {
+        let bytes = input.to_vec();
+        thread::spawn(move || {
+            let _ = stdin.write_all(&bytes);
+        });
+    }
     let out = drain(stdout, stdout_limit);
     let err = drain(stderr, stderr_limit);
     let deadline = Instant::now() + timeout;
@@ -170,7 +200,7 @@ fn running(app: App) -> bool {
 
 impl Host for OsascriptHost {
     fn ensure_running(&self, app: App) {
-        if running(app) {
+        if app == App::Dialog || running(app) {
             return;
         }
         let _ = run_command(

@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::account::MailAccount;
-use crate::backend::{ComposeRequest, MessageQuery, Mode, ReplySpec};
+use crate::backend::{ComposeRequest, MessageId, MessageQuery, Mode, ReplySpec};
 use crate::calendar::{
     local_today, perform, Action, Calendar, CalendarEntry, Change, ChangeResult, Decision,
     EventFields, Origin, Window,
@@ -19,6 +19,7 @@ use crate::recurrence;
 use crate::rights::{Level, Rights};
 use crate::sendlog::{self, Outcome};
 use crate::server;
+use crate::source::Source;
 use crate::text::{clean_str, one_line_str};
 use crate::texts::{
     CALENDAR_WRITE_OFF, COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
@@ -126,7 +127,7 @@ fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
 fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
     let listing = (|| {
         let rights = ctx.settings.rights()?;
-        let calendars = ctx.calendar.calendars()?;
+        let calendars = ctx.calendar.calendars(Source::Apple, "")?;
         Ok::<_, ToolError>((rights, calendars))
     })();
     let (rights, calendars) = match listing {
@@ -221,7 +222,7 @@ fn setup_calendars(
 ) -> Result<(), u8> {
     let calendars = ctx
         .calendar
-        .calendars()
+        .calendars(Source::Apple, "")
         .map_err(|error| failed(console, &error))?;
     if calendars.is_empty() {
         console.say("Kalender kennt noch keine Kalender.");
@@ -673,10 +674,9 @@ fn selftest_account(
             let Some(id) = &first else {
                 return Ok("uebersprungen (keine Nachricht in 30 Tagen)".to_string());
             };
-            let id = id
-                .parse::<i64>()
-                .map_err(|_| ToolError::msg("Nachrichten-ID ist keine Zahl"))?;
-            let message = ctx.backend.read(account, None, id, 500)?;
+            let id = MessageId::parse(id)
+                .ok_or_else(|| ToolError::msg("Nachrichten-ID ist ungueltig"))?;
+            let message = ctx.backend.read(account, None, &id, 500)?;
             Ok(format!(
                 "Text {} Zeichen, {} Anhaenge",
                 message
@@ -706,7 +706,7 @@ fn selftest_calendar(
     calendar: &Calendar,
 ) {
     let reachable = timed(|| {
-        let known = ctx.calendar.calendars()?;
+        let known = ctx.calendar.calendars(Source::Apple, "")?;
         let info = known
             .iter()
             .find(|info| info.id == calendar.id)
@@ -943,7 +943,7 @@ fn selftest_write_mail(
                 "   Suche die Test-Mail 'Scout Selbsttest - Mail' im Posteingang (bis zu 60 s) ...",
             );
             let rounds = if ctx.settings.fake { 1 } else { 12 };
-            let mut found: Option<i64> = None;
+            let mut found: Option<MessageId> = None;
             for number in 0..rounds {
                 let query = MessageQuery {
                     field: "subject".to_string(),
@@ -953,7 +953,7 @@ fn selftest_write_mail(
                     found = list
                         .items
                         .first()
-                        .and_then(|item| item.id.parse::<i64>().ok());
+                        .and_then(|item| MessageId::parse(&item.id));
                 }
                 if found.is_some() {
                     break;
@@ -980,7 +980,7 @@ fn selftest_write_mail(
                     body,
                     Some(ReplySpec {
                         mailbox: None,
-                        id,
+                        id: id.clone(),
                         all: false,
                     }),
                 );
@@ -1367,7 +1367,7 @@ mod tests {
             &self,
             _: &crate::account::Account,
             _: Option<&str>,
-            _: i64,
+            _: &MessageId,
             _: usize,
         ) -> ToolResult<crate::backend::MessageBody> {
             Err(ToolError::msg("BACKEND TOUCHED"))
@@ -1387,7 +1387,7 @@ mod tests {
     struct UntouchableCalendar;
 
     impl CalendarBackend for UntouchableCalendar {
-        fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
+        fn calendars(&self, _: Source, _: &str) -> ToolResult<Vec<CalendarInfo>> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
         fn events(

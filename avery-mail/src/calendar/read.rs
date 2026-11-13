@@ -4,6 +4,7 @@ use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{Json, Object};
 use crate::recurrence::{self, Rule};
+use crate::source::Source;
 use crate::text::{char_len, clean, clean_str, one_line_str, take_chars, to_int};
 use crate::texts::{NO_CALENDARS, UNTRUSTED};
 
@@ -192,7 +193,7 @@ pub(crate) fn list_calendars(ctx: &Context, _args: &Object) -> ToolResult<String
     if calendars.is_empty() {
         return Err(ToolError::msg(NO_CALENDARS));
     }
-    let known = match ctx.calendar.calendars() {
+    let known = match ctx.calendar.calendars(Source::Apple, "") {
         Ok(known) => Some(known),
         Err(error) if error.is_tool_error() => None,
         Err(error) => return Err(error),
@@ -601,7 +602,7 @@ mod tests {
     struct Stub(Vec<RawEvent>);
 
     impl CalendarBackend for Stub {
-        fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
+        fn calendars(&self, _: Source, _: &str) -> ToolResult<Vec<CalendarInfo>> {
             Err(ToolError::msg("down"))
         }
         fn events(&self, _: &Calendar, window: Window) -> ToolResult<Vec<RawEvent>> {

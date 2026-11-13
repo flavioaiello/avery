@@ -1,8 +1,8 @@
-use crate::backend::{MessageItem, MessageQuery, Person};
+use crate::backend::{MessageId, MessageItem, MessageQuery, Person};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::json::Object;
-use crate::text::{char_len, clean, clean_str, one_line_str, text_of, to_bool, to_int, to_int_opt};
+use crate::text::{char_len, clean, clean_str, one_line_str, text_of, to_bool, to_int};
 use crate::texts::{NO_ACCOUNTS, UNTRUSTED};
 
 fn non_empty(text: String) -> Option<String> {
@@ -219,9 +219,9 @@ fn kilobytes(size: Option<i64>) -> i64 {
 }
 
 pub(crate) fn read_message(ctx: &Context, args: &Object) -> ToolResult<String> {
-    let Some(id) = to_int_opt(args.get("id"), 1, 2_147_483_647)? else {
+    let Some(id) = MessageId::argument(args.get("id"), "id")? else {
         return Err(ToolError::msg(
-            "Parameter 'id' is required (integer from list_messages or search_messages).",
+            "Parameter 'id' is required (from list_messages or search_messages).",
         ));
     };
     let accounts = ctx.settings.resolve(args.get("account"))?;
@@ -237,7 +237,7 @@ pub(crate) fn read_message(ctx: &Context, args: &Object) -> ToolResult<String> {
     let mailbox = non_empty(clean(args.get("mailbox"), Some(120)));
     let message = ctx
         .backend
-        .read(account, mailbox.as_deref(), id, max_chars)?;
+        .read(account, mailbox.as_deref(), &id, max_chars)?;
     let body = clean_str(&message.body, None);
     let total = message
         .body_chars
@@ -263,7 +263,7 @@ pub(crate) fn read_message(ctx: &Context, args: &Object) -> ToolResult<String> {
             "Account: {} | Mailbox: {} | id: {}",
             account.label,
             clean_str(&message.mailbox, Some(120)),
-            id
+            id.as_str()
         ),
         format!("From: {}", one_line_str(&message.from, 120)),
         format!("To: {}", or_dash(people(&message.to))),
@@ -422,19 +422,23 @@ mod tests {
     fn read_message_needs_one_account_and_an_id() {
         assert_eq!(
             call(read_message, "{}"),
-            Err(
-                "Parameter 'id' is required (integer from list_messages or search_messages)."
-                    .into()
-            )
+            Err("Parameter 'id' is required (from list_messages or search_messages).".into())
         );
         assert_eq!(
             call(read_message, r#"{"id": 101}"#),
             Err("Parameter 'account' is required because ids are only unique within one account. Allowed: Demo Gmail, Demo Outlook".into())
         );
-        for id in ["999", "0"] {
+        for id in ["999", "\"999\""] {
             let text = format!(r#"{{"id": {id}, "account": "Demo Gmail"}}"#);
             assert!(
                 matches!(call(read_message, &text), Err(m) if m.starts_with("Message not found.")),
+                "{id}"
+            );
+        }
+        for id in ["0", "-4", "\"a b\"", "[1]"] {
+            let text = format!(r#"{{"id": {id}, "account": "Demo Gmail"}}"#);
+            assert!(
+                matches!(call(read_message, &text), Err(m) if m.starts_with("Parameter 'id' must be a message id")),
                 "{id}"
             );
         }
@@ -469,7 +473,7 @@ mod tests {
             &self,
             _: &crate::account::Account,
             _: Option<&str>,
-            _: i64,
+            _: &MessageId,
             max_chars: usize,
         ) -> ToolResult<crate::backend::MessageBody> {
             let full = "word \u{200b}\u{0}".repeat(1000);

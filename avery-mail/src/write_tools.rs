@@ -1,13 +1,11 @@
 use crate::account::Account;
-use crate::backend::{ComposeRequest, Mode, Preview, ReplySpec};
+use crate::backend::{ComposeRequest, MessageId, Mode, Preview, ReplySpec};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::journal;
 use crate::json::{Json, Object};
 use crate::sendlog::{self, LogEntry, Outcome};
-use crate::text::{
-    bracketed, char_len, clean, clean_str, one_line, one_line_str, to_bool, to_int_opt,
-};
+use crate::text::{bracketed, char_len, clean, clean_str, one_line, one_line_str, to_bool};
 use crate::texts::{
     MAX_DRAFT_CHARS, MAX_RECIPIENTS, MAX_SEND_CHARS, MAX_SEND_LINES, MAX_SUBJECT, UNTRUSTED,
 };
@@ -169,15 +167,7 @@ pub(crate) fn compose_request(
             "The subject is too long (max {MAX_SUBJECT} characters)."
         )));
     }
-    let reply_id = to_int_opt(
-        args.get("reply_to_id"),
-        i64::from(i32::MIN),
-        i64::from(i32::MAX),
-    )?;
-    let reply = match reply_id {
-        Some(id) if id < 1 => return Err(ToolError::msg(
-            "Parameter 'reply_to_id' must be a message id from list_messages or search_messages.",
-        )),
+    let reply = match MessageId::argument(args.get("reply_to_id"), "reply_to_id")? {
         Some(id) => {
             if !to.is_empty() || !cc.is_empty() || !subject.is_empty() {
                 return Err(ToolError::msg(
@@ -711,9 +701,17 @@ mod tests {
                 vec![
                     ("to", "<remove>"),
                     ("subject", "<remove>"),
-                    ("reply_to_id", "\"abc\""),
+                    ("reply_to_id", "\"a b\""),
                 ],
-                "Invalid number",
+                "reply_to_id",
+            ),
+            (
+                vec![
+                    ("to", "<remove>"),
+                    ("subject", "<remove>"),
+                    ("reply_to_id", "[1]"),
+                ],
+                "reply_to_id",
             ),
         ];
         for (changes, needle) in cases {
