@@ -4,6 +4,12 @@ const MAX_INPUT: usize = 2 * 1024 * 1024;
 const MAX_NAME: usize = 32;
 const MAX_REFERENCE: usize = 12;
 const RAW: [&str; 3] = ["script", "style", "title"];
+const CP1252: [char; 32] = [
+    '\u{20ac}', '\u{81}', '\u{201a}', '\u{192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{2c6}', '\u{2030}', '\u{160}', '\u{2039}', '\u{152}', '\u{8d}', '\u{17d}', '\u{8f}',
+    '\u{90}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{2dc}', '\u{2122}', '\u{161}', '\u{203a}', '\u{153}', '\u{9d}', '\u{17e}', '\u{178}',
+];
 const LATIN1_START: u32 = 160;
 const LATIN1: &[&str] = &[
     "nbsp", "iexcl", "cent", "pound", "curren", "yen", "brvbar", "sect", "uml", "copy", "ordf",
@@ -228,7 +234,11 @@ fn numeric(number: &str) -> Option<char> {
     if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
         return None;
     }
-    char::from_u32(u32::from_str_radix(digits, radix).ok()?)
+    let value = u32::from_str_radix(digits, radix).ok()?;
+    match value {
+        0x80..=0x9f => CP1252.get(usize::try_from(value - 0x80).ok()?).copied(),
+        _ => char::from_u32(value),
+    }
 }
 
 fn decode(rest: &str) -> Option<(char, usize)> {
@@ -315,7 +325,6 @@ struct Converter<'a> {
     source: &'a str,
     position: usize,
     sink: Sink,
-    no_head_end: bool,
 }
 
 impl<'a> Converter<'a> {
@@ -326,16 +335,6 @@ impl<'a> Converter<'a> {
     fn skip_raw(&mut self, name: &str) {
         let tail = self.rest();
         self.position += raw_length(tail, name).unwrap_or(tail.len());
-    }
-
-    fn skip_head(&mut self) {
-        if self.no_head_end {
-            return;
-        }
-        match raw_length(self.rest(), "head") {
-            Some(length) => self.position += length,
-            None => self.no_head_end = true,
-        }
     }
 
     fn tag(&mut self, skip: usize, closing: bool) {
@@ -355,7 +354,6 @@ impl<'a> Converter<'a> {
         self.position += length;
         match (closing, name.as_str()) {
             (false, raw) if RAW.contains(&raw) => self.skip_raw(raw),
-            (false, "head") => self.skip_head(),
             (_, other) => self.sink.element(other, closing),
         }
     }
@@ -421,7 +419,6 @@ fn convert(html: &str, layout: Layout) -> String {
         source,
         position: 0,
         sink: Sink::new(source.len(), layout),
-        no_head_end: false,
     }
     .run()
 }
@@ -650,22 +647,43 @@ mod tests {
     }
 
     #[test]
-    fn head_content_is_dropped_only_when_the_head_is_closed() {
+    fn head_tags_are_ignored_and_only_title_style_and_script_are_dropped() {
         assert_eq!(
             to_text("<html><head><title>T</title><meta charset=\"utf-8\"></head><body>Body</body></html>"),
             "Body"
         );
-        assert_eq!(to_text("<head>text in head</head>body"), "body");
+        assert_eq!(to_text("<head>text in head</head>body"), "text in headbody");
         assert_eq!(to_text("<head><body>kept</body>"), "kept");
         assert_eq!(to_text("<head>unclosed text"), "unclosed text");
-        assert_eq!(to_text("<head>a</head>b<head>c"), "bc");
+        assert_eq!(to_text("<head>a</head>b<head>c"), "abc");
         assert_eq!(to_text("<header>visible</header>"), "visible");
         assert_eq!(to_text("<heady>x</heady>"), "x");
-        assert_eq!(to_text("<HEAD>x</HEAD >y"), "y");
+        assert_eq!(to_text("<HEAD>x</HEAD >y"), "xy");
         assert_eq!(
             to_text("<head><style>p{}</style></head><body><p>x</p></body>"),
             "x"
         );
+    }
+
+    #[test]
+    fn an_unclosed_head_never_swallows_the_message_before_a_quoted_original() {
+        let html = "<html><head><title>T</title><body><p>Hello customer</p><div>-----Original-----<html><head></head><body>old text</body></html></div>";
+        let text = to_text(html);
+        assert!(text.contains("Hello customer"), "{text}");
+        assert!(text.contains("-----Original-----"), "{text}");
+        assert!(text.contains("old text"), "{text}");
+    }
+
+    #[test]
+    fn numeric_references_in_the_c1_range_are_windows_1252_characters() {
+        assert_eq!(to_text("2020&#150;2022"), "2020\u{2013}2022");
+        assert_eq!(to_text("&#128;5 &#x80;5"), "\u{20ac}5 \u{20ac}5");
+        assert_eq!(
+            to_text("&#147;q&#148; &#145;r&#146; &#133;"),
+            "\u{201c}q\u{201d} \u{2018}r\u{2019} \u{2026}"
+        );
+        assert_eq!(to_text("a&#129;b&#141;c&#143;d&#144;e&#157;f"), "abcdef");
+        assert_eq!(to_text("&#159;&#x9F;"), "\u{178}\u{178}");
     }
 
     #[test]
@@ -1264,8 +1282,8 @@ mod tests {
             "a\u{e}\u{f}\u{10}\u{1b}\u{1f}b",
             "a\u{7f}b",
             "a\u{80}\u{81}\u{84}\u{86}\u{8d}\u{9f}b",
-            "a&#1;&#8;&#14;&#31;&#127;&#128;&#159;b",
-            "a&#x7F;&#x80;&#x9F;&#x1B;b",
+            "a&#1;&#8;&#14;&#31;&#127;&#129;&#141;&#143;&#144;&#157;b",
+            "a&#x7F;&#x81;&#x8D;&#x8F;&#x90;&#x9D;&#x1B;b",
             "\u{0}a\u{0}b\u{0}",
             "<span\u{0}>a</span\u{0}>b",
             "<a title=\"\u{0}\u{1}\">a</a>b",
@@ -1759,7 +1777,6 @@ mod tests {
             "<script>SECRET</script>",
             "<style>SECRET</style>",
             "<title>SECRET</title>",
-            "<head>SECRET</head>",
             "<SCRIPT>SECRET</SCRIPT >",
             "</SECRET>",
             "</ SECRET>",
