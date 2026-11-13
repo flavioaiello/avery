@@ -1,4 +1,3 @@
-mod html;
 mod wire;
 mod write;
 

@@ -1,4 +1,3 @@
-mod html;
 #[cfg(test)]
 mod tests;
 mod times;
@@ -14,6 +13,7 @@ use crate::calendar::{
 };
 use crate::civil::{Date, DateTime};
 use crate::error::{ToolError, ToolResult};
+use crate::html;
 use crate::http::{encode_component, query, Method};
 use crate::json::{Json, Object};
 use crate::osascript::Host;
@@ -548,7 +548,7 @@ fn notes_of(object: &Object) -> String {
         .and_then(Json::as_str)
         .is_some_and(|kind| kind.eq_ignore_ascii_case("html"));
     let text = if is_html {
-        html::to_text(content, MAX_NOTES_READ)
+        html::to_text(content)
     } else {
         plain(content)
     };

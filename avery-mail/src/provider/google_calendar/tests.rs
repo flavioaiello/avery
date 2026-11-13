@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::*;
+use crate::html;
 use crate::http::scripted::{ok, Scripted};
 use crate::http::{HttpError, Request, Response, Transport};
 use crate::json;
@@ -903,7 +904,7 @@ mod details {
         );
         assert_eq!(
             found.notes,
-            "Bitte Kuchen mitbringen.\n- Teller\n- Besteck\nDanke & Gruss"
+            "Bitte Kuchen mitbringen.\n\nTeller\nBesteck\nDanke & Gruss"
         );
         assert_eq!(found.url, "");
         assert_eq!(

@@ -1,6 +1,5 @@
 mod draft;
 mod folders;
-mod html;
 mod stamp;
 
 use std::cmp::Reverse;
@@ -14,6 +13,7 @@ use crate::backend::{
     MessageQuery, Person, Preview, MAX_MESSAGE_ID,
 };
 use crate::error::{ToolError, ToolResult};
+use crate::html;
 use crate::http::{encode_component, query};
 use crate::journal;
 use crate::json::{Json, Object};

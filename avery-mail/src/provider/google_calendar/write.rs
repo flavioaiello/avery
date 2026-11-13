@@ -4,13 +4,14 @@ use crate::calendar::{
 };
 use crate::civil::DateTime;
 use crate::error::{ToolError, ToolResult};
+use crate::html;
 use crate::http::Method;
 use crate::json::{Json, Object};
 use crate::osascript::Host;
 use crate::provider::dialog::{approve_change, Verdict};
 use crate::text::char_len;
 
-use super::{calendar_gone, event_gone, html, segment, unexpected, usable_id, wire, Target, BASE};
+use super::{calendar_gone, event_gone, segment, unexpected, usable_id, wire, Target, BASE};
 
 const MAX_NEW_NOTES: usize = 1200;
 

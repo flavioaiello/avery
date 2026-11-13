@@ -6,10 +6,11 @@ use crate::calendar::{
 };
 use crate::civil::{Date, DateTime};
 use crate::error::{ToolError, ToolResult};
+use crate::html;
 use crate::json::{Json, Object};
 use crate::text::{one_line_str, take_chars};
 
-use super::{html, unexpected, usable_id};
+use super::{unexpected, usable_id};
 
 const SUMMARY_LIMIT: usize = MAX_KEPT_SUMMARY + 1;
 const LOCATION_LIMIT: usize = MAX_KEPT_LOCATION + 1;
@@ -223,7 +224,7 @@ fn notes(object: &Object) -> ToolResult<String> {
             "The description of this event is too large to read safely.",
         ));
     }
-    Ok(html::to_text(description, NOTES_LIMIT))
+    Ok(take_chars(&html::to_notes(description), NOTES_LIMIT))
 }
 
 pub(super) fn detail(object: &Object) -> ToolResult<EventDetail> {
