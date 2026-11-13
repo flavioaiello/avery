@@ -230,8 +230,8 @@ fn failure(text: &str, _op: Option<&str>, _uncertain: bool) -> ToolError {
     }
     if low.contains("-1743") || low.contains("not authorized") || low.contains("nicht berechtigt") {
         return ToolError::msg(concat!(
-            "macOS erlaubt die Dialoge nicht. Bitte in den Systemeinstellungen unter Datenschutz & Sicherheit > Automation ",
-            "erlauben, dass Avery (oder die App, die Avery startet) »System Events« steuern darf, und Avery erneut starten."
+            "macOS erlaubt die Dialoge nicht. Bitte in den Systemeinstellungen unter Datenschutz & Sicherheit die ",
+            "Berechtigung erlauben, nach der macOS gefragt hat (Automation oder Benachrichtigungen), und Avery erneut starten."
         ));
     }
     if low.contains("bad_request") {
@@ -833,7 +833,9 @@ mod tests {
                 return Err("expected a failure".into());
             };
             assert!(message.contains("Automation"), "{message}");
-            assert!(message.contains("System Events"), "{message}");
+            assert!(message.contains("Benachrichtigungen"), "{message}");
+            assert!(message.contains("Datenschutz & Sicherheit"), "{message}");
+            assert!(!message.contains("System Events"), "{message}");
         }
         let script = Script::new().then(
             "ask_text",

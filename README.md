@@ -117,10 +117,11 @@ dialogs cannot be shown or are cancelled, Avery still starts. `avery mail onboar
 `link`, `unlink`, `setup` and `revoke`, so it refuses in demo mode.
 
 The dialogs come from the helper `/usr/bin/osascript` and show only on the Mac's screen; the agent can neither start
-them nor answer them (the server `avery-mail serve` has no code path to them). If macOS asks once whether Avery (or the
-app that starts it, such as Avery.app or Terminal) may control System Events, allow it in System Settings > Privacy &
-Security > Automation: without it no dialog can be shown, and Avery tells you so and starts as usual. If you prefer the
-terminal, `AVERY_NO_ONBOARD=1` keeps the dialogs away and the manual steps below stay as they were.
+them nor answer them (the server `avery-mail serve` has no code path to them). They run inside that helper and send no
+Apple event to another app. macOS may still ask for a permission, for example to show notifications now, or Automation
+later for the approval dialogs: allow it (System Settings > Privacy & Security). If no dialog appears, run
+`avery mail onboard` in a terminal: it shows the dialogs again or says why it cannot. Avery starts as usual either way.
+If you prefer the terminal, `AVERY_NO_ONBOARD=1` keeps the dialogs away and the manual steps below stay as they were.
 
 ## Gmail and Outlook.com
 

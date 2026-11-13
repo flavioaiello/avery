@@ -961,16 +961,19 @@ STUB
     skip "O22 Avery.app startet 'avery up', den Weg mit der Einrichtung (O1, O2)" "osacompile fehlt"
   fi
   has "$(cat "$ROOT/Casks/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Casks/avery.rb")" "AVERY_NO_ONBOARD=1" \
-    && has "$(cat "$ROOT/Casks/avery.rb")" "System Events" && has "$(cat "$ROOT/Casks/avery.rb")" "Nicht mehr fragen"
-  check "O23 Cask: die Hinweise nennen die Dialoge, den Schalter und die Berechtigung" $?
+    && has "$(cat "$ROOT/Casks/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Casks/avery.rb")" "If no dialog appears" \
+    && lacks "$(cat "$ROOT/Casks/avery.rb")" "System Events" && has "$(cat "$ROOT/Casks/avery.rb")" "Nicht mehr fragen"
+  check "O23 Cask: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$ROOT/Formula/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Formula/avery.rb")" "AVERY_NO_ONBOARD=1" \
-    && has "$(cat "$ROOT/Formula/avery.rb")" "System Events"
-  check "O24 Formel: die Hinweise nennen die Dialoge, den Schalter und die Berechtigung" $?
+    && has "$(cat "$ROOT/Formula/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Formula/avery.rb")" "If no dialog appears" \
+    && lacks "$(cat "$ROOT/Formula/avery.rb")" "System Events"
+  check "O24 Formel: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$SHARE/avery.env")" "AVERY_NO_ONBOARD"
   check "O25 die Vorlage avery.env nennt AVERY_NO_ONBOARD" $?
   has "$(cat "$ROOT/README.md")" "avery mail onboard --if-needed" && has "$(cat "$ROOT/README.md")" "onboard.dismissed" \
-    && has "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
-  check "O26 README: die Dialoge, der Schalter, die Markierung und die Berechtigung sind beschrieben" $?
+    && has "$(cat "$ROOT/README.md")" "macOS may still ask for a permission" && has "$(cat "$ROOT/README.md")" "If no dialog appears" \
+    && lacks "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
+  check "O26 README: die Dialoge, der Schalter, die Markierung und die moegliche Berechtigung sind beschrieben, ohne System Events" $?
 }
 
 # ------------------------------------------------------------------ W: the watcher stops the model after Goose was closed

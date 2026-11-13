@@ -42,8 +42,9 @@ class Avery < Formula
 
       Then open "Avery" (Spotlight, the Dock, or: avery up). While no account is linked, the first start guides you
       through the setup in macOS dialogs: Gmail, Outlook.com (personal accounts; you register your own OAuth app once,
-      see the README) and, optionally, Apple Mail and Calendar. If macOS asks whether Avery may control System Events,
-      allow it (System Settings > Privacy & Security > Automation). Cancelling a dialog saves nothing more; Avery starts anyway.
+      see the README) and, optionally, Apple Mail and Calendar. macOS may ask for a permission (notifications now,
+      Automation later for the approval dialogs): allow it. If no dialog appears, run "avery mail onboard" in a terminal
+      to see the reason. Cancelling a dialog saves nothing more; Avery starts anyway.
 
       The same from a terminal:
         avery mail onboard         # shows the dialogs again

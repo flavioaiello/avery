@@ -44,7 +44,7 @@ impl App {
         match self {
             App::Mail => "Mail",
             App::Calendar => "Calendar",
-            App::Dialog => "System Events",
+            App::Dialog => "osascript",
         }
     }
 
