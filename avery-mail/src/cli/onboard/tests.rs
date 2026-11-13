@@ -17,7 +17,7 @@ use crate::calendar::{
     Window,
 };
 use crate::cli::dispatch;
-use crate::error::ToolResult;
+use crate::error::{ToolError, ToolResult};
 use crate::http::scripted::{Scripted, Shared};
 use crate::http::Method;
 use crate::json::{self, Json};
@@ -63,6 +63,7 @@ fn google_tokens(write: bool) -> String {
 struct Orchard {
     listing: Listing,
     touched: Arc<AtomicUsize>,
+    broken: bool,
 }
 
 impl Orchard {
@@ -73,11 +74,19 @@ impl Orchard {
                 calendars,
             },
             touched: Arc::new(AtomicUsize::new(0)),
+            broken: false,
         }
     }
 
     fn empty() -> Orchard {
         Orchard::new(Vec::new(), Vec::new())
+    }
+
+    fn broken() -> Orchard {
+        Orchard {
+            broken: true,
+            ..Orchard::empty()
+        }
     }
 
     fn touch(&self) {
@@ -88,6 +97,9 @@ impl Orchard {
 impl Backend for Orchard {
     fn all_accounts(&self) -> ToolResult<Vec<MailAccount>> {
         self.touch();
+        if self.broken {
+            return Err(ToolError::msg("Mail laeuft nicht"));
+        }
         self.listing.all_accounts()
     }
 
@@ -1853,5 +1865,34 @@ fn a_new_account_at_the_limit_is_refused_after_the_sign_in_and_its_token_removed
     );
     assert_eq!(station.tokens(), 0);
     assert_eq!(station.config(), config);
+    Ok(())
+}
+
+#[test]
+fn an_apple_step_that_fails_is_not_repeated_and_leaves_the_rest_alone() -> TestResult {
+    let station = gmail_station(None, Visit::Good("c"), false, Orchard::broken())?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0, 2]),
+        link_google(false),
+        read_calendars(&[0]),
+        vec![
+            ("ask_buttons", Reply::Button(1)),
+            ("ask_buttons", Reply::Button(1)),
+        ],
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let failure = script.seen()[11].text("text");
+    assert!(failure.contains("Apple Mail ist nicht lesbar"), "{failure}");
+    assert!(script.seen()[12]
+        .text("text")
+        .starts_with("Das ist eingerichtet:"));
+    assert_eq!(station.apple_calls(), 1);
+    let rights = station.rights()?;
+    assert_eq!(rights.accounts.len(), 1);
+    assert!(rights.apple.mail.is_empty() && rights.apple.calendars.is_empty());
     Ok(())
 }

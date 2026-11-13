@@ -213,7 +213,7 @@ impl<'a> Flow<'a> {
     fn after_providers(&mut self) -> Step {
         if let Some(provider) = self.plan.remote.pop_front() {
             Step::Link(provider)
-        } else if self.plan.apple {
+        } else if std::mem::take(&mut self.plan.apple) {
             Step::Apple
         } else {
             Step::Summary
