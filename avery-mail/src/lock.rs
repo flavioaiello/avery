@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::thread;
@@ -25,22 +25,44 @@ impl Drop for FileLock {
     }
 }
 
+#[cfg(target_os = "macos")]
+const NONBLOCK_NOFOLLOW: i32 = 0x0004 | 0x0100;
+#[cfg(not(target_os = "macos"))]
+const NONBLOCK_NOFOLLOW: i32 = 0;
+const OPEN_ATTEMPTS: usize = 3;
+
+fn regular(file: File) -> io::Result<File> {
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::ErrorKind::InvalidInput.into())
+    }
+}
+
 fn open(path: &str) -> io::Result<File> {
-    if let Ok(found) = fs::metadata(path) {
-        if !found.is_file() {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        match OpenOptions::new().read(true).open(path) {
+    for _ in 0..OPEN_ATTEMPTS {
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(NONBLOCK_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => return regular(file),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            opened => return opened,
+            Err(error) => return Err(error),
+        }
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(NONBLOCK_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => return regular(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
     }
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)
+    Err(io::ErrorKind::AlreadyExists.into())
 }
 
 pub(crate) fn acquire(path: &str, wait: Duration) -> Result<FileLock, LockError> {
@@ -184,6 +206,28 @@ mod tests {
             acquire(&dir.path("folder.lock"), Duration::from_secs(30)).err(),
             Some(LockError::Io(io::ErrorKind::InvalidInput))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlinked_lock_file_is_refused_and_its_target_is_never_created() -> TestResult {
+        let dir = TempDir::new()?;
+        let target = dir.path("target");
+        let link = dir.path("a.lock");
+        std::os::unix::fs::symlink(&target, &link)?;
+        assert!(matches!(
+            acquire(&link, Duration::ZERO),
+            Err(LockError::Io(_))
+        ));
+        assert!(!std::path::Path::new(&target).exists());
+        #[cfg(target_os = "macos")]
+        {
+            fs::write(&target, "")?;
+            assert!(matches!(
+                acquire(&link, Duration::ZERO),
+                Err(LockError::Io(_))
+            ));
+        }
         Ok(())
     }
 
