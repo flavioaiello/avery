@@ -1,30 +1,26 @@
-//! Accounts as Mail reports them and accounts on the allowlist.
-
 use crate::json::Json;
-use crate::pycompat;
+use crate::text::text_of;
 
-/// An account as reported by Mail (or by the fake backend).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MailAccount {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub addresses: Vec<String>,
+pub(crate) struct MailAccount {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) addresses: Vec<String>,
 }
 
 impl MailAccount {
-    /// Reads the answer of the JXA script. Missing fields become empty.
-    pub fn from_json(value: &Json) -> Option<MailAccount> {
+    pub(crate) fn from_json(value: &Json) -> Option<MailAccount> {
         let object = value.as_object()?;
         Some(MailAccount {
-            id: pycompat::text_of(object.get("id")),
-            name: pycompat::text_of(object.get("name")),
-            kind: pycompat::text_of(object.get("type")),
+            id: text_of(object.get("id")),
+            name: text_of(object.get("name")),
+            kind: text_of(object.get("type")),
             addresses: string_list(object.get("addresses")),
         })
     }
 
-    pub fn to_json(&self) -> Json {
+    pub(crate) fn to_json(&self) -> Json {
         Json::object(vec![
             ("id", Json::from(&self.id)),
             ("name", Json::from(&self.name)),
@@ -34,42 +30,40 @@ impl MailAccount {
     }
 }
 
-/// The elements of a JSON array as text; anything else is an empty list.
-pub fn string_list(value: Option<&Json>) -> Vec<String> {
+pub(crate) fn string_list(value: Option<&Json>) -> Vec<String> {
     match value {
-        Some(Json::Arr(items)) => items.iter().map(pycompat::str_of).collect(),
+        Some(Json::Arr(items)) => items
+            .iter()
+            .filter_map(Json::as_str)
+            .map(str::to_string)
+            .collect(),
         _ => Vec::new(),
     }
 }
 
-/// An account the agent may read (and perhaps write). `label` is the name shown
-/// to the model: the account name, or `name <address>` when two accounts share a name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Account {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub addresses: Vec<String>,
-    pub label: String,
+pub(crate) struct Account {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) addresses: Vec<String>,
+    pub(crate) label: String,
 }
 
 impl Account {
-    /// Whether `wanted` (already stripped and lower-cased) names this account:
-    /// its label, its name or one of its addresses.
-    pub fn is_named(&self, wanted: &str) -> bool {
-        pycompat::lower(&self.label) == wanted
-            || pycompat::lower(&self.name) == wanted
-            || self.addresses.iter().any(|a| pycompat::lower(a) == wanted)
+    pub(crate) fn is_named(&self, wanted: &str) -> bool {
+        self.label.to_lowercase() == wanted
+            || self.name.to_lowercase() == wanted
+            || self.addresses.iter().any(|a| a.to_lowercase() == wanted)
     }
 }
 
-/// Gives every account its label.
-pub fn with_labels(entries: Vec<MailAccount>) -> Vec<Account> {
-    let names: Vec<String> = entries.iter().map(|e| pycompat::lower(&e.name)).collect();
+pub(crate) fn with_labels(entries: Vec<MailAccount>) -> Vec<Account> {
+    let names: Vec<String> = entries.iter().map(|e| e.name.to_lowercase()).collect();
     entries
         .into_iter()
         .map(|entry| {
-            let own = pycompat::lower(&entry.name);
+            let own = entry.name.to_lowercase();
             let duplicate = names.iter().filter(|name| **name == own).count() > 1;
             let address = match entry.addresses.first() {
                 Some(address) => address.clone(),
@@ -94,6 +88,7 @@ pub fn with_labels(entries: Vec<MailAccount>) -> Vec<Account> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TestResult;
 
     fn mail(id: &str, name: &str, addresses: &[&str]) -> MailAccount {
         MailAccount {
@@ -140,14 +135,14 @@ mod tests {
     }
 
     #[test]
-    fn decodes_the_script_answer_leniently() {
+    fn decodes_the_script_answer_and_skips_non_text_addresses() -> TestResult {
         let value =
-            crate::json::parse(r#"{"id": "X", "name": "N", "addresses": ["a@example.org", 5]}"#)
-                .expect("json");
-        let account = MailAccount::from_json(&value).expect("account");
+            crate::json::parse(r#"{"id": "X", "name": "N", "addresses": ["a@example.org", 5]}"#)?;
+        let account = MailAccount::from_json(&value).ok_or("account")?;
         assert_eq!(account.id, "X");
         assert_eq!(account.kind, "");
-        assert_eq!(account.addresses, ["a@example.org", "5"]);
+        assert_eq!(account.addresses, ["a@example.org"]);
         assert!(MailAccount::from_json(&Json::Null).is_none());
+        Ok(())
     }
 }

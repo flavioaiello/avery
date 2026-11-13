@@ -1,19 +1,26 @@
-//! Helpers for unit tests.
-
+use crate::config::Settings;
+use crate::json::{self, Json, ParseError};
+use std::error::Error;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// A private directory that is removed when the value is dropped.
-pub struct TempDir {
+pub(crate) type TestResult = Result<(), Box<dyn Error>>;
+
+pub(crate) fn j(text: &str) -> Result<Json, ParseError> {
+    json::parse(text)
+}
+
+pub(crate) struct TempDir {
     root: PathBuf,
 }
 
 impl TempDir {
-    pub fn new() -> TempDir {
+    pub(crate) fn new() -> io::Result<TempDir> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
@@ -25,12 +32,11 @@ impl TempDir {
             nanos
         );
         let root = std::env::temp_dir().join(name);
-        fs::create_dir_all(&root).expect("create test directory");
-        TempDir { root }
+        fs::create_dir_all(&root)?;
+        Ok(TempDir { root })
     }
 
-    /// The path of `sub` inside the directory (the directory itself for `""`).
-    pub fn path(&self, sub: &str) -> String {
+    pub(crate) fn path(&self, sub: &str) -> String {
         if sub.is_empty() {
             self.root.to_string_lossy().into_owned()
         } else {
@@ -42,5 +48,13 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+pub(crate) fn settings_at(path: &str) -> Settings {
+    Settings {
+        config_path: path.to_string(),
+        fake: false,
+        fake_write: String::new(),
     }
 }

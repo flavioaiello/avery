@@ -1,10 +1,3 @@
-//! config.json: where it lives, how it is read and written, the allowlist of
-//! accounts and the write settings.
-//!
-//! Only accounts listed in config.json are ever exposed (fail closed). Writing is
-//! off unless the human enabled it per account with `write-enable`; the model can
-//! neither change this nor see the file.
-
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -14,36 +7,30 @@ use crate::account::{self, Account, MailAccount};
 use crate::error::{ToolError, ToolResult};
 use crate::fake;
 use crate::json::{self, Json, Object};
-use crate::pycompat;
-use crate::text::{self, clean};
+use crate::text::{self, clean, text_of};
 use crate::texts::{DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS, WRITE_OFF};
 
-/// Where the program finds its files and whether it runs on demo data.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Settings {
-    pub config_path: String,
-    /// `MAIL_MCP_FAKE=1`: synthetic accounts and messages, no Mail access.
-    pub fake: bool,
-    /// `MAIL_MCP_FAKE_WRITE`: comma separated ids of the demo accounts that may write.
-    pub fake_write: String,
+pub(crate) struct Settings {
+    pub(crate) config_path: String,
+    pub(crate) fake: bool,
+    pub(crate) fake_write: String,
 }
 
-/// Accounts that may write (a subset of the readable ones) and the hourly send limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WriteSettings {
-    pub accounts: Vec<Account>,
-    pub max_per_hour: i64,
+pub(crate) struct WriteSettings {
+    pub(crate) accounts: Vec<Account>,
+    pub(crate) max_per_hour: i64,
 }
 
 impl Settings {
-    pub fn from_env() -> Settings {
+    pub(crate) fn from_env() -> Settings {
         Settings::from_lookup(&|key| {
             std::env::var_os(key).map(|value| value.to_string_lossy().into_owned())
         })
     }
 
-    /// `MAIL_MCP_CONFIG`, or `$AVERY_HOME/mail/config.json`, default home `~/.avery`.
-    pub fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Settings {
+    pub(crate) fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Settings {
         let non_empty = |key: &str| lookup(key).filter(|value| !value.is_empty());
         let raw = match non_empty("MAIL_MCP_CONFIG") {
             Some(path) => path,
@@ -59,16 +46,15 @@ impl Settings {
         }
     }
 
-    pub fn sendlog_path(&self) -> String {
+    pub(crate) fn sendlog_path(&self) -> String {
         join_path(&dirname(&self.config_path), "sendlog.jsonl")
     }
 
-    pub fn config_exists(&self) -> bool {
+    pub(crate) fn config_exists(&self) -> bool {
         Path::new(&self.config_path).exists()
     }
 
-    /// Reads config.json. A missing file is an empty allowlist.
-    pub fn load_config(&self) -> ToolResult<Object> {
+    pub(crate) fn load_config(&self) -> ToolResult<Object> {
         let unreadable = || {
             ToolError::msg(
                 "config.json is unreadable. Ask the user to run `avery mail setup` again.",
@@ -99,9 +85,7 @@ impl Settings {
         }
     }
 
-    /// Writes config.json atomically: the directory is private (0700), the file
-    /// is private (0600) and replaced as a whole.
-    pub fn save_config(&self, data: &Object) -> io::Result<()> {
+    pub(crate) fn save_config(&self, data: &Object) -> io::Result<()> {
         let directory = dirname(&self.config_path);
         make_dirs(&directory, 0o700)?;
         let temporary = format!("{}.tmp", self.config_path);
@@ -117,8 +101,7 @@ impl Settings {
         fs::rename(&temporary, &self.config_path)
     }
 
-    /// Accounts the agent may read. An empty list means nothing is exposed.
-    pub fn allowed_accounts(&self) -> ToolResult<Vec<Account>> {
+    pub(crate) fn allowed_accounts(&self) -> ToolResult<Vec<Account>> {
         let entries: Vec<MailAccount> = if self.fake {
             fake::accounts()
                 .into_iter()
@@ -132,18 +115,19 @@ impl Settings {
                     let Some(object) = item.as_object() else {
                         continue;
                     };
-                    if !json::truthy(object.get("id")) {
-                        continue;
-                    }
-                    let id = pycompat::text_of(object.get("id"));
-                    let name = match object.get("name") {
-                        Some(name) if name.is_truthy() => pycompat::str_of(name),
+                    let id = match object.get("id").and_then(Json::as_str) {
+                        Some(id) if !id.is_empty() => id.to_string(),
+                        _ => continue,
+                    };
+                    let name = match object.get("name").and_then(Json::as_str) {
+                        Some(name) if !name.is_empty() => name.to_string(),
                         _ => id.clone(),
                     };
-                    let kind = match object.get("type") {
-                        Some(kind) if kind.is_truthy() => pycompat::str_of(kind),
-                        _ => String::new(),
-                    };
+                    let kind = object
+                        .get("type")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                     entries.push(MailAccount {
                         id,
                         name,
@@ -157,8 +141,7 @@ impl Settings {
         Ok(account::with_labels(entries))
     }
 
-    /// Accounts that may write and the send limit. Off unless enabled per account.
-    pub fn write_settings(&self) -> ToolResult<WriteSettings> {
+    pub(crate) fn write_settings(&self) -> ToolResult<WriteSettings> {
         let (ids, limit): (Vec<String>, i64) = if self.fake {
             let ids = self
                 .fake_write
@@ -199,17 +182,15 @@ impl Settings {
         })
     }
 
-    /// The accounts a tool call refers to: all of them without a name, otherwise
-    /// the ones the name matches (label, name or address; then part of a label).
-    pub fn resolve(&self, account_name: Option<&Json>) -> ToolResult<Vec<Account>> {
+    pub(crate) fn resolve(&self, account_name: Option<&Json>) -> ToolResult<Vec<Account>> {
         let accounts = self.allowed_accounts()?;
         if accounts.is_empty() {
             return Err(ToolError::msg(NO_ACCOUNTS));
         }
-        if !json::truthy(account_name) {
+        let wanted = account_filter(account_name)?;
+        if wanted.is_empty() {
             return Ok(accounts);
         }
-        let wanted = pycompat::lower(pycompat::strip(&pycompat::text_of(account_name)));
         let mut hits: Vec<Account> = accounts
             .iter()
             .filter(|account| account.is_named(&wanted))
@@ -218,7 +199,7 @@ impl Settings {
         if hits.is_empty() {
             hits = accounts
                 .iter()
-                .filter(|account| pycompat::lower(&account.label).contains(&wanted))
+                .filter(|account| account.label.to_lowercase().contains(&wanted))
                 .cloned()
                 .collect();
         }
@@ -233,8 +214,7 @@ impl Settings {
         Ok(hits)
     }
 
-    /// The one account a write tool works with.
-    pub fn resolve_writable(
+    pub(crate) fn resolve_writable(
         &self,
         account_name: Option<&Json>,
     ) -> ToolResult<(Account, WriteSettings)> {
@@ -244,7 +224,8 @@ impl Settings {
         }
         let labels: Vec<&str> = settings.accounts.iter().map(|a| a.label.as_str()).collect();
         let names = labels.join(", ");
-        if !json::truthy(account_name) {
+        let wanted = account_filter(account_name)?;
+        if wanted.is_empty() {
             return match settings.accounts.as_slice() {
                 [only] => Ok((only.clone(), settings.clone())),
                 _ => Err(ToolError::msg(format!(
@@ -252,7 +233,6 @@ impl Settings {
                 ))),
             };
         }
-        let wanted = pycompat::lower(pycompat::strip(&pycompat::text_of(account_name)));
         let hits: Vec<&Account> = settings
             .accounts
             .iter()
@@ -268,8 +248,16 @@ impl Settings {
     }
 }
 
-/// `os.path.join(base, name)` for two path pieces.
-pub fn join_path(base: &str, name: &str) -> String {
+fn account_filter(value: Option<&Json>) -> ToolResult<String> {
+    match value {
+        Some(Json::Arr(_) | Json::Obj(_)) => {
+            Err(ToolError::msg("Parameter 'account' must be text."))
+        }
+        other => Ok(text_of(other).trim().to_lowercase()),
+    }
+}
+
+pub(crate) fn join_path(base: &str, name: &str) -> String {
     if base.is_empty() {
         name.to_string()
     } else if base.ends_with('/') {
@@ -279,8 +267,7 @@ pub fn join_path(base: &str, name: &str) -> String {
     }
 }
 
-/// `os.path.dirname`.
-pub fn dirname(path: &str) -> String {
+pub(crate) fn dirname(path: &str) -> String {
     let end = path.rfind('/').map_or(0, |index| index + 1);
     let head = path.get(..end).unwrap_or("");
     if head.chars().all(|c| c == '/') {
@@ -290,8 +277,7 @@ pub fn dirname(path: &str) -> String {
     }
 }
 
-/// `os.path.expanduser` for `~` and `~/...`. Other `~user` forms are left alone.
-pub fn expanduser(path: &str, home: Option<&str>) -> String {
+pub(crate) fn expanduser(path: &str, home: Option<&str>) -> String {
     if !path.starts_with('~') {
         return path.to_string();
     }
@@ -317,9 +303,7 @@ pub fn expanduser(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// `os.makedirs(path, mode, exist_ok=True)`: parents get the default mode, only
-/// the last directory gets `mode`.
-pub fn make_dirs(path: &str, mode: u32) -> io::Result<()> {
+pub(crate) fn make_dirs(path: &str, mode: u32) -> io::Result<()> {
     if path.is_empty() || Path::new(path).is_dir() {
         return Ok(());
     }
@@ -338,19 +322,11 @@ pub fn make_dirs(path: &str, mode: u32) -> io::Result<()> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use crate::testutil::TempDir;
+    use crate::testutil::{j, settings_at, TempDir, TestResult};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
-
-    pub fn settings_at(path: &str) -> Settings {
-        Settings {
-            config_path: path.to_string(),
-            fake: false,
-            fake_write: String::new(),
-        }
-    }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -360,14 +336,10 @@ pub mod tests {
         move |key| map.get(key).cloned()
     }
 
-    fn j(text: &str) -> Json {
-        json::parse(text).expect("valid json")
-    }
-
-    fn write_config(dir: &TempDir, text: &str) -> Settings {
+    fn write_config(dir: &TempDir, text: &str) -> io::Result<Settings> {
         let path = dir.path("config.json");
-        fs::write(&path, text).expect("write config");
-        settings_at(&path)
+        fs::write(&path, text)?;
+        Ok(settings_at(&path))
     }
 
     const TWO_ACCOUNTS: &str = r#"{"version": 2, "allowed_accounts": [
@@ -414,7 +386,7 @@ pub mod tests {
     }
 
     #[test]
-    fn expanduser_and_dirname_follow_python() {
+    fn expanduser_and_dirname_resolve_paths() {
         assert_eq!(expanduser("~", Some("/h")), "/h");
         assert_eq!(expanduser("~/a/b", Some("/h/")), "/h/a/b");
         assert_eq!(expanduser("~/a", Some("")), "/a");
@@ -433,22 +405,23 @@ pub mod tests {
     }
 
     #[test]
-    fn a_missing_config_is_an_empty_allowlist() {
-        let dir = TempDir::new();
+    fn a_missing_config_is_an_empty_allowlist() -> TestResult {
+        let dir = TempDir::new()?;
         let s = settings_at(&dir.path("none.json"));
         assert_eq!(s.allowed_accounts(), Ok(vec![]));
         assert_eq!(s.resolve(None), Err(ToolError::msg(NO_ACCOUNTS)));
+        Ok(())
     }
 
     #[test]
-    fn unreadable_and_malformed_configs_are_refused() {
-        let dir = TempDir::new();
+    fn unreadable_and_malformed_configs_are_refused() -> TestResult {
+        let dir = TempDir::new()?;
         for text in ["", "{", "nope", "\u{feff}{}", "{\"allowed_accounts\": NaN}"] {
-            let s = write_config(&dir, text);
-            match s.load_config() {
-                Err(ToolError::Msg(message)) => assert!(message.contains("unreadable"), "{text:?}"),
-                other => panic!("{text:?}: {other:?}"),
-            }
+            let s = write_config(&dir, text)?;
+            assert!(
+                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")),
+                "{text:?}"
+            );
         }
         for text in [
             "[]",
@@ -458,33 +431,33 @@ pub mod tests {
             "{\"allowed_accounts\": null}",
             "{\"allowed_accounts\": {}}",
         ] {
-            let s = write_config(&dir, text);
-            match s.load_config() {
-                Err(ToolError::Msg(message)) => {
-                    assert!(message.contains("unexpected format"), "{text:?}")
-                }
-                other => panic!("{text:?}: {other:?}"),
-            }
+            let s = write_config(&dir, text)?;
+            assert!(
+                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unexpected format")),
+                "{text:?}"
+            );
         }
-        fs::write(dir.path("bytes.json"), [0xff, 0xfe, 0x7b, 0x7d]).expect("write");
+        fs::write(dir.path("bytes.json"), [0xff, 0xfe, 0x7b, 0x7d])?;
         let s = settings_at(&dir.path("bytes.json"));
         assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
-        let s = settings_at(&dir.path("")); // a directory
+        let s = settings_at(&dir.path(""));
         assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
+        Ok(())
     }
 
     #[test]
-    fn a_config_without_allowed_accounts_is_accepted_and_empty() {
-        let dir = TempDir::new();
-        let s = write_config(&dir, "{\"version\": 2}");
+    fn a_config_without_allowed_accounts_is_accepted_and_empty() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, "{\"version\": 2}")?;
         assert_eq!(s.allowed_accounts(), Ok(vec![]));
+        Ok(())
     }
 
     #[test]
-    fn allowed_accounts_are_read_with_labels() {
-        let dir = TempDir::new();
-        let s = write_config(&dir, TWO_ACCOUNTS);
-        let accounts = s.allowed_accounts().expect("accounts");
+    fn allowed_accounts_are_read_with_labels() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, TWO_ACCOUNTS)?;
+        let accounts = s.allowed_accounts()?;
         assert_eq!(accounts.len(), 2);
         assert_eq!(accounts[0].label, "Privat Gmail");
         assert_eq!(
@@ -492,108 +465,102 @@ pub mod tests {
             ["me@outlook.example", "alias@outlook.example"]
         );
         assert_eq!(accounts[1].kind, "exchange");
+        Ok(())
     }
 
     #[test]
-    fn odd_entries_are_skipped_or_converted_like_python() {
-        let dir = TempDir::new();
+    fn odd_entries_are_skipped_or_normalized() -> TestResult {
+        let dir = TempDir::new()?;
         let s = write_config(
             &dir,
             r#"{"allowed_accounts": [5, "x", {"name": "no id"}, {"id": ""}, {"id": 7},
                 {"id": "A", "name": null, "type": null, "addresses": "abc"}]}"#,
-        );
-        let accounts = s.allowed_accounts().expect("accounts");
-        assert_eq!(accounts.len(), 2);
-        assert_eq!(accounts[0].id, "7");
-        assert_eq!(accounts[0].name, "7");
-        assert_eq!(accounts[1].name, "A");
-        assert_eq!(accounts[1].kind, "");
-        assert!(accounts[1].addresses.is_empty());
+        )?;
+        let accounts = s.allowed_accounts()?;
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "A");
+        assert_eq!(accounts[0].name, "A");
+        assert_eq!(accounts[0].kind, "");
+        assert!(accounts[0].addresses.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn demo_mode_never_exposes_the_company_account() {
+    fn demo_mode_never_exposes_the_company_account() -> TestResult {
         let mut s = settings_at("/nonexistent/config.json");
         s.fake = true;
-        let ids: Vec<String> = s
-            .allowed_accounts()
-            .expect("accounts")
-            .into_iter()
-            .map(|a| a.id)
-            .collect();
+        let ids: Vec<String> = s.allowed_accounts()?.into_iter().map(|a| a.id).collect();
         assert_eq!(ids, ["FAKE-GMAIL", "FAKE-OUTLOOK"]);
+        Ok(())
     }
 
     #[test]
-    fn resolve_finds_accounts_by_label_name_address_or_part_of_a_label() {
-        let dir = TempDir::new();
-        let s = write_config(&dir, TWO_ACCOUNTS);
-        let names = |value: &str| -> Vec<String> {
-            s.resolve(Some(&j(value)))
-                .expect("hits")
+    fn resolve_finds_accounts_by_label_name_address_or_part_of_a_label() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, TWO_ACCOUNTS)?;
+        let names = |value: &str| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            Ok(s.resolve(Some(&j(value)?))?
                 .into_iter()
                 .map(|a| a.id)
-                .collect()
+                .collect())
         };
-        assert_eq!(names("\"privat gmail\""), ["ACC-1"]);
-        assert_eq!(names("\" OUTLOOK \""), ["ACC-2"]);
-        assert_eq!(names("\"alias@outlook.example\""), ["ACC-2"]);
-        assert_eq!(names("\"gmail\""), ["ACC-1"]);
-        assert_eq!(names("\"   \""), ["ACC-1", "ACC-2"]);
-        assert_eq!(s.resolve(None).expect("all").len(), 2);
-        assert_eq!(s.resolve(Some(&j("\"\""))).expect("all").len(), 2);
-        assert_eq!(s.resolve(Some(&j("0"))).expect("all").len(), 2);
-        match s.resolve(Some(&j("\"Firma\""))) {
-            Err(ToolError::Msg(message)) => {
-                assert_eq!(
-                    message,
-                    "Unknown account 'Firma'. Allowed accounts: Privat Gmail, Outlook"
-                );
-            }
-            other => panic!("{other:?}"),
+        assert_eq!(names("\"privat gmail\"")?, ["ACC-1"]);
+        assert_eq!(names("\" OUTLOOK \"")?, ["ACC-2"]);
+        assert_eq!(names("\"alias@outlook.example\"")?, ["ACC-2"]);
+        assert_eq!(names("\"gmail\"")?, ["ACC-1"]);
+        assert_eq!(names("\"   \"")?, ["ACC-1", "ACC-2"]);
+        assert_eq!(s.resolve(None)?.len(), 2);
+        assert_eq!(s.resolve(Some(&j("\"\"")?))?.len(), 2);
+        assert_eq!(
+            s.resolve(Some(&j("\"Firma\"")?)),
+            Err(ToolError::msg(
+                "Unknown account 'Firma'. Allowed accounts: Privat Gmail, Outlook"
+            ))
+        );
+        assert_eq!(
+            s.resolve(Some(&j("0")?)),
+            Err(ToolError::msg(
+                "Unknown account '0'. Allowed accounts: Privat Gmail, Outlook"
+            ))
+        );
+        for container in ["[\"a\"]", "[]", "{}"] {
+            assert_eq!(
+                s.resolve(Some(&j(container)?)),
+                Err(ToolError::msg("Parameter 'account' must be text.")),
+                "{container}"
+            );
         }
-        match s.resolve(Some(&j("[\"a\"]"))) {
-            Err(ToolError::Msg(message)) => {
-                assert!(message.starts_with("Unknown account '['a']'."))
-            }
-            other => panic!("{other:?}"),
-        }
+        Ok(())
     }
 
     #[test]
-    fn writing_is_off_unless_enabled_for_a_readable_account() {
-        let dir = TempDir::new();
-        let off = write_config(&dir, TWO_ACCOUNTS);
-        assert_eq!(off.write_settings().expect("settings").accounts, vec![]);
+    fn writing_is_off_unless_enabled_for_a_readable_account() -> TestResult {
+        let dir = TempDir::new()?;
+        let off = write_config(&dir, TWO_ACCOUNTS)?;
+        assert_eq!(off.write_settings()?.accounts, vec![]);
         assert_eq!(off.resolve_writable(None), Err(ToolError::msg(WRITE_OFF)));
 
         for text in [
-            // write account outside the read allowlist
             r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": ["ACC-OTHER"]}}"#,
-            // nothing readable at all
             r#"{"allowed_accounts": [], "write": {"accounts": ["ACC-1"]}}"#,
-            // broken write section
             r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": "kaputt"}"#,
             r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": "ACC-1"}}"#,
             r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": [1, null]}}"#,
         ] {
-            let s = write_config(&dir, text);
-            assert_eq!(
-                s.write_settings().expect("settings").accounts,
-                vec![],
-                "{text}"
-            );
+            let s = write_config(&dir, text)?;
+            assert_eq!(s.write_settings()?.accounts, vec![], "{text}");
         }
+        Ok(())
     }
 
     #[test]
-    fn write_settings_carry_the_hourly_limit() {
-        let dir = TempDir::new();
+    fn write_settings_carry_the_hourly_limit() -> TestResult {
+        let dir = TempDir::new()?;
         let s = write_config(
             &dir,
             r#"{"allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": 3}}"#,
-        );
-        let settings = s.write_settings().expect("settings");
+        )?;
+        let settings = s.write_settings()?;
         assert_eq!(settings.accounts.len(), 1);
         assert_eq!(settings.max_per_hour, 3);
         for (value, expected) in [("100", 30), ("0", 1), ("\"7\"", 7), ("null", 5)] {
@@ -602,55 +569,49 @@ pub mod tests {
                 &format!(
                     r#"{{"allowed_accounts": [{{"id": "A", "name": "A"}}], "write": {{"accounts": ["A"], "max_per_hour": {value}}}}}"#
                 ),
-            );
-            assert_eq!(
-                s.write_settings().expect("settings").max_per_hour,
-                expected,
-                "{value}"
-            );
+            )?;
+            assert_eq!(s.write_settings()?.max_per_hour, expected, "{value}");
         }
         let s = write_config(
             &dir,
             r#"{"allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": true}}"#,
-        );
+        )?;
         assert_eq!(
             s.write_settings(),
-            Err(ToolError::msg("Invalid number: True"))
+            Err(ToolError::msg("Invalid number: true"))
         );
+        Ok(())
     }
 
     #[test]
-    fn demo_write_accounts_come_from_the_environment_variable() {
+    fn demo_write_accounts_come_from_the_environment_variable() -> TestResult {
         let mut s = settings_at("/nonexistent/config.json");
         s.fake = true;
         s.fake_write = "FAKE-GMAIL,,FAKE-WORK,FAKE-OUTLOOK".into();
-        let settings = s.write_settings().expect("settings");
+        let settings = s.write_settings()?;
         let ids: Vec<&str> = settings.accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["FAKE-GMAIL", "FAKE-OUTLOOK"]);
         assert_eq!(settings.max_per_hour, 5);
+        Ok(())
     }
 
     #[test]
-    fn resolve_writable_follows_the_python_rules() {
+    fn resolve_writable_picks_exactly_one_account() -> TestResult {
         let mut s = settings_at("/nonexistent/config.json");
         s.fake = true;
         s.fake_write = "FAKE-GMAIL".into();
-        let (only, _) = s
-            .resolve_writable(None)
-            .expect("single account is the default");
+        let (only, _) = s.resolve_writable(None)?;
         assert_eq!(only.id, "FAKE-GMAIL");
-        let (by_address, _) = s
-            .resolve_writable(Some(&j("\"demo.privat@gmail.example\"")))
-            .expect("by address");
+        let (by_address, _) = s.resolve_writable(Some(&j("\"demo.privat@gmail.example\"")?))?;
         assert_eq!(by_address.id, "FAKE-GMAIL");
         assert_eq!(
-            s.resolve_writable(Some(&j("\"Demo Outlook\""))),
+            s.resolve_writable(Some(&j("\"Demo Outlook\"")?)),
             Err(ToolError::msg(
                 "Unknown account 'Demo Outlook'. Accounts that may write: Demo Gmail"
             ))
         );
         assert_eq!(
-            s.resolve_writable(Some(&j("\"gmail\""))),
+            s.resolve_writable(Some(&j("\"gmail\"")?)),
             Err(ToolError::msg(
                 "Unknown account 'gmail'. Accounts that may write: Demo Gmail"
             ))
@@ -662,49 +623,43 @@ pub mod tests {
         );
         s.fake_write = String::new();
         assert_eq!(s.resolve_writable(None), Err(ToolError::msg(WRITE_OFF)));
+        Ok(())
     }
 
     #[test]
-    fn save_config_writes_python_style_json_with_private_permissions() {
-        let dir = TempDir::new();
+    fn save_config_writes_indented_json_with_private_permissions() -> TestResult {
+        let dir = TempDir::new()?;
         let s = settings_at(&dir.path("sub/dir/config.json"));
         let mut config = Object::new();
         config.insert("version", 2i64);
         config.insert("allowed_accounts", Json::Arr(vec![]));
-        s.save_config(&config).expect("save");
-        let text = fs::read_to_string(dir.path("sub/dir/config.json")).expect("read");
+        s.save_config(&config)?;
+        let text = fs::read_to_string(dir.path("sub/dir/config.json"))?;
         assert_eq!(text, "{\n  \"version\": 2,\n  \"allowed_accounts\": []\n}");
-        let file_mode = fs::metadata(dir.path("sub/dir/config.json"))
-            .expect("meta")
+        let file_mode = fs::metadata(dir.path("sub/dir/config.json"))?
             .permissions()
             .mode()
             & 0o777;
-        let dir_mode = fs::metadata(dir.path("sub/dir"))
-            .expect("meta")
-            .permissions()
-            .mode()
-            & 0o777;
+        let dir_mode = fs::metadata(dir.path("sub/dir"))?.permissions().mode() & 0o777;
         assert_eq!(file_mode, 0o600);
         assert_eq!(dir_mode, 0o700);
         assert!(!Path::new(&dir.path("sub/dir/config.json.tmp")).exists());
-        assert_eq!(s.load_config().expect("load"), config);
+        assert_eq!(s.load_config()?, config);
+        Ok(())
     }
 
     #[test]
-    fn make_dirs_gives_only_the_last_directory_the_private_mode() {
-        let dir = TempDir::new();
-        make_dirs(&dir.path("p/q/r"), 0o700).expect("make");
-        let mode = |sub: &str| {
-            fs::metadata(dir.path(sub))
-                .expect("meta")
-                .permissions()
-                .mode()
-                & 0o777
+    fn make_dirs_gives_only_the_last_directory_the_private_mode() -> TestResult {
+        let dir = TempDir::new()?;
+        make_dirs(&dir.path("p/q/r"), 0o700)?;
+        let mode = |sub: &str| -> io::Result<u32> {
+            Ok(fs::metadata(dir.path(sub))?.permissions().mode() & 0o777)
         };
-        assert_eq!(mode("p/q/r"), 0o700);
-        assert_ne!(mode("p"), 0o700);
-        make_dirs(&dir.path("p/q/r"), 0o700).expect("existing directory is fine");
-        fs::write(dir.path("file"), "x").expect("write");
+        assert_eq!(mode("p/q/r")?, 0o700);
+        assert_ne!(mode("p")?, 0o700);
+        make_dirs(&dir.path("p/q/r"), 0o700)?;
+        fs::write(dir.path("file"), "x")?;
         assert!(make_dirs(&dir.path("file"), 0o700).is_err());
+        Ok(())
     }
 }

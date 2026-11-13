@@ -1,5 +1,3 @@
-//! SHA-256 (FIPS 180-4). Used for the content fingerprint in the send log.
-
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -17,8 +15,8 @@ const INITIAL: [u32; 8] = [
 
 fn compress(state: &mut [u32; 8], block: &[u8]) {
     let mut w = [0u32; 64];
-    for (slot, word) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *slot = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+    for (slot, word) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *slot = u32::from_be_bytes(*word);
     }
     for t in 16..64 {
         let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
@@ -54,14 +52,12 @@ fn compress(state: &mut [u32; 8], block: &[u8]) {
     }
 }
 
-/// The SHA-256 digest of `data`.
-pub fn sha256(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     let mut state = INITIAL;
-    let mut blocks = data.chunks_exact(64);
-    for block in &mut blocks {
+    let (blocks, rest) = data.as_chunks::<64>();
+    for block in blocks {
         compress(&mut state, block);
     }
-    let rest = blocks.remainder();
     let bit_length = (data.len() as u64).wrapping_mul(8);
     let mut tail = rest.to_vec();
     tail.push(0x80);
@@ -69,18 +65,17 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         tail.push(0);
     }
     tail.extend_from_slice(&bit_length.to_be_bytes());
-    for block in tail.chunks_exact(64) {
+    for block in tail.as_chunks::<64>().0 {
         compress(&mut state, block);
     }
     let mut digest = [0u8; 32];
-    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
-        chunk.copy_from_slice(&word.to_be_bytes());
+    for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *chunk = word.to_be_bytes();
     }
     digest
 }
 
-/// The digest as lower-case hex (Python `hashlib.sha256(data).hexdigest()`).
-pub fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     sha256(data)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -131,7 +126,6 @@ mod tests {
 
     #[test]
     fn padding_boundaries() {
-        // Lengths around the 55/56/63/64 byte padding boundaries; digests taken from Python's hashlib.
         let expected = [
             (
                 55,

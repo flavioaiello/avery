@@ -1,33 +1,15 @@
-//! JSON without third-party code.
-//!
-//! * [`parse`] is a strict RFC 8259 parser: UTF-8 input, all escapes including
-//!   surrogate pairs, integers and floats, a depth limit, a size limit, no
-//!   trailing garbage. Object keys keep their order; a repeated key keeps the
-//!   position of its first occurrence and the value of its last (like a Python
-//!   dict).
-//! * [`dumps`] and [`dumps_pretty`] reproduce the output conventions of Python's
-//!   `json.dumps`, so that the files and protocol lines written by this program
-//!   look exactly like those of the Python reference: `", "` and `": "` as
-//!   separators, `\uXXXX` escapes with lower-case hex digits and, optionally,
-//!   `ensure_ascii`.
-
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
 
-use crate::pycompat;
-
-/// Deepest nesting of arrays and objects accepted by the parser.
-pub const MAX_DEPTH: usize = 128;
-/// Largest text accepted by the parser.
-pub const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_DEPTH: usize = 128;
+pub(crate) const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Json {
+pub(crate) enum Json {
     Null,
     Bool(bool),
     Int(i64),
-    /// An integer outside the range of `i64`, kept as its decimal text.
     BigInt(String),
     Float(f64),
     Str(String),
@@ -35,39 +17,36 @@ pub enum Json {
     Obj(Object),
 }
 
-/// An ordered JSON object.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct Object {
+pub(crate) struct Object {
     entries: Vec<(String, Json)>,
 }
 
 impl Object {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Object::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn get(&self, key: &str) -> Option<&Json> {
+    pub(crate) fn get(&self, key: &str) -> Option<&Json> {
         self.entries
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value)
     }
 
-    pub fn contains_key(&self, key: &str) -> bool {
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
 
-    /// Sets a key: the value of an existing key is replaced in place, a new key is
-    /// appended (Python `dict` assignment).
-    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<Json>) {
+    pub(crate) fn insert(&mut self, key: impl Into<String>, value: impl Into<Json>) {
         let key = key.into();
         let value = value.into();
         match self.entries.iter_mut().find(|(name, _)| *name == key) {
@@ -76,18 +55,18 @@ impl Object {
         }
     }
 
-    pub fn remove(&mut self, key: &str) -> Option<Json> {
+    pub(crate) fn remove(&mut self, key: &str) -> Option<Json> {
         let position = self.entries.iter().position(|(name, _)| name == key)?;
         Some(self.entries.remove(position).1)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Json)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &Json)> {
         self.entries
             .iter()
             .map(|(key, value)| (key.as_str(), value))
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(key, _)| key.as_str())
     }
 
@@ -103,8 +82,7 @@ impl Object {
 }
 
 impl Json {
-    /// Builds an object from key/value pairs.
-    pub fn object<K: Into<String>, V: Into<Json>>(pairs: Vec<(K, V)>) -> Json {
+    pub(crate) fn object<K: Into<String>, V: Into<Json>>(pairs: Vec<(K, V)>) -> Json {
         let mut object = Object::new();
         for (key, value) in pairs {
             object.insert(key, value);
@@ -112,56 +90,33 @@ impl Json {
         Json::Obj(object)
     }
 
-    pub fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Json::Str(text) => Some(text),
             _ => None,
         }
     }
 
-    pub fn as_object(&self) -> Option<&Object> {
+    pub(crate) fn as_object(&self) -> Option<&Object> {
         match self {
             Json::Obj(object) => Some(object),
             _ => None,
         }
     }
 
-    pub fn as_array(&self) -> Option<&Vec<Json>> {
+    pub(crate) fn as_array(&self) -> Option<&Vec<Json>> {
         match self {
             Json::Arr(items) => Some(items),
             _ => None,
         }
     }
 
-    /// Python truthiness of the value.
-    pub fn is_truthy(&self) -> bool {
+    pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
-            Json::Null => false,
-            Json::Bool(flag) => *flag,
-            Json::Int(number) => *number != 0,
-            Json::BigInt(_) => true,
-            Json::Float(number) => *number != 0.0,
-            Json::Str(text) => !text.is_empty(),
-            Json::Arr(items) => !items.is_empty(),
-            Json::Obj(object) => !object.is_empty(),
-        }
-    }
-
-    /// A number as a float (booleans count as 0 and 1, like in Python).
-    pub fn as_number(&self) -> Option<f64> {
-        match self {
-            Json::Bool(flag) => Some(if *flag { 1.0 } else { 0.0 }),
-            Json::Int(number) => Some(*number as f64),
-            Json::BigInt(text) => text.parse::<f64>().ok(),
-            Json::Float(number) => Some(*number),
+            Json::Bool(flag) => Some(*flag),
             _ => None,
         }
     }
-}
-
-/// `Option<&Json>` helpers for values looked up in objects.
-pub fn truthy(value: Option<&Json>) -> bool {
-    value.is_some_and(Json::is_truthy)
 }
 
 impl From<&str> for Json {
@@ -236,10 +191,8 @@ impl<T: Into<Json>> From<Option<T>> for Json {
     }
 }
 
-// ---------------------------------------------------------------------- parser
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParseError {
+pub(crate) enum ParseError {
     TooLarge,
     TooDeep,
     Syntax { offset: usize, what: &'static str },
@@ -257,8 +210,7 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// Parses one complete JSON text.
-pub fn parse(text: &str) -> Result<Json, ParseError> {
+pub(crate) fn parse(text: &str) -> Result<Json, ParseError> {
     if text.len() > MAX_TEXT_BYTES {
         return Err(ParseError::TooLarge);
     }
@@ -467,8 +419,6 @@ impl Parser<'_> {
         Ok(value)
     }
 
-    /// Reads a `\uXXXX` escape (the `\u` is already consumed), combining a
-    /// surrogate pair. A lone surrogate becomes U+FFFD.
     fn unicode_escape(&mut self) -> Result<char, ParseError> {
         let first = self.hex4()?;
         if (0xD800..0xDC00).contains(&first) {
@@ -537,17 +487,13 @@ impl Parser<'_> {
     }
 }
 
-// ------------------------------------------------------------------ serializers
-
-/// `json.dumps(value, ensure_ascii=ensure_ascii)`: one line, `", "` and `": "`.
-pub fn dumps(value: &Json, ensure_ascii: bool) -> String {
+pub(crate) fn dumps(value: &Json, ensure_ascii: bool) -> String {
     let mut out = String::new();
     write_value(&mut out, value, ensure_ascii, None, 0);
     out
 }
 
-/// `json.dumps(value, indent=indent, ensure_ascii=ensure_ascii)` (no trailing newline).
-pub fn dumps_pretty(value: &Json, indent: usize, ensure_ascii: bool) -> String {
+pub(crate) fn dumps_pretty(value: &Json, indent: usize, ensure_ascii: bool) -> String {
     let mut out = String::new();
     write_value(&mut out, value, ensure_ascii, Some(indent), 0);
     out
@@ -577,7 +523,7 @@ fn write_value(
         Json::BigInt(text) => out.push_str(text),
         Json::Float(number) => {
             if number.is_finite() {
-                out.push_str(&pycompat::float_repr(*number));
+                out.push_str(&number.to_string());
             } else {
                 out.push_str("null");
             }
@@ -657,12 +603,10 @@ fn write_string(out: &mut String, text: &str, ensure_ascii: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TestResult;
 
-    fn ok(text: &str) -> Json {
-        match parse(text) {
-            Ok(value) => value,
-            Err(error) => panic!("{text:?} should parse: {error}"),
-        }
+    fn ok(text: &str) -> Result<Json, String> {
+        parse(text).map_err(|error| format!("{text:?} should parse: {error}"))
     }
 
     fn bad(text: &str) {
@@ -670,33 +614,35 @@ mod tests {
     }
 
     #[test]
-    fn parses_scalars() {
-        assert_eq!(ok("null"), Json::Null);
-        assert_eq!(ok(" true "), Json::Bool(true));
-        assert_eq!(ok("false"), Json::Bool(false));
-        assert_eq!(ok("0"), Json::Int(0));
-        assert_eq!(ok("-0"), Json::Int(0));
-        assert_eq!(ok("-12"), Json::Int(-12));
-        assert_eq!(ok("1.5"), Json::Float(1.5));
-        assert_eq!(ok("1e3"), Json::Float(1000.0));
-        assert_eq!(ok("-1.25E-2"), Json::Float(-0.0125));
-        assert_eq!(ok("\"a\""), Json::Str("a".into()));
+    fn parses_scalars() -> TestResult {
+        assert_eq!(ok("null")?, Json::Null);
+        assert_eq!(ok(" true ")?, Json::Bool(true));
+        assert_eq!(ok("false")?, Json::Bool(false));
+        assert_eq!(ok("0")?, Json::Int(0));
+        assert_eq!(ok("-0")?, Json::Int(0));
+        assert_eq!(ok("-12")?, Json::Int(-12));
+        assert_eq!(ok("1.5")?, Json::Float(1.5));
+        assert_eq!(ok("1e3")?, Json::Float(1000.0));
+        assert_eq!(ok("-1.25E-2")?, Json::Float(-0.0125));
+        assert_eq!(ok("\"a\"")?, Json::Str("a".into()));
+        Ok(())
     }
 
     #[test]
-    fn integers_beyond_i64_keep_their_digits() {
+    fn integers_beyond_i64_keep_their_digits() -> TestResult {
         assert_eq!(
-            ok("9223372036854775807"),
+            ok("9223372036854775807")?,
             Json::Int(9_223_372_036_854_775_807)
         );
         assert_eq!(
-            ok("9223372036854775808"),
+            ok("9223372036854775808")?,
             Json::BigInt("9223372036854775808".into())
         );
         assert_eq!(
-            ok("-123456789012345678901234567890"),
+            ok("-123456789012345678901234567890")?,
             Json::BigInt("-123456789012345678901234567890".into())
         );
+        Ok(())
     }
 
     #[test]
@@ -724,27 +670,30 @@ mod tests {
     }
 
     #[test]
-    fn parses_all_string_escapes() {
+    fn parses_all_string_escapes() -> TestResult {
         assert_eq!(
-            ok(r#""\"\\\/\b\f\n\r\t""#),
+            ok(r#""\"\\\/\b\f\n\r\t""#)?,
             Json::Str("\"\\/\u{8}\u{c}\n\r\t".into())
         );
-        assert_eq!(ok(r#""\u0041\u00e4\u20AC""#), Json::Str("Aä€".into()));
-        assert_eq!(ok("\"ä€😀\""), Json::Str("ä€😀".into()));
+        assert_eq!(ok(r#""\u0041\u00e4\u20AC""#)?, Json::Str("Aä€".into()));
+        assert_eq!(ok("\"ä€😀\"")?, Json::Str("ä€😀".into()));
+        Ok(())
     }
 
     #[test]
-    fn combines_surrogate_pairs() {
-        assert_eq!(ok(r#""\ud83d\ude00""#), Json::Str("😀".into()));
-        assert_eq!(ok(r#""\uD83D\uDE00x""#), Json::Str("😀x".into()));
+    fn combines_surrogate_pairs() -> TestResult {
+        assert_eq!(ok(r#""\ud83d\ude00""#)?, Json::Str("😀".into()));
+        assert_eq!(ok(r#""\uD83D\uDE00x""#)?, Json::Str("😀x".into()));
+        Ok(())
     }
 
     #[test]
-    fn lone_surrogates_become_the_replacement_character() {
-        assert_eq!(ok(r#""\ud800""#), Json::Str("\u{fffd}".into()));
-        assert_eq!(ok(r#""\udc00""#), Json::Str("\u{fffd}".into()));
-        assert_eq!(ok(r#""\ud800\u0041""#), Json::Str("\u{fffd}A".into()));
-        assert_eq!(ok(r#""\ud800x""#), Json::Str("\u{fffd}x".into()));
+    fn lone_surrogates_become_the_replacement_character() -> TestResult {
+        assert_eq!(ok(r#""\ud800""#)?, Json::Str("\u{fffd}".into()));
+        assert_eq!(ok(r#""\udc00""#)?, Json::Str("\u{fffd}".into()));
+        assert_eq!(ok(r#""\ud800\u0041""#)?, Json::Str("\u{fffd}A".into()));
+        assert_eq!(ok(r#""\ud800x""#)?, Json::Str("\u{fffd}x".into()));
+        Ok(())
     }
 
     #[test]
@@ -764,11 +713,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_containers() {
-        assert_eq!(ok("[]"), Json::Arr(vec![]));
-        assert_eq!(ok("{}"), Json::Obj(Object::new()));
+    fn parses_containers() -> TestResult {
+        assert_eq!(ok("[]")?, Json::Arr(vec![]));
+        assert_eq!(ok("{}")?, Json::Obj(Object::new()));
         assert_eq!(
-            ok(r#" [1, "a", [true], {"k": null}] "#),
+            ok(r#" [1, "a", [true], {"k": null}] "#)?,
             Json::Arr(vec![
                 Json::Int(1),
                 Json::Str("a".into()),
@@ -776,15 +725,17 @@ mod tests {
                 Json::object(vec![("k", Json::Null)]),
             ])
         );
+        Ok(())
     }
 
     #[test]
-    fn object_keys_keep_their_order_and_duplicates_collapse() {
-        let value = ok(r#"{"b": 1, "a": 2, "b": 3}"#);
-        let object = value.as_object().expect("object");
+    fn object_keys_keep_their_order_and_duplicates_collapse() -> TestResult {
+        let value = ok(r#"{"b": 1, "a": 2, "b": 3}"#)?;
+        let object = value.as_object().ok_or("object")?;
         let keys: Vec<&str> = object.keys().collect();
         assert_eq!(keys, ["b", "a"]);
         assert_eq!(object.get("b"), Some(&Json::Int(3)));
+        Ok(())
     }
 
     #[test]
@@ -832,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn dumps_like_python() {
+    fn dumps_compact_with_spaces() {
         let value = Json::object(vec![
             ("jsonrpc", Json::from("2.0")),
             ("id", Json::Int(1)),
@@ -855,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn dumps_pretty_like_python_indent_two() {
+    fn dumps_pretty_with_two_space_indent() {
         let value = Json::object(vec![
             ("a", Json::Arr(vec![])),
             ("b", Json::Obj(Object::new())),
@@ -867,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn ascii_escaping_matches_python() {
+    fn ascii_escaping_uses_unicode_escapes() {
         let text = Json::from("a\"b\\c\n\r\t\u{8}\u{c}\u{1}\u{7f}é€😀");
         assert_eq!(
             dumps(&text, true),
@@ -880,17 +831,18 @@ mod tests {
     }
 
     #[test]
-    fn floats_and_big_integers_round_trip_in_python_notation() {
+    fn floats_and_big_integers_round_trip() -> TestResult {
         assert_eq!(dumps(&Json::Float(1.5), true), "1.5");
-        assert_eq!(dumps(&Json::Float(100.0), true), "100.0");
-        assert_eq!(dumps(&Json::Float(1e16), true), "1e+16");
-        assert_eq!(dumps(&Json::Float(0.00001), true), "1e-05");
-        assert_eq!(dumps(&Json::Float(-0.0), true), "-0.0");
+        assert_eq!(dumps(&Json::Float(100.0), true), "100");
+        assert_eq!(dumps(&Json::Float(1e16), true), "10000000000000000");
+        assert_eq!(dumps(&Json::Float(0.00001), true), "0.00001");
+        assert_eq!(dumps(&Json::Float(-0.0), true), "-0");
         assert_eq!(
-            dumps(&ok("12345678901234567890123"), true),
+            dumps(&ok("12345678901234567890123")?, true),
             "12345678901234567890123"
         );
         assert_eq!(dumps(&Json::Float(f64::NAN), true), "null");
+        Ok(())
     }
 
     #[test]
@@ -915,22 +867,16 @@ mod tests {
     }
 
     #[test]
-    fn python_truthiness() {
-        assert!(!Json::Null.is_truthy());
-        assert!(!Json::Bool(false).is_truthy());
-        assert!(!Json::Int(0).is_truthy());
-        assert!(!Json::Float(0.0).is_truthy());
-        assert!(!Json::from("").is_truthy());
-        assert!(!Json::Arr(vec![]).is_truthy());
-        assert!(!Json::Obj(Object::new()).is_truthy());
-        assert!(Json::Int(2).is_truthy());
-        assert!(Json::from("0").is_truthy());
-        assert!(Json::Arr(vec![Json::Null]).is_truthy());
+    fn as_bool_only_reads_booleans() {
+        assert_eq!(Json::Bool(true).as_bool(), Some(true));
+        assert_eq!(Json::Bool(false).as_bool(), Some(false));
+        assert_eq!(Json::Int(1).as_bool(), None);
+        assert_eq!(Json::from("true").as_bool(), None);
+        assert_eq!(Json::Null.as_bool(), None);
     }
 
     #[test]
     fn survives_arbitrary_bytes_without_panicking() {
-        // A cheap fuzz: every prefix and every single-byte mutation of a valid document.
         let seed = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x","arguments":{"a":[1,2.5,"\u00e4\ud83d\ude00"],"b":null}}}"#;
         for end in 0..=seed.len() {
             if let Some(prefix) = seed.get(..end) {

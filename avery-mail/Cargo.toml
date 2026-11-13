@@ -2,19 +2,36 @@
 name = "avery-mail"
 version = "0.4.0"
 edition = "2021"
-description = "MCP server (stdio) for Apple Mail: reading, drafts and sending with approval. Rust port of libexec/avery-mail."
+description = "MCP server (stdio) for Apple Mail: reading, drafts and sending with approval."
 license = "MIT"
 publish = false
 
-# Standard library only: this list must stay empty.
 [dependencies]
+
+[lints.rust]
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+unused_mut = "deny"
+unused_must_use = "deny"
+unreachable_pub = "deny"
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+unimplemented = "deny"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = "symbols"
-# A panic in a request handler is caught and turned into an error response,
-# so unwinding must stay enabled.
 panic = "unwind"
 overflow-checks = true
