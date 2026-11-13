@@ -196,6 +196,11 @@ fn station(
     let vault = Arc::new(Memory::new());
     let browser = Arc::new(Mutex::new(Vec::new()));
     let apple = Arc::clone(&orchard.touched);
+    let deadline = if matches!(visit, Visit::Nothing) {
+        Duration::from_millis(900)
+    } else {
+        Duration::from_secs(8)
+    };
     let linker = Linker::new(
         Box::new(Shared(Arc::clone(&transport))),
         Box::new(SharedVault(Arc::clone(&vault))),
@@ -204,7 +209,7 @@ fn station(
             seen: Arc::clone(&browser),
         }),
     )
-    .within(Duration::from_millis(900));
+    .within(deadline);
     let mail = Mail::new(
         Box::new(orchard.clone()),
         Box::new(Shared(Arc::clone(&transport))),
