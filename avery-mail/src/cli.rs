@@ -10,17 +10,17 @@ use crate::calendar::{
 };
 use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
-use crate::cloud::Client;
 use crate::config::WriteSettings;
 use crate::console::{ask_levels, failed, level_word, Choice, Console};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::localtime;
+use crate::provider::Client;
+use crate::provider::{account_address, account_id, calendar_parts, Provider};
 use crate::recurrence;
 use crate::rights::{Level, Link, Rights, MAX_LINKS, MAX_NAME};
 use crate::sendlog::{self, Outcome};
 use crate::server;
-use crate::source::{account_address, account_id, calendar_parts, Source};
 use crate::text::{bracketed, clean_str, one_line_str};
 use crate::texts::{
     CALENDAR_WRITE_OFF, COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
@@ -136,7 +136,7 @@ fn cloud_accounts(rights: &Rights) -> Vec<MailAccount> {
 
 fn link_note(ctx: &Context, account: &MailAccount) -> &'static str {
     match account_address(&account.id) {
-        Some((source, address)) if ctx.cloud.capability(source, address).is_none() => {
+        Some((source, address)) if ctx.linker.capability(source, address).is_none() => {
             "  [Anmeldung fehlt, neu verbinden mit: avery mail link]"
         }
         _ => "",
@@ -208,7 +208,7 @@ fn list_calendars(
         unreachable: Vec::new(),
         apple_ok: true,
     };
-    match ctx.calendar.calendars(Source::Apple, "") {
+    match ctx.calendar.calendars(Provider::Apple, "") {
         Ok(found) => listing.listed.extend(found.into_iter().map(|info| Listed {
             info: CalendarInfo {
                 name: one_line_str(&info.name, MAX_NAME),
@@ -228,7 +228,7 @@ fn list_calendars(
         match ctx.calendar.calendars(link.source, &link.address) {
             Ok(found) => {
                 let write_capable = ctx
-                    .cloud
+                    .linker
                     .capability(link.source, &link.address)
                     .is_some_and(|capability| capability.write_calendar);
                 listing.listed.extend(found.into_iter().map(|info| Listed {
@@ -329,7 +329,7 @@ fn setup_mail(
             let highest = match account_address(&account.id) {
                 Some((source, address)) => {
                     if ctx
-                        .cloud
+                        .linker
                         .capability(source, address)
                         .is_some_and(|capability| capability.write_mail)
                     {
@@ -355,7 +355,7 @@ fn setup_mail(
         .iter()
         .filter(|(known, _)| {
             apple_ok
-                && Source::of_id(&known.id) == Source::Apple
+                && Provider::of_id(&known.id) == Provider::Apple
                 && !accounts.iter().any(|account| account.id == known.id)
         })
         .map(|(known, _)| known.name.clone())
@@ -369,7 +369,7 @@ fn setup_mail(
     let kept: Vec<(MailAccount, Level)> = rights
         .mail
         .iter()
-        .filter(|(known, _)| !apple_ok && Source::of_id(&known.id) == Source::Apple)
+        .filter(|(known, _)| !apple_ok && Provider::of_id(&known.id) == Provider::Apple)
         .cloned()
         .collect();
     rights.mail = kept
@@ -564,7 +564,7 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         console.say("Im Demo-Modus (MAIL_MCP_FAKE=1) nicht moeglich.");
         return 1;
     }
-    let Some(source) = provider.and_then(Source::parse_cloud) else {
+    let Some(source) = provider.and_then(Provider::parse_remote) else {
         console.say("Benutzung: avery mail link google | microsoft");
         return 2;
     };
@@ -576,18 +576,12 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         console.say(&format!("Es sind schon {MAX_LINKS} Konten verbunden."));
         return 1;
     }
-    match source {
-        Source::Google => {
-            console.say("Gmail und Google Kalender direkt verbinden. Du brauchst eine eigene OAuth-Client-ID");
-            console.say("(Google Cloud Console, Typ 'Desktop-App', Gmail API und Google Calendar API aktiviert).");
-        }
-        _ => {
-            console.say("Outlook.com und dessen Kalender direkt verbinden (nur persoenliche Microsoft-Konten).");
-            console.say("Du brauchst eine eigene App-Registrierung (Entra: 'Nur persoenliche Microsoft-Konten',");
-            console.say(
-                "Plattform 'Mobil- und Desktopanwendungen', Umleitungs-URI http://localhost).",
-            );
-        }
+    let Some(oauth) = source.oauth() else {
+        console.say("Dieses Konto braucht keine Anmeldung.");
+        return 2;
+    };
+    for line in oauth.registration {
+        console.say(line);
     }
     console.say("Details: README, Abschnitt 'Gmail und Outlook.com direkt'.");
     console.say("Avery speichert die Anmeldung im macOS-Schluesselbund (Dienst avery-mail), nie in einer Datei.");
@@ -598,7 +592,7 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         console.say("Ungueltige Eingabe.");
         return 1;
     };
-    let secret = if source == Source::Google {
+    let secret = if oauth.secret {
         let Some(secret) = console.ask("Client-Secret: ") else {
             console.say("Ungueltige Eingabe.");
             return 1;
@@ -620,7 +614,7 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     };
     console.say("\nDer Browser oeffnet sich. Melde dich an und erlaube den Zugriff. Falls nicht, oeffne diese Adresse:");
     let mut announce = |url: &str| console.say(&format!("  {url}"));
-    let linked = match ctx.cloud.link(source, &client, write, &mut announce) {
+    let linked = match ctx.linker.link(source, &client, write, &mut announce) {
         Ok(linked) => linked,
         Err(error) => {
             console.say(&format!("Fehler: {error}"));
@@ -728,7 +722,7 @@ fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 
     if code != 0 {
         return code;
     }
-    match ctx.cloud.unlink(link.source, &link.address) {
+    match ctx.linker.unlink(link.source, &link.address) {
         Ok(()) => {
             console.say(&format!("{} getrennt.", link.address));
             console.say("Zugriff der App auch im Konto widerrufen (Google: myaccount.google.com/permissions, Microsoft: account.live.com/consent/Manage).");
@@ -1121,7 +1115,7 @@ fn selftest_calendar(
     let reachable = timed(|| {
         let (source, address) = match calendar_parts(&calendar.id) {
             Some((source, address, _)) => (source, address),
-            None => (Source::Apple, ""),
+            None => (Provider::Apple, ""),
         };
         let known = ctx.calendar.calendars(source, address)?;
         let info = known
@@ -1789,11 +1783,11 @@ mod tests {
     use super::*;
     use crate::backend::Backend;
     use crate::calendar::{CalendarBackend, CalendarInfo};
-    use crate::cloud::CloudAdmin;
     use crate::error::ToolResult;
     use crate::fake::FakeOptions;
     use crate::journal;
     use crate::json::Json;
+    use crate::provider::Linker;
     use crate::testutil::{j, log_entry, settings_at, TempDir, TestResult};
     use std::fs;
     use std::io::Cursor;
@@ -1891,7 +1885,7 @@ mod tests {
     struct UntouchableCalendar;
 
     impl CalendarBackend for UntouchableCalendar {
-        fn calendars(&self, _: Source, _: &str) -> ToolResult<Vec<CalendarInfo>> {
+        fn calendars(&self, _: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
         fn events(
@@ -1936,7 +1930,7 @@ mod tests {
                 settings,
                 Box::new(Untouchable),
                 Box::new(UntouchableCalendar),
-                CloudAdmin::inert(),
+                Linker::inert(),
             );
             for args in [
                 vec!["accounts"],
@@ -2941,8 +2935,8 @@ mod tests {
     }
 
     impl CalendarBackend for CloudCalendars {
-        fn calendars(&self, source: Source, address: &str) -> ToolResult<Vec<CalendarInfo>> {
-            if source == Source::Apple {
+        fn calendars(&self, source: Provider, address: &str) -> ToolResult<Vec<CalendarInfo>> {
+            if source == Provider::Apple {
                 return self.apple.clone();
             }
             self.cloud
@@ -2992,20 +2986,20 @@ mod tests {
         config: &str,
         records: &[(&str, &str)],
         calendars: CloudCalendars,
-        visit: crate::cloud::fakes::Visit,
+        visit: crate::provider::fakes::Visit,
         transport: crate::http::scripted::Scripted,
     ) -> Result<Cloudy, Box<dyn std::error::Error>> {
         let settings = settings_at(&dir.path("config.json"));
         fs::write(&settings.config_path, config)?;
         let mut memory = crate::vault::memory::Memory::new();
         for (name, scope) in records {
-            memory = memory.with(name, &crate::cloud::fakes::record(scope).to_json());
+            memory = memory.with(name, &crate::provider::fakes::record(scope).to_json());
         }
         let vault = std::sync::Arc::new(memory);
-        let admin = CloudAdmin::new(
+        let admin = Linker::new(
             Box::new(transport),
             Box::new(crate::vault::memory::Shared(std::sync::Arc::clone(&vault))),
-            Box::new(crate::cloud::fakes::Visitor {
+            Box::new(crate::provider::fakes::Visitor {
                 visit,
                 seen: Default::default(),
             }),
@@ -3047,7 +3041,7 @@ mod tests {
         } else {
             ""
         };
-        crate::cloud::fakes::GOOGLE_TOKENS.replace(
+        crate::provider::fakes::GOOGLE_TOKENS.replace(
             "calendar.readonly\"",
             &format!("calendar.readonly{extra}\""),
         )
@@ -3061,8 +3055,8 @@ mod tests {
             r#"{"version": 3}"#,
             &[],
             quiet(),
-            crate::cloud::fakes::Visit::Good("4/0code"),
-            crate::cloud::fakes::google_transport(&google_tokens(false)),
+            crate::provider::fakes::Visit::Good("4/0code"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
         )?;
         let (code, out) = run(
             &cloud.ctx,
@@ -3105,8 +3099,8 @@ mod tests {
             r#"{"version": 3}"#,
             &[],
             quiet(),
-            crate::cloud::fakes::Visit::Good("c"),
-            crate::cloud::fakes::google_transport(&google_tokens(true)),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(true)),
         )?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n2\n");
         assert_eq!(code, 0, "{out}");
@@ -3117,8 +3111,8 @@ mod tests {
             r#"{"version": 3}"#,
             &[],
             quiet(),
-            crate::cloud::fakes::Visit::Good("c"),
-            crate::cloud::fakes::google_transport(&google_tokens(false)),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
         )?;
         let (code, out) = run(&again.ctx, &["link", "google"], "id1\nsecret1\n2\n");
         assert_eq!(code, 1, "{out}");
@@ -3139,8 +3133,8 @@ mod tests {
             LINKED,
             &[("google:alice@gmail.example", WRITE_SCOPE)],
             quiet(),
-            crate::cloud::fakes::Visit::Good("c"),
-            crate::cloud::fakes::google_transport(&google_tokens(false)),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
         )?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 0, "{out}");
@@ -3162,7 +3156,8 @@ mod tests {
             rights.calendar_level("microsoft:bob@outlook.example:AQMk"),
             Some(Level::Read)
         );
-        let stored = crate::cloud::fakes::stored_scope(&cloud.vault, "google:alice@gmail.example");
+        let stored =
+            crate::provider::fakes::stored_scope(&cloud.vault, "google:alice@gmail.example");
         assert!(!stored.contains("gmail.compose"), "{stored}");
         Ok(())
     }
@@ -3175,8 +3170,8 @@ mod tests {
             r#"{"version": 3}"#,
             &[],
             quiet(),
-            crate::cloud::fakes::Visit::Nothing,
-            crate::cloud::fakes::google_transport(&google_tokens(false)),
+            crate::provider::fakes::Visit::Nothing,
+            crate::provider::fakes::google_transport(&google_tokens(false)),
         )?;
         assert_eq!(run(&cloud.ctx, &["link"], "").0, 2);
         assert_eq!(run(&cloud.ctx, &["link", "apple"], "").0, 2);
@@ -3200,7 +3195,7 @@ mod tests {
             r#"{"version": 3}"#,
             &[],
             quiet(),
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         demo.ctx.settings.fake = true;
@@ -3221,7 +3216,7 @@ mod tests {
                 ("microsoft:bob@outlook.example", "Mail.Read"),
             ],
             quiet(),
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["unlink", "bob@outlook.example"], "n\n");
@@ -3276,7 +3271,7 @@ mod tests {
             LINKED,
             &[("google:alice@gmail.example", READ_SCOPE)],
             quiet(),
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["accounts"], "");
@@ -3336,7 +3331,7 @@ mod tests {
             LINKED,
             &[("google:alice@gmail.example", READ_SCOPE)],
             calendars,
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["calendars"], "");
@@ -3383,7 +3378,7 @@ mod tests {
             LINKED,
             &[("google:alice@gmail.example", READ_SCOPE)],
             calendars,
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["setup"], "\n\n\n2\n1\n\n\n2\n1\nj\n");
@@ -3436,7 +3431,7 @@ mod tests {
             start,
             &[("google:alice@gmail.example", READ_SCOPE)],
             calendars,
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         cloud.ctx.backend = Box::new(Untouchable);
@@ -3472,7 +3467,7 @@ mod tests {
             r#"{"version": 3}"#,
             &[],
             calendars,
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["setup"], "1\n1\n1\n1\nj\n");
@@ -3495,7 +3490,7 @@ mod tests {
             LINKED,
             &[("google:alice@gmail.example", READ_SCOPE)],
             quiet(),
-            crate::cloud::fakes::Visit::Nothing,
+            crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["revoke"], "");

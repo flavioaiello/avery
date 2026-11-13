@@ -1,17 +1,16 @@
 use crate::backend::Backend;
-use crate::calendar::{CalendarBackend, FakeCalendar, RealCalendar};
-use crate::cloud::{CalendarRouter, CloudAdmin, CloudCalendar, CloudMail, MailRouter};
+use crate::calendar::{CalendarBackend, FakeCalendar};
 use crate::config::Settings;
 use crate::fake::FakeBackend;
 #[cfg(test)]
 use crate::fake::FakeOptions;
-use crate::real::RealBackend;
+use crate::provider::{Calendars, Linker, Mail};
 
 pub(crate) struct Context {
     pub(crate) settings: Settings,
     pub(crate) backend: Box<dyn Backend>,
     pub(crate) calendar: Box<dyn CalendarBackend>,
-    pub(crate) cloud: CloudAdmin,
+    pub(crate) linker: Linker,
 }
 
 impl Context {
@@ -19,13 +18,13 @@ impl Context {
         settings: Settings,
         backend: Box<dyn Backend>,
         calendar: Box<dyn CalendarBackend>,
-        cloud: CloudAdmin,
+        linker: Linker,
     ) -> Context {
         Context {
             settings,
             backend,
             calendar,
-            cloud,
+            linker,
         }
     }
 
@@ -35,7 +34,7 @@ impl Context {
             settings,
             Box::new(FakeBackend::new(options.clone())),
             Box::new(FakeCalendar::new(options)),
-            CloudAdmin::inert(),
+            Linker::inert(),
         )
     }
 
@@ -46,20 +45,14 @@ impl Context {
                 settings,
                 Box::new(FakeBackend::from_env()),
                 Box::new(FakeCalendar::from_env()),
-                CloudAdmin::inert(),
+                Linker::inert(),
             );
         }
         Context::new(
             settings,
-            Box::new(MailRouter::new(
-                Box::new(RealBackend::system()),
-                CloudMail::system(),
-            )),
-            Box::new(CalendarRouter::new(
-                Box::new(RealCalendar::system()),
-                CloudCalendar::system(),
-            )),
-            CloudAdmin::system(),
+            Box::new(Mail::system()),
+            Box::new(Calendars::system()),
+            Linker::system(),
         )
     }
 }

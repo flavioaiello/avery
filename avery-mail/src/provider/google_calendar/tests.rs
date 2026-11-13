@@ -7,7 +7,7 @@ use crate::http::scripted::{ok, Scripted};
 use crate::http::{HttpError, Request, Response, Transport};
 use crate::json;
 use crate::osascript::{App, Finished};
-use crate::source::Source;
+use crate::provider::Provider;
 use crate::testutil::TestResult;
 
 const CAL: &str = "alice@gmail.example";
@@ -42,7 +42,7 @@ fn window(from: &str, to: &str) -> Fallible<Window> {
 }
 
 fn api(transport: &dyn Transport) -> Api<'_> {
-    Api::new(transport, "TOKEN".to_string(), Source::Google)
+    Api::new(transport, "TOKEN".to_string(), Provider::Google)
 }
 
 fn timed(id: &str, summary: &str, start: &str, end: &str, extra: &str) -> String {
@@ -1270,7 +1270,7 @@ mod writing {
         } else {
             Dialogs::saying(&log, answer)
         };
-        let handle = Api::new(&wire, "TOKEN".to_string(), Source::Google);
+        let handle = Api::new(&wire, "TOKEN".to_string(), Provider::Google);
         let result = perform_change(
             &handle,
             &dialogs,

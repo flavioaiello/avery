@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::osascript::{run_fed, Finished};
+use crate::provider::Provider;
 
 pub(crate) const CURL: &str = "/usr/bin/curl";
 pub(crate) const RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
@@ -10,15 +11,6 @@ const MAX_URL: usize = 4096;
 const CONNECT_SECONDS: u64 = 10;
 const GRACE_SECONDS: u64 = 5;
 const CURL_TIMED_OUT: i32 = 28;
-const HOSTS: [&str; 7] = [
-    "gmail.googleapis.com",
-    "www.googleapis.com",
-    "oauth2.googleapis.com",
-    "openidconnect.googleapis.com",
-    "accounts.google.com",
-    "graph.microsoft.com",
-    "login.microsoftonline.com",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
@@ -88,7 +80,9 @@ fn url_allowed(url: &str) -> bool {
     };
     let host = rest.split(['/', '?']).next().unwrap_or_default();
     url.len() <= MAX_URL
-        && HOSTS.contains(&host)
+        && Provider::ALL
+            .iter()
+            .any(|provider| provider.hosts().contains(&host))
         && rest
             .chars()
             .all(|c| c.is_ascii_graphic() && !"\"\\<>#{}|^`".contains(c))

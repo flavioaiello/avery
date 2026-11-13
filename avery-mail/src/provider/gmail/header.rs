@@ -1,8 +1,7 @@
 use super::charset;
 use crate::backend::Person;
 use crate::base64;
-use crate::source::MAX_ADDRESS;
-use crate::text::{one_line_str, take_chars};
+use crate::text::{one_line_str, take_chars, MAX_ADDRESS};
 
 const MAX_HEADER_CHARS: usize = 8192;
 const MAX_WORD: usize = 1024;

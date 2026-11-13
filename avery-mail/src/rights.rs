@@ -1,8 +1,9 @@
 use crate::account::{string_list, MailAccount};
 use crate::calendar::CalendarEntry;
 use crate::json::{Json, Object};
-use crate::source::{account_address, calendar_parts, plain_address, Source};
+use crate::provider::{account_address, calendar_parts, Provider};
 use crate::text::one_line_str;
+use crate::text::plain_address;
 use crate::texts::{DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, MAX_LIMIT_PER_HOUR};
 
 pub(crate) const CONFIG_VERSION: i64 = 3;
@@ -35,7 +36,7 @@ pub(crate) const MAX_NAME: usize = 120;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Link {
-    pub(crate) source: Source,
+    pub(crate) source: Provider,
     pub(crate) address: String,
 }
 
@@ -178,7 +179,7 @@ fn parse_links(section: &Object) -> Result<Vec<Link>, String> {
         let source = entry
             .get("source")
             .and_then(Json::as_str)
-            .and_then(Source::parse_cloud)
+            .and_then(Provider::parse_remote)
             .ok_or_else(|| format!("{place}.source must be \"google\" or \"microsoft\""))?;
         let address = match entry.get("address").and_then(Json::as_str) {
             Some(address) if plain_address(address) && address == address.to_lowercase() => {
@@ -206,13 +207,13 @@ fn check_grants(
     calendars: &[(CalendarEntry, Level)],
     linked: &[Link],
 ) -> Result<(), String> {
-    let is_linked = |source: Source, address: &str| {
+    let is_linked = |source: Provider, address: &str| {
         linked
             .iter()
             .any(|link| link.source == source && link.address == address)
     };
     for (index, (account, _)) in mail.iter().enumerate() {
-        if Source::of_id(&account.id) == Source::Apple {
+        if Provider::of_id(&account.id) == Provider::Apple {
             continue;
         }
         match account_address(&account.id) {
@@ -230,7 +231,7 @@ fn check_grants(
         }
     }
     for (index, (calendar, _)) in calendars.iter().enumerate() {
-        if Source::of_id(&calendar.id) == Source::Apple {
+        if Provider::of_id(&calendar.id) == Provider::Apple {
             continue;
         }
         match calendar_parts(&calendar.id) {
@@ -456,11 +457,11 @@ mod tests {
             rights.linked,
             [
                 Link {
-                    source: Source::Google,
+                    source: Provider::Google,
                     address: "alice@gmail.example".into()
                 },
                 Link {
-                    source: Source::Microsoft,
+                    source: Provider::Microsoft,
                     address: "bob@outlook.example".into()
                 }
             ]

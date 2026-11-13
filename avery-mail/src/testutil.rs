@@ -1,12 +1,23 @@
-use crate::backend::Mode;
+use crate::account::{Account, MailAccount};
+use crate::backend::{
+    Backend, ComposeRequest, Mailbox, MessageBody, MessageId, MessageList, MessageQuery, Mode,
+    Preview,
+};
+use crate::calendar::{
+    Approval, Calendar, CalendarBackend, CalendarInfo, Change, ChangeResult, EventDetail, RawEvent,
+    Window,
+};
 use crate::config::Settings;
+use crate::error::{ToolError, ToolResult};
 use crate::json::{self, Json, Object, ParseError};
+use crate::provider::Provider;
 use crate::sendlog::{LogEntry, Outcome};
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -89,5 +100,75 @@ pub(crate) fn log_entry(ts: i64, outcome: Outcome, id: Option<&str>) -> LogEntry
         chars: 0,
         sha256: String::new(),
         id: id.map(str::to_string),
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Untouchable {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Untouchable {
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn touched<T>(&self) -> ToolResult<T> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ToolError::msg("BACKEND TOUCHED"))
+    }
+}
+
+impl Backend for Untouchable {
+    fn all_accounts(&self) -> ToolResult<Vec<MailAccount>> {
+        self.touched()
+    }
+
+    fn account_info(&self, _: &Account) -> ToolResult<MailAccount> {
+        self.touched()
+    }
+
+    fn mailboxes(&self, _: &Account) -> ToolResult<Vec<Mailbox>> {
+        self.touched()
+    }
+
+    fn messages(&self, _: &Account, _: &MessageQuery) -> ToolResult<MessageList> {
+        self.touched()
+    }
+
+    fn read(
+        &self,
+        _: &Account,
+        _: Option<&str>,
+        _: &MessageId,
+        _: usize,
+    ) -> ToolResult<MessageBody> {
+        self.touched()
+    }
+
+    fn compose(&self, _: &Account, _: &ComposeRequest) -> ToolResult<Preview> {
+        self.touched()
+    }
+
+    fn approval_test(&self, _: u64) -> ToolResult<String> {
+        self.touched()
+    }
+}
+
+impl CalendarBackend for Untouchable {
+    fn calendars(&self, _: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
+        self.touched()
+    }
+
+    fn events(&self, _: &Calendar, _: Window) -> ToolResult<Vec<RawEvent>> {
+        self.touched()
+    }
+
+    fn event(&self, _: &Calendar, _: &str) -> ToolResult<EventDetail> {
+        self.touched()
+    }
+
+    fn change(&self, _: &Calendar, _: &Change, _: &Approval) -> ToolResult<ChangeResult> {
+        self.touched()
     }
 }

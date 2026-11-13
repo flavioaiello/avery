@@ -9,7 +9,7 @@ use crate::http::scripted::{ok, Scripted};
 use crate::http::{HttpError, Request, Response};
 use crate::json;
 use crate::osascript::{App, Finished};
-use crate::source::Source;
+use crate::provider::Provider;
 use crate::testutil::{j, TestResult};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -43,7 +43,7 @@ fn q(text: &str) -> String {
 }
 
 fn api(transport: &Scripted) -> Api<'_> {
-    Api::new(transport, "TOKEN".to_string(), Source::Microsoft)
+    Api::new(transport, "TOKEN".to_string(), Provider::Microsoft)
 }
 
 fn dt(text: &str) -> Res<DateTime> {

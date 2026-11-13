@@ -3,7 +3,7 @@ use super::*;
 use crate::context::Context;
 use crate::http::scripted::{Scripted, Shared};
 use crate::osascript::clicks::Clicks;
-use crate::testutil::{args, settings_at, TempDir, TestResult};
+use crate::testutil::{args, settings_at, TempDir, TestResult, Untouchable};
 use crate::vault::memory::{Memory, Shared as SharedVault};
 use std::error::Error;
 use std::fs;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 
 fn api(transport: &Scripted) -> Api<'_> {
-    Api::new(transport, "TOKEN".to_string(), Source::Google)
+    Api::new(transport, "TOKEN".to_string(), Provider::Google)
 }
 
 #[test]
@@ -209,8 +209,13 @@ fn account(id: &str) -> Account {
     .remove(0)
 }
 
-fn mail_with(vault: crate::vault::memory::Memory) -> CloudMail {
-    CloudMail::new(Box::new(Scripted::new()), Box::new(vault), Box::new(Never))
+fn mail_with(apple: &Untouchable, vault: crate::vault::memory::Memory) -> Mail {
+    Mail::new(
+        Box::new(apple.clone()),
+        Box::new(Scripted::new()),
+        Box::new(vault),
+        Box::new(Never),
+    )
 }
 
 fn query() -> MessageQuery {
@@ -225,22 +230,20 @@ fn query() -> MessageQuery {
 }
 
 #[test]
-fn cloud_mail_needs_a_cloud_account_and_a_stored_sign_in() -> TestResult {
-    let mail = mail_with(crate::vault::memory::Memory::new());
-    let apple = account("5F3E-4C");
+fn remote_mail_needs_a_valid_account_id_and_a_stored_sign_in() -> TestResult {
+    let apple = Untouchable::default();
+    let mail = mail_with(&apple, crate::vault::memory::Memory::new());
     let nonsense = account("google:nonsense");
     let unlinked = account("google:alice@gmail.example");
-    for subject in [&apple, &nonsense] {
-        let Err(error) = mail.mailboxes(subject) else {
-            return Err("expected an error".into());
-        };
-        assert!(
-            error
-                .message()
-                .contains("not a linked Gmail or Outlook.com account"),
-            "{error}"
-        );
-    }
+    let Err(error) = mail.mailboxes(&nonsense) else {
+        return Err("expected an error".into());
+    };
+    assert!(
+        error
+            .message()
+            .contains("not a linked Gmail or Outlook.com account"),
+        "{error}"
+    );
     for result in [
         mail.mailboxes(&unlinked).map(|_| ()),
         mail.messages(&unlinked, &query()).map(|_| ()),
@@ -251,45 +254,50 @@ fn cloud_mail_needs_a_cloud_account_and_a_stored_sign_in() -> TestResult {
             "{result:?}"
         );
     }
-    assert_eq!(mail.all_accounts(), Ok(Vec::new()));
+    assert_eq!(apple.calls(), 0);
     Ok(())
 }
 
 #[test]
-fn the_mail_router_sends_apple_accounts_to_apple_and_the_rest_to_the_cloud() -> TestResult {
-    let router = MailRouter::new(
-        Box::new(crate::fake::FakeBackend::new(
-            crate::fake::FakeOptions::default(),
-        )),
-        mail_with(crate::vault::memory::Memory::new()),
-    );
-    let demo = account("FAKE-GMAIL");
-    assert!(router.mailboxes(&demo).is_ok());
-    assert!(!router.all_accounts()?.is_empty());
+fn the_mail_dispatcher_sends_apple_accounts_to_apple_and_the_rest_to_the_providers() -> TestResult {
+    let apple = Untouchable::default();
+    let mail = mail_with(&apple, crate::vault::memory::Memory::new());
     let cloud = account("microsoft:bob@outlook.example");
     assert!(matches!(
-        router.mailboxes(&cloud),
+        mail.mailboxes(&cloud),
         Err(ToolError::Msg(text)) if text.contains("not linked")
     ));
+    assert_eq!(apple.calls(), 0);
+    let demo = account("FAKE-GMAIL");
+    assert!(matches!(
+        mail.mailboxes(&demo),
+        Err(ToolError::Msg(text)) if text == "BACKEND TOUCHED"
+    ));
+    assert!(mail.all_accounts().is_err());
+    assert_eq!(apple.calls(), 2);
     Ok(())
 }
 
 #[test]
-fn cloud_calendars_need_a_stored_sign_in_and_apple_ones_stay_with_apple() -> TestResult {
-    let calendar = CloudCalendar::new(
+fn the_dialog_test_never_involves_the_apple_backend() {
+    let apple = Untouchable::default();
+    let mail = mail_with(&apple, crate::vault::memory::Memory::new());
+    assert!(mail.approval_test(1).is_err());
+    assert_eq!(apple.calls(), 0);
+}
+
+#[test]
+fn the_calendar_dispatcher_sends_apple_calendars_to_apple_and_the_rest_to_the_providers(
+) -> TestResult {
+    let apple = Untouchable::default();
+    let calendars = Calendars::new(
+        Box::new(apple.clone()),
         Box::new(Scripted::new()),
         Box::new(crate::vault::memory::Memory::new()),
         Box::new(Never),
     );
-    let router = CalendarRouter::new(
-        Box::new(crate::calendar::FakeCalendar::new(
-            crate::fake::FakeOptions::default(),
-        )),
-        calendar,
-    );
-    assert!(!router.calendars(Source::Apple, "")?.is_empty());
     assert!(matches!(
-        router.calendars(Source::Google, "alice@gmail.example"),
+        calendars.calendars(Provider::Google, "alice@gmail.example"),
         Err(ToolError::Msg(text)) if text.contains("not linked")
     ));
     let window = Window {
@@ -302,7 +310,7 @@ fn cloud_calendars_need_a_stored_sign_in_and_apple_ones_stay_with_apple() -> Tes
         label: "alice@gmail.example".to_string(),
     };
     assert!(matches!(
-        router.events(&cloud, window),
+        calendars.events(&cloud, window),
         Err(ToolError::Msg(text)) if text.contains("not linked") || text.contains("time zone")
     ));
     let broken = Calendar {
@@ -310,9 +318,19 @@ fn cloud_calendars_need_a_stored_sign_in_and_apple_ones_stay_with_apple() -> Tes
         ..cloud
     };
     assert!(matches!(
-        router.event(&broken, "x"),
+        calendars.event(&broken, "x"),
         Err(ToolError::Msg(text)) if text.contains("not a linked")
     ));
+    assert_eq!(apple.calls(), 0);
+    assert!(calendars.calendars(Provider::Apple, "").is_err());
+    let native = Calendar {
+        id: "CAL-1".to_string(),
+        name: "Privat".to_string(),
+        label: "Privat".to_string(),
+    };
+    assert!(calendars.events(&native, window).is_err());
+    assert!(calendars.event(&native, "x").is_err());
+    assert_eq!(apple.calls(), 3);
     Ok(())
 }
 
@@ -362,28 +380,24 @@ fn wired(
     let memory = Arc::new(memory);
     let transport = Arc::new(transport);
     let clicks = Clicks::new(click);
-    let mail = CloudMail::new(
-        Box::new(Shared(Arc::clone(&transport))),
-        Box::new(SharedVault(Arc::clone(&memory))),
-        Box::new(clicks.clone()),
-    );
-    let calendar = CloudCalendar::new(
-        Box::new(Shared(Arc::clone(&transport))),
-        Box::new(SharedVault(Arc::clone(&memory))),
-        Box::new(clicks.clone()),
-    );
     let options = crate::fake::FakeOptions::default();
+    let mail = Mail::new(
+        Box::new(crate::fake::FakeBackend::new(options.clone())),
+        Box::new(Shared(Arc::clone(&transport))),
+        Box::new(SharedVault(Arc::clone(&memory))),
+        Box::new(clicks.clone()),
+    );
+    let calendar = Calendars::new(
+        Box::new(crate::calendar::FakeCalendar::new(options)),
+        Box::new(Shared(Arc::clone(&transport))),
+        Box::new(SharedVault(Arc::clone(&memory))),
+        Box::new(clicks.clone()),
+    );
     let ctx = Context::new(
         settings,
-        Box::new(MailRouter::new(
-            Box::new(crate::fake::FakeBackend::new(options.clone())),
-            mail,
-        )),
-        Box::new(CalendarRouter::new(
-            Box::new(crate::calendar::FakeCalendar::new(options)),
-            calendar,
-        )),
-        CloudAdmin::inert(),
+        Box::new(mail),
+        Box::new(calendar),
+        Linker::inert(),
     );
     Ok(Wired {
         ctx,
@@ -903,4 +917,202 @@ fn an_expired_sign_in_is_explained_to_the_model_without_leaking_anything() -> Te
 
 fn wired_without_record() -> Result<Wired, Box<dyn Error>> {
     wired(GOOGLE_READ, &[], Scripted::new(), "no")
+}
+
+#[test]
+fn the_provider_follows_the_id_prefix() {
+    assert_eq!(Provider::of_id("google:a@gmail.example"), Provider::Google);
+    assert_eq!(
+        Provider::of_id("microsoft:a@outlook.example"),
+        Provider::Microsoft
+    );
+    assert_eq!(Provider::of_id("5F3E-4C"), Provider::Apple);
+    assert_eq!(Provider::of_id("googl:x"), Provider::Apple);
+    assert_eq!(Provider::of_id("Google:x"), Provider::Apple);
+    assert_eq!(Provider::of_id(""), Provider::Apple);
+    assert_eq!(Provider::parse_remote("google"), Some(Provider::Google));
+    assert_eq!(Provider::parse_remote("apple"), None);
+    assert_eq!(Provider::Google.kind(), "gmail");
+    assert_eq!(Provider::Microsoft.kind(), "outlook");
+}
+
+#[test]
+fn account_ids_round_trip_and_refuse_odd_addresses() {
+    let id = account_id(Provider::Google, "alice@gmail.example");
+    assert_eq!(id.as_deref(), Some("google:alice@gmail.example"));
+    assert_eq!(
+        account_address("google:alice@gmail.example"),
+        Some((Provider::Google, "alice@gmail.example"))
+    );
+    assert_eq!(account_id(Provider::Apple, "alice@gmail.example"), None);
+    for bad in [
+        "",
+        "alice",
+        "alice@",
+        "@x.example",
+        "a b@x.example",
+        "a:b@x.example",
+        "a@x",
+        "a@x..example",
+        "a@-x.example",
+        "a@x.example-",
+        "a@b@x.example",
+        "ä@x.example",
+        "a\"@x.example",
+    ] {
+        assert_eq!(account_id(Provider::Google, bad), None, "{bad:?}");
+    }
+    assert_eq!(account_address("5F3E-4C"), None);
+    assert_eq!(account_address("google:nonsense"), None);
+}
+
+#[test]
+fn calendar_ids_keep_the_account_and_the_provider_calendar_apart() {
+    let id = calendar_id(
+        Provider::Google,
+        "alice@gmail.example",
+        "family123@group.calendar.google.example",
+    );
+    assert_eq!(
+        id.as_deref(),
+        Some("google:alice@gmail.example:family123@group.calendar.google.example")
+    );
+    assert_eq!(
+        calendar_parts("google:alice@gmail.example:family123@group.calendar.google.example"),
+        Some((
+            Provider::Google,
+            "alice@gmail.example",
+            "family123@group.calendar.google.example"
+        ))
+    );
+    assert_eq!(
+        calendar_parts("microsoft:b@outlook.example:AQMkAD-_=="),
+        Some((Provider::Microsoft, "b@outlook.example", "AQMkAD-_=="))
+    );
+    assert_eq!(calendar_parts("ABC-123"), None);
+    assert_eq!(calendar_parts("google:a@gmail.example"), None);
+    assert_eq!(calendar_parts("google:a@gmail.example:"), None);
+    assert_eq!(calendar_parts("google:a@gmail.example:x y"), None);
+    assert_eq!(
+        calendar_id(Provider::Google, "a@gmail.example", "x/y"),
+        None
+    );
+    assert_eq!(calendar_id(Provider::Google, "a@gmail.example", ""), None);
+    let long = "x".repeat(MAX_CALENDAR_ID + 1);
+    assert_eq!(
+        calendar_id(Provider::Google, "a@gmail.example", &long),
+        None
+    );
+}
+
+#[test]
+fn only_the_oauth_providers_have_oauth_hosts_and_scopes() -> TestResult {
+    assert!(Provider::Apple.oauth().is_none());
+    assert!(Provider::Apple.hosts().is_empty());
+    let google = Provider::Google.oauth().ok_or("google")?;
+    let microsoft = Provider::Microsoft.oauth().ok_or("microsoft")?;
+    assert!(google.secret && !microsoft.secret);
+    assert_eq!(google.redirect(4711), "http://127.0.0.1:4711/");
+    assert_eq!(microsoft.redirect(4711), "http://localhost:4711/");
+    assert_eq!(
+        google.scopes(false),
+        [
+            "openid",
+            "email",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly"
+        ]
+    );
+    assert_eq!(
+        google.required(true),
+        [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://www.googleapis.com/auth/calendar.events"
+        ]
+    );
+    assert_eq!(
+        microsoft.scopes(true),
+        [
+            "offline_access",
+            "User.Read",
+            "Mail.Read",
+            "Calendars.Read",
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Calendars.ReadWrite"
+        ]
+    );
+    assert_eq!(microsoft.required(false), ["Mail.Read", "Calendars.Read"]);
+    for provider in [Provider::Google, Provider::Microsoft] {
+        let oauth = provider.oauth().ok_or("oauth")?;
+        for url in [oauth.authorize, oauth.token, oauth.userinfo] {
+            let host = url
+                .strip_prefix("https://")
+                .and_then(|rest| rest.split(['/', '?']).next())
+                .ok_or("host")?;
+            assert!(provider.hosts().contains(&host), "{url}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_host_allowlist_is_the_union_of_the_provider_hosts() {
+    let all: Vec<&str> = Provider::ALL
+        .iter()
+        .flat_map(|provider| provider.hosts().iter().copied())
+        .collect();
+    assert_eq!(all.len(), 7);
+    for host in all {
+        let url = format!("https://{host}/x");
+        assert!(
+            !Request::new(Method::Get, &url, READ_TIMEOUT).refused(),
+            "{host}"
+        );
+    }
+    assert!(Request::new(Method::Get, "https://example.org/x", READ_TIMEOUT).refused());
+}
+
+#[test]
+fn userinfo_answers_are_turned_into_lower_case_addresses() -> TestResult {
+    let google = Provider::Google.oauth().ok_or("google")?;
+    let microsoft = Provider::Microsoft.oauth().ok_or("microsoft")?;
+    let object = |text: &str| -> Result<Object, String> { crate::testutil::args(text) };
+    assert_eq!(
+        (google.identify)(&object(
+            r#"{"email": "Alice@Gmail.example", "email_verified": true}"#
+        )?),
+        Ok("alice@gmail.example".to_string())
+    );
+    assert_eq!(
+        (google.identify)(&object(r#"{"email": "alice@gmail.example"}"#)?),
+        Ok("alice@gmail.example".to_string())
+    );
+    for bad in [
+        r#"{"email": "alice@gmail.example", "email_verified": false}"#,
+        r#"{"email": "nonsense"}"#,
+        r#"{"sub": "1"}"#,
+        r#"{"email": 5}"#,
+    ] {
+        assert!((google.identify)(&object(bad)?).is_err(), "{bad}");
+    }
+    assert_eq!(
+        (microsoft.identify)(&object(
+            r#"{"mail": "Bob@Outlook.example", "userPrincipalName": "x"}"#
+        )?),
+        Ok("bob@outlook.example".to_string())
+    );
+    assert_eq!(
+        (microsoft.identify)(&object(
+            r#"{"mail": null, "userPrincipalName": "bob@outlook.example"}"#
+        )?),
+        Ok("bob@outlook.example".to_string())
+    );
+    assert!((microsoft.identify)(&object(
+        r#"{"mail": "", "userPrincipalName": "live.com#x"}"#
+    )?)
+    .is_err());
+    Ok(())
 }

@@ -22,8 +22,10 @@ use crate::json::{Json, Object};
 use crate::localtime;
 use crate::mailerror::map_error;
 use crate::osascript::Host;
-use crate::source::{plain_address, Source, MAX_ADDRESS};
-use crate::text::{char_len, clean_str, is_hidden, one_line_str, take_chars};
+use crate::provider::Provider;
+use crate::text::{
+    char_len, clean_str, is_hidden, one_line_str, plain_address, take_chars, MAX_ADDRESS,
+};
 use crate::texts::{APPROVAL_SECONDS, MAX_RECIPIENTS, MAX_SUBJECT};
 use message::Message;
 use outgoing::Outgoing;
@@ -116,7 +118,7 @@ pub(crate) fn account_info(api: &Api, account: &Account) -> ToolResult<MailAccou
     Ok(MailAccount {
         id: account.id.clone(),
         name: account.name.clone(),
-        kind: Source::Google.kind().to_string(),
+        kind: Provider::Google.kind().to_string(),
         addresses: vec![profile_address(api)?],
     })
 }

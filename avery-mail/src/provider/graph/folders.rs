@@ -2,10 +2,10 @@ use super::{
     field, next_link, page_items, url, MAX_ID, MAX_NAME, NO_MAILBOX, PAGE_ITEMS, PAGE_SIZE,
 };
 use crate::backend::Mailbox;
-use crate::cloud::Api;
 use crate::error::{ToolError, ToolResult};
 use crate::http::encode_component;
 use crate::json::Json;
+use crate::provider::Api;
 use crate::text::one_line_str;
 
 const MAX_FOLDERS: usize = 150;
@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use crate::http::scripted::Scripted;
     use crate::http::{HttpError, Method};
-    use crate::source::Source;
+    use crate::provider::Provider;
     use crate::testutil::TestResult;
 
     const TOP_URL: &str = concat!(
@@ -222,7 +222,7 @@ mod tests {
     const SELECT: &str = "?$top=100&$select=id%2CdisplayName%2CunreadItemCount%2CchildFolderCount";
 
     fn api(transport: &Scripted) -> Api<'_> {
-        Api::new(transport, "TOKEN".to_string(), Source::Microsoft)
+        Api::new(transport, "TOKEN".to_string(), Provider::Microsoft)
     }
 
     fn folder(id: &str, name: &str, unread: i64, children: i64) -> String {

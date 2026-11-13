@@ -8,7 +8,7 @@ use crate::error::ToolResult;
 use crate::journal;
 use crate::json::{Json, Object};
 use crate::localtime;
-use crate::source::Source;
+use crate::provider::Provider;
 use crate::text::text_of;
 
 pub(crate) use crate::journal::Origin;
@@ -29,7 +29,7 @@ pub(crate) const MAX_KEPT_NOTES: usize = 4000;
 pub(crate) const MAX_KEPT_URL: usize = 500;
 
 pub(crate) trait CalendarBackend {
-    fn calendars(&self, source: Source, address: &str) -> ToolResult<Vec<CalendarInfo>>;
+    fn calendars(&self, source: Provider, address: &str) -> ToolResult<Vec<CalendarInfo>>;
     fn events(&self, calendar: &Calendar, window: Window) -> ToolResult<Vec<RawEvent>>;
     fn event(&self, calendar: &Calendar, uid: &str) -> ToolResult<EventDetail>;
     fn change(

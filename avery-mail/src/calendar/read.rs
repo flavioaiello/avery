@@ -3,8 +3,8 @@ use crate::civil::{Date, DateTime};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{Json, Object};
+use crate::provider::Provider;
 use crate::recurrence::{self, Rule};
-use crate::source::Source;
 use crate::text::{char_len, clean, clean_str, one_line_str, take_chars, to_int};
 use crate::texts::{NO_CALENDARS, UNTRUSTED};
 
@@ -193,7 +193,7 @@ pub(crate) fn list_calendars(ctx: &Context, _args: &Object) -> ToolResult<String
     if calendars.is_empty() {
         return Err(ToolError::msg(NO_CALENDARS));
     }
-    let known = match ctx.calendar.calendars(Source::Apple, "") {
+    let known = match ctx.calendar.calendars(Provider::Apple, "") {
         Ok(known) => Some(known),
         Err(error) if error.is_tool_error() => None,
         Err(error) => return Err(error),
@@ -409,8 +409,8 @@ pub(crate) fn get_event(ctx: &Context, args: &Object) -> ToolResult<String> {
 mod tests {
     use super::*;
     use crate::calendar::{CalendarBackend, CalendarInfo};
-    use crate::cloud::CloudAdmin;
     use crate::fake::FakeOptions;
+    use crate::provider::Linker;
     use crate::testutil::{args, settings_at, TempDir, TestResult};
 
     fn demo(write: &str) -> Context {
@@ -603,7 +603,7 @@ mod tests {
     struct Stub(Vec<RawEvent>);
 
     impl CalendarBackend for Stub {
-        fn calendars(&self, _: Source, _: &str) -> ToolResult<Vec<CalendarInfo>> {
+        fn calendars(&self, _: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
             Err(ToolError::msg("down"))
         }
         fn events(&self, _: &Calendar, window: Window) -> ToolResult<Vec<RawEvent>> {
@@ -649,7 +649,7 @@ mod tests {
             settings,
             Box::new(crate::fake::FakeBackend::new(FakeOptions::default())),
             Box::new(Stub(events)),
-            CloudAdmin::inert(),
+            Linker::inert(),
         )
     }
 

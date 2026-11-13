@@ -7,8 +7,8 @@ use crate::base64;
 use crate::http::{self, Method, Request, Transport};
 use crate::json::{self, Json, Object};
 use crate::osascript::run_command;
+use crate::provider::{account_id, OAuth, Provider};
 use crate::sha256::sha256;
-use crate::source::{account_id, plain_address, Source};
 use crate::text::one_line_str;
 use crate::vault::Vault;
 
@@ -19,16 +19,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(50);
 const MAX_REQUEST: usize = 8192;
 const MAX_CLIENT: usize = 300;
-const GOOGLE_AUTH: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_USER: &str = "https://openidconnect.googleapis.com/v1/userinfo";
-const MICROSOFT_AUTH: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
-const MICROSOFT_TOKEN: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
-const MICROSOFT_USER: &str = "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName";
-const GMAIL_READ: &str = "https://www.googleapis.com/auth/gmail.readonly";
-const GMAIL_WRITE: &str = "https://www.googleapis.com/auth/gmail.compose";
-const CALENDAR_READ: &str = "https://www.googleapis.com/auth/calendar.readonly";
-const CALENDAR_WRITE: &str = "https://www.googleapis.com/auth/calendar.events";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Client {
@@ -37,7 +27,8 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    pub(crate) fn new(source: Source, id: &str, secret: &str) -> Result<Client, String> {
+    pub(crate) fn new(provider: Provider, id: &str, secret: &str) -> Result<Client, String> {
+        let oauth = provider.oauth().ok_or("Not a cloud provider.")?;
         let id = id.trim();
         let secret = secret.trim();
         let valid = |text: &str| {
@@ -50,14 +41,15 @@ impl Client {
         if !valid(id) {
             return Err("The client id looks wrong (letters, digits, - . _ ~ only).".to_string());
         }
-        let secret = match source {
-            Source::Google if valid(secret) => Some(secret.to_string()),
-            Source::Google => {
+        let secret = if oauth.secret {
+            if !valid(secret) {
                 return Err(
                     "The client secret looks wrong (letters, digits, - . _ ~ only).".to_string(),
-                )
+                );
             }
-            _ => None,
+            Some(secret.to_string())
+        } else {
+            None
         };
         Ok(Client {
             id: id.to_string(),
@@ -91,42 +83,6 @@ impl Browser for SystemBrowser {
     }
 }
 
-fn scopes(source: Source, write: bool) -> Vec<&'static str> {
-    let mut scopes = match source {
-        Source::Google => vec!["openid", "email", GMAIL_READ, CALENDAR_READ],
-        Source::Microsoft => vec!["offline_access", "User.Read", "Mail.Read", "Calendars.Read"],
-        Source::Apple => Vec::new(),
-    };
-    if write {
-        match source {
-            Source::Google => scopes.extend([GMAIL_WRITE, CALENDAR_WRITE]),
-            Source::Microsoft => {
-                scopes.extend(["Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite"])
-            }
-            Source::Apple => {}
-        }
-    }
-    scopes
-}
-
-fn required(source: Source, write: bool) -> Vec<&'static str> {
-    let mut needed = match source {
-        Source::Google => vec![GMAIL_READ, CALENDAR_READ],
-        Source::Microsoft => vec!["Mail.Read", "Calendars.Read"],
-        Source::Apple => Vec::new(),
-    };
-    if write {
-        match source {
-            Source::Google => needed.extend([GMAIL_WRITE, CALENDAR_WRITE]),
-            Source::Microsoft => {
-                needed.extend(["Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite"])
-            }
-            Source::Apple => {}
-        }
-    }
-    needed
-}
-
 fn random_token(bytes: usize) -> Option<String> {
     let mut buffer = vec![0u8; bytes];
     std::fs::File::open("/dev/urandom")
@@ -139,23 +95,16 @@ pub(crate) fn challenge_of(verifier: &str) -> String {
     base64::encode_url(&sha256(verifier.as_bytes()))
 }
 
-fn redirect_uri(source: Source, port: u16) -> String {
-    match source {
-        Source::Microsoft => format!("http://localhost:{port}/"),
-        _ => format!("http://127.0.0.1:{port}/"),
-    }
-}
-
 fn authorize_url(
-    source: Source,
+    oauth: &OAuth,
     client: &Client,
     write: bool,
     port: u16,
     challenge: &str,
     state: &str,
-) -> Option<String> {
-    let scope = scopes(source, write).join(" ");
-    let redirect = redirect_uri(source, port);
+) -> String {
+    let scope = oauth.scopes(write).join(" ");
+    let redirect = oauth.redirect(port);
     let mut pairs: Vec<(&str, &str)> = vec![
         ("client_id", client.id.as_str()),
         ("redirect_uri", redirect.as_str()),
@@ -165,20 +114,8 @@ fn authorize_url(
         ("code_challenge_method", "S256"),
         ("state", state),
     ];
-    let base = match source {
-        Source::Google => {
-            pairs.push(("access_type", "offline"));
-            pairs.push(("prompt", "consent"));
-            GOOGLE_AUTH
-        }
-        Source::Microsoft => {
-            pairs.push(("response_mode", "query"));
-            pairs.push(("prompt", "select_account"));
-            MICROSOFT_AUTH
-        }
-        Source::Apple => return None,
-    };
-    Some(format!("{base}?{}", http::query(&pairs)))
+    pairs.extend(oauth.authorize_extras.iter().copied());
+    format!("{}?{}", oauth.authorize, http::query(&pairs))
 }
 
 fn percent_decode(text: &str) -> Option<String> {
@@ -363,17 +300,13 @@ fn text_of(object: &Object, key: &str, limit: usize) -> Option<String> {
 
 fn exchange(
     transport: &dyn Transport,
-    source: Source,
+    oauth: &OAuth,
     client: &Client,
     code: &str,
     verifier: &str,
     port: u16,
 ) -> Result<(String, String, String), String> {
-    let (url, redirect) = match source {
-        Source::Google => (GOOGLE_TOKEN, redirect_uri(source, port)),
-        Source::Microsoft => (MICROSOFT_TOKEN, redirect_uri(source, port)),
-        Source::Apple => return Err("Not a cloud provider.".to_string()),
-    };
+    let redirect = oauth.redirect(port);
     let mut pairs: Vec<(&str, &str)> = vec![
         ("client_id", client.id.as_str()),
         ("grant_type", "authorization_code"),
@@ -384,7 +317,7 @@ fn exchange(
     if let Some(secret) = &client.secret {
         pairs.push(("client_secret", secret.as_str()));
     }
-    let request = Request::new(Method::Post, url, REQUEST_TIMEOUT)
+    let request = Request::new(Method::Post, oauth.token, REQUEST_TIMEOUT)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(&http::query(&pairs));
     let response = transport
@@ -416,13 +349,8 @@ fn exchange(
     Ok((access, refresh, scope))
 }
 
-fn find_address(transport: &dyn Transport, source: Source, access: &str) -> Result<String, String> {
-    let url = match source {
-        Source::Google => GOOGLE_USER,
-        Source::Microsoft => MICROSOFT_USER,
-        Source::Apple => return Err("Not a cloud provider.".to_string()),
-    };
-    let request = Request::new(Method::Get, url, REQUEST_TIMEOUT)
+fn find_address(transport: &dyn Transport, oauth: &OAuth, access: &str) -> Result<String, String> {
+    let request = Request::new(Method::Get, oauth.userinfo, REQUEST_TIMEOUT)
         .header("Authorization", &format!("Bearer {access}"));
     let response = transport
         .send(&request)
@@ -433,32 +361,7 @@ fn find_address(transport: &dyn Transport, source: Source, access: &str) -> Resu
         .and_then(Json::as_object)
         .filter(|_| response.status == 200)
         .ok_or("The account could not be identified.")?;
-    let candidates: Vec<&str> = match source {
-        Source::Google => {
-            if object.get("email_verified") == Some(&Json::Bool(false)) {
-                return Err("Google says that this address is not verified.".to_string());
-            }
-            vec![object
-                .get("email")
-                .and_then(Json::as_str)
-                .unwrap_or_default()]
-        }
-        _ => vec![
-            object
-                .get("mail")
-                .and_then(Json::as_str)
-                .unwrap_or_default(),
-            object
-                .get("userPrincipalName")
-                .and_then(Json::as_str)
-                .unwrap_or_default(),
-        ],
-    };
-    candidates
-        .into_iter()
-        .find(|candidate| plain_address(candidate))
-        .map(str::to_lowercase)
-        .ok_or_else(|| "The account has no usable mail address.".to_string())
+    (oauth.identify)(object)
 }
 
 struct Refusing;
@@ -491,20 +394,20 @@ impl Browser for Closed {
     fn open(&self, _url: &str) {}
 }
 
-pub(crate) struct CloudAdmin {
+pub(crate) struct Linker {
     transport: Box<dyn Transport>,
     vault: Box<dyn Vault>,
     browser: Box<dyn Browser>,
     deadline: Duration,
 }
 
-impl CloudAdmin {
+impl Linker {
     pub(crate) fn new(
         transport: Box<dyn Transport>,
         vault: Box<dyn Vault>,
         browser: Box<dyn Browser>,
-    ) -> CloudAdmin {
-        CloudAdmin {
+    ) -> Linker {
+        Linker {
             transport,
             vault,
             browser,
@@ -512,34 +415,34 @@ impl CloudAdmin {
         }
     }
 
-    pub(crate) fn system() -> CloudAdmin {
-        CloudAdmin::new(
+    pub(crate) fn system() -> Linker {
+        Linker::new(
             Box::new(crate::http::Curl::system()),
             Box::new(crate::vault::Keychain::system()),
             Box::new(SystemBrowser),
         )
     }
 
-    pub(crate) fn inert() -> CloudAdmin {
-        CloudAdmin::new(Box::new(Refusing), Box::new(Forgetful), Box::new(Closed))
+    pub(crate) fn inert() -> Linker {
+        Linker::new(Box::new(Refusing), Box::new(Forgetful), Box::new(Closed))
     }
 
     #[cfg(test)]
-    pub(crate) fn within(mut self, deadline: Duration) -> CloudAdmin {
+    pub(crate) fn within(mut self, deadline: Duration) -> Linker {
         self.deadline = deadline;
         self
     }
 
-    pub(crate) fn capability(&self, source: Source, address: &str) -> Option<Capability> {
-        let record = load_record(self.vault.as_ref(), source, address).ok()?;
+    pub(crate) fn capability(&self, provider: Provider, address: &str) -> Option<Capability> {
+        let record = load_record(self.vault.as_ref(), provider, address).ok()?;
         Some(Capability {
-            write_mail: record.can_write_mail(source),
-            write_calendar: record.can_write_calendar(source),
+            write_mail: record.can_write_mail(provider),
+            write_calendar: record.can_write_calendar(provider),
         })
     }
 
-    pub(crate) fn unlink(&self, source: Source, address: &str) -> Result<(), String> {
-        let name = account_id(source, address).ok_or("This is not a valid account.")?;
+    pub(crate) fn unlink(&self, provider: Provider, address: &str) -> Result<(), String> {
+        let name = account_id(provider, address).ok_or("This is not a valid account.")?;
         self.vault
             .delete(&name)
             .map_err(|error| format!("The stored sign-in could not be removed ({error})."))
@@ -547,24 +450,24 @@ impl CloudAdmin {
 
     pub(crate) fn link(
         &self,
-        source: Source,
+        provider: Provider,
         client: &Client,
         write: bool,
         announce: &mut dyn FnMut(&str),
     ) -> Result<Linked, String> {
+        let oauth = provider.oauth().ok_or("Not a cloud provider.")?;
         let verifier = random_token(32).ok_or("No random numbers available.")?;
         let state = random_token(16).ok_or("No random numbers available.")?;
         let challenge = challenge_of(&verifier);
         let (listeners, port) = bind()?;
-        let url = authorize_url(source, client, write, port, &challenge, &state)
-            .ok_or("Not a cloud provider.")?;
+        let url = authorize_url(oauth, client, write, port, &challenge, &state);
         announce(&url);
         self.browser.open(&url);
         let code = wait_for_code(&listeners, &state, Instant::now() + self.deadline)?;
         drop(listeners);
         let (access, refresh, scope) = exchange(
             self.transport.as_ref(),
-            source,
+            oauth,
             client,
             &code,
             &verifier,
@@ -576,14 +479,10 @@ impl CloudAdmin {
             refresh_token: refresh,
             scope,
         };
-        let missing: Vec<&str> = required(source, write)
+        let missing: Vec<&str> = oauth
+            .required(write)
             .into_iter()
-            .filter(|wanted| {
-                !record
-                    .scope
-                    .split_whitespace()
-                    .any(|granted| granted.eq_ignore_ascii_case(wanted))
-            })
+            .filter(|wanted| !record.has(wanted))
             .collect();
         if !missing.is_empty() {
             return Err(format!(
@@ -591,8 +490,9 @@ impl CloudAdmin {
                 missing.join(", ")
             ));
         }
-        let address = find_address(self.transport.as_ref(), source, &access)?;
-        let name = account_id(source, &address).ok_or("The account has no usable mail address.")?;
+        let address = find_address(self.transport.as_ref(), oauth, &access)?;
+        let name =
+            account_id(provider, &address).ok_or("The account has no usable mail address.")?;
         self.vault
             .store(&name, &record.to_json())
             .map_err(|error| {
@@ -600,8 +500,8 @@ impl CloudAdmin {
             })?;
         Ok(Linked {
             address,
-            write_mail: record.can_write_mail(source),
-            write_calendar: record.can_write_calendar(source),
+            write_mail: record.can_write_mail(provider),
+            write_calendar: record.can_write_calendar(provider),
         })
     }
 }
@@ -720,13 +620,17 @@ mod tests {
     use crate::vault::memory::Memory;
     use std::sync::{Arc, Mutex};
 
+    fn oauth(provider: Provider) -> Result<&'static OAuth, String> {
+        provider.oauth().ok_or_else(|| "oauth".to_string())
+    }
+
     fn google() -> Result<Client, String> {
-        Client::new(Source::Google, "123-abc.apps.example", "GOCSPX-secret_1")
+        Client::new(Provider::Google, "123-abc.apps.example", "GOCSPX-secret_1")
     }
 
     fn microsoft() -> Result<Client, String> {
         Client::new(
-            Source::Microsoft,
+            Provider::Microsoft,
             "0a1b2c3d-1111-2222-3333-444455556666",
             "",
         )
@@ -736,14 +640,14 @@ mod tests {
         transport: Scripted,
         vault: Memory,
         visit: Visit,
-    ) -> (CloudAdmin, Arc<Mutex<Vec<String>>>) {
+    ) -> (Linker, Arc<Mutex<Vec<String>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let browser = Visitor {
             visit,
             seen: Arc::clone(&seen),
         };
         (
-            CloudAdmin::new(Box::new(transport), Box::new(vault), Box::new(browser))
+            Linker::new(Box::new(transport), Box::new(vault), Box::new(browser))
                 .within(Duration::from_secs(10)),
             seen,
         )
@@ -764,18 +668,24 @@ mod tests {
         assert!(google().is_ok());
         assert!(microsoft().is_ok());
         assert_eq!(microsoft().map(|client| client.secret), Ok(None));
-        assert!(Client::new(Source::Google, "", "s").is_err());
-        assert!(Client::new(Source::Google, "id", "").is_err());
-        assert!(Client::new(Source::Google, "i d", "s").is_err());
-        assert!(Client::new(Source::Google, "id", "s\"x").is_err());
-        assert!(Client::new(Source::Microsoft, "a&b", "").is_err());
-        assert!(Client::new(Source::Microsoft, &"x".repeat(MAX_CLIENT + 1), "").is_err());
+        assert!(Client::new(Provider::Google, "", "s").is_err());
+        assert!(Client::new(Provider::Google, "id", "").is_err());
+        assert!(Client::new(Provider::Google, "i d", "s").is_err());
+        assert!(Client::new(Provider::Google, "id", "s\"x").is_err());
+        assert!(Client::new(Provider::Microsoft, "a&b", "").is_err());
+        assert!(Client::new(Provider::Microsoft, &"x".repeat(MAX_CLIENT + 1), "").is_err());
     }
 
     #[test]
     fn the_authorize_urls_carry_pkce_state_and_the_requested_scopes() -> TestResult {
-        let url =
-            authorize_url(Source::Google, &google()?, false, 4711, "CHAL", "STATE").ok_or("url")?;
+        let url = authorize_url(
+            oauth(Provider::Google)?,
+            &google()?,
+            false,
+            4711,
+            "CHAL",
+            "STATE",
+        );
         assert!(url.starts_with(
             "https://accounts.google.com/o/oauth2/v2/auth?client_id=123-abc.apps.example&"
         ));
@@ -796,11 +706,17 @@ mod tests {
         assert!(scope.contains("gmail.readonly") && scope.contains("calendar.readonly"));
         assert!(!scope.contains("compose") && !scope.contains("calendar.events"));
         assert!(!url.contains("client_secret"));
-        let write = authorize_url(Source::Google, &google()?, true, 1, "C", "S").ok_or("url")?;
+        let write = authorize_url(oauth(Provider::Google)?, &google()?, true, 1, "C", "S");
         let scope = query_value(&write, "scope").ok_or("scope")?;
         assert!(scope.contains("gmail.compose") && scope.contains("calendar.events"));
-        let url =
-            authorize_url(Source::Microsoft, &microsoft()?, true, 5000, "C", "S").ok_or("url")?;
+        let url = authorize_url(
+            oauth(Provider::Microsoft)?,
+            &microsoft()?,
+            true,
+            5000,
+            "C",
+            "S",
+        );
         assert!(
             url.starts_with("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?")
         );
@@ -822,7 +738,8 @@ mod tests {
                 "{wanted}"
             );
         }
-        assert!(authorize_url(Source::Apple, &google()?, false, 1, "C", "S").is_none());
+        assert!(Provider::Apple.oauth().is_none());
+        assert!(Client::new(Provider::Apple, "id", "s").is_err());
         Ok(())
     }
 
@@ -877,7 +794,7 @@ mod tests {
             Visit::Good("4/0code"),
         );
         let mut announced = Vec::new();
-        let linked = admin.link(Source::Google, &google()?, false, &mut |url| {
+        let linked = admin.link(Provider::Google, &google()?, false, &mut |url| {
             announced.push(url.to_string())
         })?;
         assert_eq!(
@@ -914,13 +831,13 @@ mod tests {
             visit: Visit::Good("4/0code"),
             seen: Arc::clone(&seen_urls),
         };
-        let admin = CloudAdmin::new(
+        let admin = Linker::new(
             Box::new(Seen(Arc::clone(&transport))),
             Box::new(crate::vault::memory::Shared(Arc::clone(&vault))),
             Box::new(browser),
         )
         .within(Duration::from_secs(10));
-        admin.link(Source::Google, &google()?, false, &mut |_| {})?;
+        admin.link(Provider::Google, &google()?, false, &mut |_| {})?;
         let requests = transport.seen();
         let token = requests
             .iter()
@@ -971,7 +888,7 @@ mod tests {
             Memory::new(),
             Visit::Good("c"),
         );
-        let Err(error) = admin.link(Source::Google, &google()?, true, &mut |_| {}) else {
+        let Err(error) = admin.link(Provider::Google, &google()?, true, &mut |_| {}) else {
             return Err("expected an error".into());
         };
         assert!(
@@ -983,12 +900,12 @@ mod tests {
             "calendar.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events\"",
         );
         let (admin, _) = admin_with(google_transport(&full), Visit::Good("c"));
-        let linked = admin.link(Source::Google, &google()?, true, &mut |_| {})?;
+        let linked = admin.link(Provider::Google, &google()?, true, &mut |_| {})?;
         assert!(linked.write_mail && linked.write_calendar);
         Ok(())
     }
 
-    fn admin_with(transport: Scripted, visit: Visit) -> (CloudAdmin, Arc<Mutex<Vec<String>>>) {
+    fn admin_with(transport: Scripted, visit: Visit) -> (Linker, Arc<Mutex<Vec<String>>>) {
         admin(transport, Memory::new(), visit)
     }
 
@@ -1008,7 +925,7 @@ mod tests {
                 r#"{"mail": null, "userPrincipalName": "Bob@Outlook.example"}"#,
             );
         let (admin, _) = admin_with(transport, Visit::Good("M.code"));
-        let linked = admin.link(Source::Microsoft, &microsoft()?, true, &mut |_| {})?;
+        let linked = admin.link(Provider::Microsoft, &microsoft()?, true, &mut |_| {})?;
         assert_eq!(linked.address, "bob@outlook.example");
         assert!(linked.write_mail && linked.write_calendar);
         Ok(())
@@ -1021,7 +938,7 @@ mod tests {
             Visit::WrongStateThenGood("good"),
         );
         assert!(admin
-            .link(Source::Google, &google()?, false, &mut |_| {})
+            .link(Provider::Google, &google()?, false, &mut |_| {})
             .is_ok());
         Ok(())
     }
@@ -1114,7 +1031,7 @@ mod tests {
             } else {
                 10
             }));
-            let Err(error) = admin.link(Source::Google, &google()?, false, &mut |_| {}) else {
+            let Err(error) = admin.link(Provider::Google, &google()?, false, &mut |_| {}) else {
                 return Err(format!("{wanted}: expected an error").into());
             };
             assert!(error.contains(wanted), "{wanted}: {error}");
@@ -1129,7 +1046,7 @@ mod tests {
             Memory::broken(),
             Visit::Good("x"),
         );
-        let Err(error) = admin.link(Source::Google, &google()?, false, &mut |_| {}) else {
+        let Err(error) = admin.link(Provider::Google, &google()?, false, &mut |_| {}) else {
             return Err("expected an error".into());
         };
         assert!(error.contains("Keychain"), "{error}");
@@ -1145,7 +1062,7 @@ mod tests {
             scope: "Mail.Read Mail.ReadWrite Mail.Send Calendars.Read".into(),
         };
         let vault = Memory::new().with("microsoft:bob@outlook.example", &record.to_json());
-        let admin = CloudAdmin::new(
+        let admin = Linker::new(
             Box::new(Scripted::new()),
             Box::new(vault),
             Box::new(Visitor {
@@ -1154,29 +1071,31 @@ mod tests {
             }),
         );
         assert_eq!(
-            admin.capability(Source::Microsoft, "bob@outlook.example"),
+            admin.capability(Provider::Microsoft, "bob@outlook.example"),
             Some(Capability {
                 write_mail: true,
                 write_calendar: false
             })
         );
         assert_eq!(
-            admin.capability(Source::Microsoft, "nobody@outlook.example"),
+            admin.capability(Provider::Microsoft, "nobody@outlook.example"),
             None
         );
         assert_eq!(
-            admin.capability(Source::Google, "bob@outlook.example"),
+            admin.capability(Provider::Google, "bob@outlook.example"),
             None
         );
         assert_eq!(
-            admin.unlink(Source::Microsoft, "bob@outlook.example"),
+            admin.unlink(Provider::Microsoft, "bob@outlook.example"),
             Ok(())
         );
         assert_eq!(
-            admin.capability(Source::Microsoft, "bob@outlook.example"),
+            admin.capability(Provider::Microsoft, "bob@outlook.example"),
             None
         );
-        assert!(admin.unlink(Source::Apple, "bob@outlook.example").is_err());
+        assert!(admin
+            .unlink(Provider::Apple, "bob@outlook.example")
+            .is_err());
         Ok(())
     }
 }

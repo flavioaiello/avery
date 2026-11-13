@@ -230,7 +230,7 @@ fn prefer(zone: &str, text_body: bool) -> String {
 }
 
 fn with_prefer<'a>(api: &Api<'a>, value: &str) -> Api<'a> {
-    let mut derived = Api::new(api.transport, api.token.clone(), api.source);
+    let mut derived = Api::new(api.transport, api.token.clone(), api.provider);
     for (name, existing) in &api.headers {
         derived = derived.with_header(name, existing);
     }

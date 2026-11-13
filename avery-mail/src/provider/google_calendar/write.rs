@@ -3,11 +3,11 @@ use crate::calendar::{
     MAX_KEPT_NOTES, MAX_KEPT_SUMMARY,
 };
 use crate::civil::DateTime;
-use crate::cloud::dialog::{approve_change, Verdict};
 use crate::error::{ToolError, ToolResult};
 use crate::http::Method;
 use crate::json::{Json, Object};
 use crate::osascript::Host;
+use crate::provider::dialog::{approve_change, Verdict};
 use crate::text::char_len;
 
 use super::{calendar_gone, event_gone, html, segment, unexpected, usable_id, wire, Target, BASE};

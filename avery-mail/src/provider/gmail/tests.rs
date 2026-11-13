@@ -18,7 +18,7 @@ const SENT_ANSWER: &str = r#"{"id": "m-9", "threadId": "t-9", "labelIds": ["SENT
 type Failure = Box<dyn Error>;
 
 fn api(transport: &Scripted) -> Api<'_> {
-    Api::new(transport, "TOKEN".to_string(), Source::Google)
+    Api::new(transport, "TOKEN".to_string(), Provider::Google)
 }
 
 fn account(addresses: &[&str]) -> Account {

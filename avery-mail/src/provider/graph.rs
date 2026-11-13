@@ -19,8 +19,8 @@ use crate::journal;
 use crate::json::{Json, Object};
 use crate::localtime;
 use crate::osascript::Host;
-use crate::source::{plain_address, Source, MAX_ADDRESS};
-use crate::text::{char_len, clean_str, one_line_str, take_chars};
+use crate::provider::Provider;
+use crate::text::{char_len, clean_str, one_line_str, plain_address, take_chars, MAX_ADDRESS};
 
 const BASE: &str = "https://graph.microsoft.com/v1.0/me";
 const LINK_PREFIX: &str = "https://graph.microsoft.com/v1.0/";
@@ -162,7 +162,7 @@ pub(crate) fn account_info(api: &Api, account: &Account) -> ToolResult<MailAccou
     Ok(MailAccount {
         id: account.id.clone(),
         name: account.name.clone(),
-        kind: Source::Microsoft.kind().to_string(),
+        kind: Provider::Microsoft.kind().to_string(),
         addresses: vec![address],
     })
 }
@@ -405,7 +405,7 @@ mod tests {
         "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?%24skiptoken=";
 
     fn api(transport: &Scripted) -> Api<'_> {
-        Api::new(transport, "TOKEN".to_string(), Source::Microsoft)
+        Api::new(transport, "TOKEN".to_string(), Provider::Microsoft)
     }
 
     fn account() -> Account {
@@ -1770,7 +1770,7 @@ mod tests {
     #[test]
     fn the_preference_header_is_added_next_to_existing_headers() -> TestResult {
         let transport = Scripted::new().json(Method::Get, "/x", 200, "{}");
-        let base = Api::new(&transport, "TOKEN".to_string(), Source::Microsoft)
+        let base = Api::new(&transport, "TOKEN".to_string(), Provider::Microsoft)
             .with_header("X-First", "1");
         let derived = base
             .with_header("Prefer", "a=\"b\"")
@@ -1837,7 +1837,8 @@ mod tests {
     #[test]
     fn the_cloud_backend_hands_outlook_accounts_to_this_module_with_the_real_token() -> TestResult {
         use crate::backend::{Backend, Mode};
-        use crate::cloud::CloudMail;
+        use crate::provider::Mail;
+        use crate::testutil::Untouchable;
         use crate::vault::memory::Memory;
         use std::sync::Arc;
 
@@ -1870,7 +1871,8 @@ mod tests {
                 .json(Method::Get, "/v1.0/me?", 200, r#"{"mail": "bob@outlook.example"}"#),
         );
         let vault = Memory::new().with("microsoft:bob@outlook.example", record);
-        let backend = CloudMail::new(
+        let backend = Mail::new(
+            Box::new(Untouchable::default()),
             Box::new(Shared(Arc::clone(&transport))),
             Box::new(vault),
             Box::new(Declining),

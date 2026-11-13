@@ -3,15 +3,17 @@ use super::{
 };
 use crate::account::Account;
 use crate::backend::{ComposeRequest, MessageId, Mode, Preview};
-use crate::cloud::dialog::{approve_send, Verdict};
-use crate::cloud::Api;
 use crate::error::{ToolError, ToolResult};
 use crate::http::Method;
 use crate::json::{Json, Object};
 use crate::mailerror::map_error;
 use crate::osascript::Host;
-use crate::source::{account_address, plain_address, MAX_ADDRESS};
-use crate::text::{char_len, clean_str, is_hidden, one_line_str, take_chars};
+use crate::provider::account_address;
+use crate::provider::dialog::{approve_send, Verdict};
+use crate::provider::Api;
+use crate::text::{
+    char_len, clean_str, is_hidden, one_line_str, plain_address, take_chars, MAX_ADDRESS,
+};
 use crate::texts::{APPROVAL_SECONDS, MAX_RECIPIENTS};
 
 const DRAFT_FIELDS: &str =
@@ -404,7 +406,7 @@ mod tests {
     use crate::http::{HttpError, Request};
     use crate::json;
     use crate::osascript::{App, Finished};
-    use crate::source::Source;
+    use crate::provider::Provider;
     use crate::testutil::{mid, TestResult};
     use std::error::Error;
     use std::sync::Mutex;
@@ -579,7 +581,7 @@ mod tests {
     }
 
     fn api(transport: &Scripted) -> Api<'_> {
-        Api::new(transport, "TOKEN".to_string(), Source::Microsoft)
+        Api::new(transport, "TOKEN".to_string(), Provider::Microsoft)
     }
 
     fn account() -> Account {

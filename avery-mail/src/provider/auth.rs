@@ -3,14 +3,12 @@ use std::time::Duration;
 use crate::error::{ToolError, ToolResult};
 use crate::http::{self, Method, Request, Transport};
 use crate::json::{self, Json, Object};
-use crate::source::{account_id, Source};
+use crate::provider::{account_id, OAuth, Provider};
 use crate::text::one_line_str;
 use crate::vault::Vault;
 
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TOKEN: usize = 8192;
-const GOOGLE_TOKEN: &str = "https://oauth2.googleapis.com/token";
-const MICROSOFT_TOKEN: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -64,46 +62,42 @@ impl Record {
         })
     }
 
-    fn has(&self, wanted: &str) -> bool {
+    pub(crate) fn has(&self, wanted: &str) -> bool {
         self.scope
             .split_whitespace()
             .any(|granted| granted.eq_ignore_ascii_case(wanted))
     }
 
-    pub(crate) fn can_write_mail(&self, source: Source) -> bool {
-        match source {
-            Source::Google => self.has("https://www.googleapis.com/auth/gmail.compose"),
-            Source::Microsoft => self.has("Mail.ReadWrite") && self.has("Mail.Send"),
-            Source::Apple => false,
-        }
+    fn has_all(&self, wanted: &[&str]) -> bool {
+        !wanted.is_empty() && wanted.iter().all(|scope| self.has(scope))
     }
 
-    pub(crate) fn can_write_calendar(&self, source: Source) -> bool {
-        match source {
-            Source::Google => self.has("https://www.googleapis.com/auth/calendar.events"),
-            Source::Microsoft => self.has("Calendars.ReadWrite"),
-            Source::Apple => false,
-        }
+    pub(crate) fn can_write_mail(&self, provider: Provider) -> bool {
+        provider
+            .oauth()
+            .is_some_and(|oauth| self.has_all(oauth.mail_write))
+    }
+
+    pub(crate) fn can_write_calendar(&self, provider: Provider) -> bool {
+        provider
+            .oauth()
+            .is_some_and(|oauth| self.has_all(oauth.calendar_write))
     }
 }
 
-pub(crate) fn relink(source: Source) -> String {
+pub(crate) fn relink(provider: Provider) -> String {
     format!(
         "Ask the user to run `avery mail link {}` again.",
-        source.as_str()
+        provider.as_str()
     )
 }
 
-fn token_url(source: Source) -> Option<&'static str> {
-    match source {
-        Source::Google => Some(GOOGLE_TOKEN),
-        Source::Microsoft => Some(MICROSOFT_TOKEN),
-        Source::Apple => None,
-    }
-}
-
-pub(crate) fn load_record(vault: &dyn Vault, source: Source, address: &str) -> ToolResult<Record> {
-    let name = account_id(source, address)
+pub(crate) fn load_record(
+    vault: &dyn Vault,
+    provider: Provider,
+    address: &str,
+) -> ToolResult<Record> {
+    let name = account_id(provider, address)
         .ok_or_else(|| ToolError::msg("This account has no valid address."))?;
     let stored = vault.load(&name).map_err(|error| {
         ToolError::msg(format!(
@@ -113,18 +107,18 @@ pub(crate) fn load_record(vault: &dyn Vault, source: Source, address: &str) -> T
     let Some(text) = stored else {
         return Err(ToolError::msg(format!(
             "This account is not linked (no sign-in is stored). {}",
-            relink(source)
+            relink(provider)
         )));
     };
     Record::parse(&text).ok_or_else(|| {
         ToolError::msg(format!(
             "The stored sign-in of this account is unreadable. {}",
-            relink(source)
+            relink(provider)
         ))
     })
 }
 
-fn refresh_form(source: Source, record: &Record) -> String {
+fn refresh_form(oauth: &OAuth, record: &Record) -> String {
     let mut pairs: Vec<(&str, &str)> = vec![
         ("client_id", record.client_id.as_str()),
         ("grant_type", "refresh_token"),
@@ -133,7 +127,7 @@ fn refresh_form(source: Source, record: &Record) -> String {
     if let Some(secret) = &record.client_secret {
         pairs.push(("client_secret", secret.as_str()));
     }
-    if source == Source::Microsoft {
+    if oauth.scope_on_refresh {
         pairs.push(("scope", record.scope.as_str()));
     }
     http::query(&pairs)
@@ -142,14 +136,16 @@ fn refresh_form(source: Source, record: &Record) -> String {
 pub(crate) fn access_token(
     transport: &dyn Transport,
     vault: &dyn Vault,
-    source: Source,
+    provider: Provider,
     address: &str,
 ) -> ToolResult<String> {
-    let record = load_record(vault, source, address)?;
-    let url = token_url(source).ok_or_else(|| ToolError::internal("source"))?;
-    let request = Request::new(Method::Post, url, TOKEN_TIMEOUT)
+    let oauth = provider
+        .oauth()
+        .ok_or_else(|| ToolError::internal("provider"))?;
+    let record = load_record(vault, provider, address)?;
+    let request = Request::new(Method::Post, oauth.token, TOKEN_TIMEOUT)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(&refresh_form(source, &record));
+        .body(&refresh_form(oauth, &record));
     let response = transport.send(&request).map_err(|_| {
         ToolError::msg("The sign-in service could not be reached. Retry in a moment.")
     })?;
@@ -163,7 +159,7 @@ pub(crate) fn access_token(
         if code == "invalid_grant" || response.status == 401 {
             return Err(ToolError::msg(format!(
                 "The sign-in of this account has expired or was revoked. {}",
-                relink(source)
+                relink(provider)
             )));
         }
         if response.status >= 500 || response.status == 429 {
@@ -174,7 +170,7 @@ pub(crate) fn access_token(
         return Err(ToolError::msg(format!(
             "The sign-in could not be renewed (error {}). {}",
             one_line_str(code, 40),
-            relink(source)
+            relink(provider)
         )));
     }
     let Some(object) = object else {
@@ -193,7 +189,7 @@ pub(crate) fn access_token(
                 refresh_token: next,
                 ..record
             };
-            if let Some(name) = account_id(source, address) {
+            if let Some(name) = account_id(provider, address) {
                 vault.store(&name, &updated.to_json()).map_err(|error| {
                     ToolError::msg(format!(
                         "The renewed sign-in could not be stored in the Keychain ({error})."
@@ -213,6 +209,8 @@ mod tests {
     use crate::testutil::TestResult;
     use crate::vault::memory::Memory;
 
+    const GOOGLE_TOKEN: &str = "https://oauth2.googleapis.com/token";
+    const MICROSOFT_TOKEN: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
     const GMAIL: &str = "google:alice@gmail.example";
     const OUTLOOK: &str = "microsoft:bob@outlook.example";
 
@@ -268,25 +266,25 @@ mod tests {
     #[test]
     fn write_scopes_are_recognised_per_area() {
         let mut google = google_record();
-        assert!(!google.can_write_mail(Source::Google));
-        assert!(!google.can_write_calendar(Source::Google));
+        assert!(!google.can_write_mail(Provider::Google));
+        assert!(!google.can_write_calendar(Provider::Google));
         google
             .scope
             .push_str(" https://www.googleapis.com/auth/gmail.compose");
-        assert!(google.can_write_mail(Source::Google));
-        assert!(!google.can_write_calendar(Source::Google));
+        assert!(google.can_write_mail(Provider::Google));
+        assert!(!google.can_write_calendar(Provider::Google));
         google
             .scope
             .push_str(" https://www.googleapis.com/auth/calendar.events");
-        assert!(google.can_write_calendar(Source::Google));
+        assert!(google.can_write_calendar(Provider::Google));
         let mut microsoft = microsoft_record();
-        assert!(!microsoft.can_write_mail(Source::Microsoft));
+        assert!(!microsoft.can_write_mail(Provider::Microsoft));
         microsoft.scope.push_str(" Mail.ReadWrite mail.send");
-        assert!(microsoft.can_write_mail(Source::Microsoft));
-        assert!(!microsoft.can_write_calendar(Source::Microsoft));
+        assert!(microsoft.can_write_mail(Provider::Microsoft));
+        assert!(!microsoft.can_write_calendar(Provider::Microsoft));
         microsoft.scope.push_str(" calendars.readwrite");
-        assert!(microsoft.can_write_calendar(Source::Microsoft));
-        assert!(!microsoft.can_write_mail(Source::Apple));
+        assert!(microsoft.can_write_calendar(Provider::Microsoft));
+        assert!(!microsoft.can_write_mail(Provider::Apple));
     }
 
     #[test]
@@ -295,7 +293,7 @@ mod tests {
         let transport = token_reply(
             r#"{"access_token": "ya29.token", "expires_in": 3599, "token_type": "Bearer"}"#,
         );
-        let token = access_token(&transport, &vault, Source::Google, "alice@gmail.example")?;
+        let token = access_token(&transport, &vault, Provider::Google, "alice@gmail.example")?;
         assert_eq!(token, "ya29.token");
         let seen = transport.seen();
         assert_eq!(seen.len(), 1);
@@ -315,7 +313,12 @@ mod tests {
         let transport = token_reply(
             r#"{"access_token": "EwB.token", "refresh_token": "M.R3_new", "scope": "x", "expires_in": 3600}"#,
         );
-        let token = access_token(&transport, &vault, Source::Microsoft, "bob@outlook.example")?;
+        let token = access_token(
+            &transport,
+            &vault,
+            Provider::Microsoft,
+            "bob@outlook.example",
+        )?;
         assert_eq!(token, "EwB.token");
         let seen = transport.seen();
         assert_eq!(seen[0].url, MICROSOFT_TOKEN);
@@ -380,7 +383,7 @@ mod tests {
         ];
         for (transport, wanted) in cases {
             let Err(error) =
-                access_token(&transport, &vault, Source::Google, "alice@gmail.example")
+                access_token(&transport, &vault, Provider::Google, "alice@gmail.example")
             else {
                 return Err("expected an error".into());
             };
@@ -407,14 +410,15 @@ mod tests {
             (&broken, "Keychain is not available"),
             (&garbled, "unreadable"),
         ] {
-            let Err(error) = access_token(&transport, vault, Source::Google, "alice@gmail.example")
+            let Err(error) =
+                access_token(&transport, vault, Provider::Google, "alice@gmail.example")
             else {
                 return Err("expected an error".into());
             };
             assert!(error.message().contains(wanted), "{error}");
         }
-        assert!(access_token(&transport, &empty, Source::Google, "nonsense").is_err());
-        assert!(access_token(&transport, &empty, Source::Apple, "alice@gmail.example").is_err());
+        assert!(access_token(&transport, &empty, Provider::Google, "nonsense").is_err());
+        assert!(access_token(&transport, &empty, Provider::Apple, "alice@gmail.example").is_err());
         assert!(transport.seen().is_empty());
         Ok(())
     }
@@ -429,13 +433,19 @@ mod tests {
         let Err(error) = access_token(
             &transport,
             &read_only,
-            Source::Microsoft,
+            Provider::Microsoft,
             "bob@outlook.example",
         ) else {
             return Err("expected an error".into());
         };
         assert!(error.message().contains("could not be stored"), "{error}");
-        assert!(access_token(&transport, &vault, Source::Microsoft, "bob@outlook.example").is_ok());
+        assert!(access_token(
+            &transport,
+            &vault,
+            Provider::Microsoft,
+            "bob@outlook.example"
+        )
+        .is_ok());
         Ok(())
     }
 }
