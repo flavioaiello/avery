@@ -1032,7 +1032,7 @@ mod tests {
         for fine in [
             apple_mail_entry("Privat", r#"["me@example.org"]"#),
             apple_mail_entry("Privat", "[]"),
-            apple_mail_entry("alice", r#"["alice@gmail.example.org"]"#),
+            apple_mail_entry("alice", r#"["alice@mail.gmail.example"]"#),
             apple_mail_entry("Privat", r#"["xalice@gmail.example"]"#),
         ] {
             let text = format!(
