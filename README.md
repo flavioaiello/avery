@@ -106,7 +106,7 @@ Registering takes a few minutes and is free:
 avery mail link google          # or: microsoft. Asks for the client ID, the level, opens the browser, stores the token
 avery mail setup calendar       # choose the level per calendar of the linked accounts
 avery mail selftest             # read access; selftest-write tests the dialogs, a draft and a test event
-avery mail unlink alice@gmail.com   # remove the grants and the stored token (then remove the app in your account settings)
+avery mail unlink alice@example.org   # remove the grants and the stored token (then remove the app in your account settings)
 ```
 
 `link` grants the account's mail at the chosen level; calendars are chosen in `setup`. `setup` offers Apple and direct

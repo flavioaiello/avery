@@ -118,10 +118,10 @@ mod reading {
             200,
             r#"{"kind": "calendar#calendarList", "items": [
                 {"id": "alice@gmail.example", "summary": "alice@gmail.example", "accessRole": "owner", "primary": true, "selected": true},
-                {"id": "family@group.calendar.google.com", "summary": "Familie", "summaryOverride": "Wir", "accessRole": "writer"},
-                {"id": "de.ch#holiday@group.v.calendar.google.com", "summary": "Feiertage in der Schweiz", "accessRole": "reader"},
-                {"id": "old@group.calendar.google.com", "summary": "Alt", "accessRole": "reader", "hidden": true},
-                {"id": "gone@group.calendar.google.com", "summary": "Weg", "accessRole": "owner", "deleted": true},
+                {"id": "family@group.calendar.google.example", "summary": "Familie", "summaryOverride": "Wir", "accessRole": "writer"},
+                {"id": "de.ch#holiday@group.v.calendar.google.example", "summary": "Feiertage in der Schweiz", "accessRole": "reader"},
+                {"id": "old@group.calendar.google.example", "summary": "Alt", "accessRole": "reader", "hidden": true},
+                {"id": "gone@group.calendar.google.example", "summary": "Weg", "accessRole": "owner", "deleted": true},
                 {"id": "busy@example.org", "summary": "Nur frei/belegt", "accessRole": "freeBusyReader"}
             ]}"#,
         );
@@ -134,9 +134,9 @@ mod reading {
             shown,
             vec![
                 ("alice@gmail.example", "alice@gmail.example", true),
-                ("family@group.calendar.google.com", "Wir", true),
+                ("family@group.calendar.google.example", "Wir", true),
                 (
-                    "de.ch#holiday@group.v.calendar.google.com",
+                    "de.ch#holiday@group.v.calendar.google.example",
                     "Feiertage in der Schweiz",
                     false
                 ),
@@ -340,13 +340,13 @@ mod reading {
         let span = window("2031-01-01 00:00", "2031-03-02 12:30")?;
         events(
             &api(&transport),
-            "family@group.calendar.google.com",
+            "family@group.calendar.google.example",
             span,
             "America/Argentina/Buenos_Aires",
         )?;
         events(
             &api(&transport),
-            "de.ch#holiday@group.v.calendar.google.com",
+            "de.ch#holiday@group.v.calendar.google.example",
             span,
             "Etc/GMT+1",
         )?;
@@ -354,7 +354,7 @@ mod reading {
         let first = urls.first().ok_or("first")?;
         let second = urls.get(1).ok_or("second")?;
         assert!(
-            first.contains("/calendars/family%40group.calendar.google.com/events?"),
+            first.contains("/calendars/family%40group.calendar.google.example/events?"),
             "{first}"
         );
         assert!(
@@ -366,7 +366,7 @@ mod reading {
             "{first}"
         );
         assert!(
-            second.contains("/calendars/de.ch%23holiday%40group.v.calendar.google.com/events?"),
+            second.contains("/calendars/de.ch%23holiday%40group.v.calendar.google.example/events?"),
             "{second}"
         );
         assert!(second.contains("timeZone=Etc%2FGMT%2B1&"), "{second}");
@@ -1117,7 +1117,7 @@ mod details {
         let transport = Scripted::new().json(Method::Get, "/events/ev1", 200, &body);
         let found = event(
             &api(&transport),
-            "de.ch#holiday@group.v.calendar.google.com",
+            "de.ch#holiday@group.v.calendar.google.example",
             "ev1",
             "Etc/GMT+1",
         )?;
@@ -1125,7 +1125,7 @@ mod details {
         assert_eq!(
             requested(&transport),
             vec![
-                "GET https://www.googleapis.com/calendar/v3/calendars/de.ch%23holiday%40group.v.calendar.google.com/events/ev1?timeZone=Etc%2FGMT%2B1"
+                "GET https://www.googleapis.com/calendar/v3/calendars/de.ch%23holiday%40group.v.calendar.google.example/events/ev1?timeZone=Etc%2FGMT%2B1"
             ]
         );
         Ok(())
@@ -2600,19 +2600,19 @@ mod writing {
         let run = perform_in(
             transport,
             "approved",
-            ("de.ch#holiday@group.v.calendar.google.com", ZONE),
+            ("de.ch#holiday@group.v.calendar.google.example", ZONE),
             &request,
             false,
         );
         assert_eq!(
             run.log,
             vec![
-                "GET /users/me/calendarList/de.ch%23holiday%40group.v.calendar.google.com".to_string(),
-                "GET /calendars/de.ch%23holiday%40group.v.calendar.google.com/events/a%2Fb%3Fc%23d%20e%25f?timeZone=Europe%2FZurich".to_string(),
+                "GET /users/me/calendarList/de.ch%23holiday%40group.v.calendar.google.example".to_string(),
+                "GET /calendars/de.ch%23holiday%40group.v.calendar.google.example/events/a%2Fb%3Fc%23d%20e%25f?timeZone=Europe%2FZurich".to_string(),
                 DIALOG.to_string(),
-                "GET /calendars/de.ch%23holiday%40group.v.calendar.google.com/events/a%2Fb%3Fc%23d%20e%25f?timeZone=Europe%2FZurich".to_string(),
-                "PATCH /calendars/de.ch%23holiday%40group.v.calendar.google.com/events/a%2Fb%3Fc%23d%20e%25f?sendUpdates=none".to_string(),
-                "GET /calendars/de.ch%23holiday%40group.v.calendar.google.com/events/a%2Fb%3Fc%23d%20e%25f?timeZone=Europe%2FZurich".to_string(),
+                "GET /calendars/de.ch%23holiday%40group.v.calendar.google.example/events/a%2Fb%3Fc%23d%20e%25f?timeZone=Europe%2FZurich".to_string(),
+                "PATCH /calendars/de.ch%23holiday%40group.v.calendar.google.example/events/a%2Fb%3Fc%23d%20e%25f?sendUpdates=none".to_string(),
+                "GET /calendars/de.ch%23holiday%40group.v.calendar.google.example/events/a%2Fb%3Fc%23d%20e%25f?timeZone=Europe%2FZurich".to_string(),
             ]
         );
         assert!(run.done().is_ok());

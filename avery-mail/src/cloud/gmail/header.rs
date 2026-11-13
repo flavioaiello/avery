@@ -426,16 +426,16 @@ mod tests {
             ("(=?ISO-8859-1?Q?a_b?=)", "(a b)"),
             ("(=?ISO-8859-1?Q?a?= =?ISO-8859-2?Q?_b?=)", "(a b)"),
             (
-                "=?US-ASCII?Q?Keith_Moore?= <moore@cs.utk.edu>",
-                "Keith Moore <moore@cs.utk.edu>",
+                "=?US-ASCII?Q?Keith_Moore?= <moore@cs.utk.example>",
+                "Keith Moore <moore@cs.utk.example>",
             ),
             (
-                "=?ISO-8859-1?Q?Keld_J=F8rn_Simonsen?= <keld@dkuug.dk>",
-                "Keld Jørn Simonsen <keld@dkuug.dk>",
+                "=?ISO-8859-1?Q?Keld_J=F8rn_Simonsen?= <keld@dkuug.example>",
+                "Keld Jørn Simonsen <keld@dkuug.example>",
             ),
             (
-                "=?ISO-8859-1?Q?Andr=E9?= Pirard <PIRARD@vm1.ulg.ac.be>",
-                "André Pirard <PIRARD@vm1.ulg.ac.be>",
+                "=?ISO-8859-1?Q?Andr=E9?= Pirard <PIRARD@vm1.ulg.example>",
+                "André Pirard <PIRARD@vm1.ulg.example>",
             ),
             (
                 "=?ISO-8859-1?B?SWYgeW91IGNhbiByZWFkIHRoaXMgeW8=?= =?ISO-8859-2?B?dSB1bmRlcnN0YW5kIHRoZSBleGFtcGxlLg==?=",

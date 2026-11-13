@@ -671,11 +671,11 @@ mod tests {
         );
         assert_eq!(
             info(
-                r#"{"id": "h#holiday@group.v.calendar.google.com", "accessRole": "writerWithoutPrivateAccess"}"#
+                r#"{"id": "h#holiday@group.v.calendar.google.example", "accessRole": "writerWithoutPrivateAccess"}"#
             )?,
             Some(CalendarInfo {
-                id: "h#holiday@group.v.calendar.google.com".into(),
-                name: "h#holiday@group.v.calendar.google.com".into(),
+                id: "h#holiday@group.v.calendar.google.example".into(),
+                name: "h#holiday@group.v.calendar.google.example".into(),
                 writable: false,
             })
         );
