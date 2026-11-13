@@ -35,10 +35,11 @@ impl Level {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Changed,
     Full,
+    Taken { address: String, provider: Provider },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,8 +263,15 @@ fn parse_accounts(config: &Object) -> Result<Vec<RemoteAccount>, String> {
             .ok_or_else(|| format!("{place}.address must be a plain lower-case mail address"))?;
         let mut account = RemoteAccount::new(provider, address)
             .ok_or_else(|| format!("{place}.address must be a plain lower-case mail address"))?;
-        if found.iter().any(|known| known.id == account.id) {
-            return Err(format!("{place} appears twice"));
+        if let Some(known) = found.iter().find(|known| known.address == account.address) {
+            return Err(if known.provider == account.provider {
+                format!("{place} appears twice")
+            } else {
+                format!(
+                    "{place}.address is already linked under {}: an address can be linked only once",
+                    known.provider.as_str()
+                )
+            });
         }
         if let Some(level) = entry.get("mail") {
             account.mail = Some(Level::parse(Some(level), &format!("{place}.mail"))?);
@@ -481,6 +489,16 @@ impl Rights {
     }
 
     pub(crate) fn add_account(&mut self, account: RemoteAccount) -> Result<(), Refusal> {
+        if let Some(known) = self
+            .accounts
+            .iter()
+            .find(|known| known.address == account.address)
+        {
+            return Err(Refusal::Taken {
+                address: account.address,
+                provider: known.provider,
+            });
+        }
         if self.accounts.len() >= MAX_ACCOUNTS {
             return Err(Refusal::Full);
         }
@@ -853,13 +871,69 @@ mod tests {
             rejected(&text, place);
         }
         assert!(parsed(
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@example.org"}, {"provider": "microsoft", "address": "a@example.org"}]}"#
-        )
-        .is_ok());
-        assert!(parsed(
             r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "read"}]}, {"provider": "microsoft", "address": "b@outlook.example", "calendars": [{"id": "c", "level": "read"}]}]}"#
         )
         .is_ok());
+    }
+
+    #[test]
+    fn an_address_can_be_linked_only_once_whatever_the_provider() -> TestResult {
+        let twice = |first: &str, second: &str| {
+            format!(
+                r#"{{"version": 3, "accounts": [{{"provider": "{first}", "address": "a@example.org"}}, {{"provider": "{second}", "address": "a@example.org"}}]}}"#
+            )
+        };
+        rejected(
+            &twice("google", "microsoft"),
+            "accounts[1].address is already linked under google: an address can be linked only once",
+        );
+        rejected(
+            &twice("microsoft", "google"),
+            "accounts[1].address is already linked under microsoft: an address can be linked only once",
+        );
+        rejected(&twice("google", "google"), "accounts[1] appears twice");
+        let spaced = r#"{"version": 3, "accounts": [
+            {"provider": "google", "address": "a@example.org"},
+            {"provider": "google", "address": "b@example.org"},
+            {"provider": "microsoft", "address": "a@example.org"}]}"#;
+        rejected(spaced, "accounts[2].address is already linked under google");
+        assert!(parsed(
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@example.org"}, {"provider": "microsoft", "address": "b@example.org"}]}"#
+        )
+        .is_ok());
+        let mut rights = Rights::empty();
+        let first = RemoteAccount::new(Provider::Microsoft, "a@example.org").ok_or("account")?;
+        assert_eq!(rights.add_account(first), Ok(()));
+        let taken = RemoteAccount::new(Provider::Google, "a@example.org").ok_or("account")?;
+        assert_eq!(
+            rights.add_account(taken),
+            Err(Refusal::Taken {
+                address: "a@example.org".to_string(),
+                provider: Provider::Microsoft
+            })
+        );
+        let same = RemoteAccount::new(Provider::Microsoft, "a@example.org").ok_or("account")?;
+        assert_eq!(
+            rights.add_account(same),
+            Err(Refusal::Taken {
+                address: "a@example.org".to_string(),
+                provider: Provider::Microsoft
+            })
+        );
+        assert_eq!(rights.accounts.len(), 1);
+        for n in 1..MAX_ACCOUNTS {
+            let more = RemoteAccount::new(Provider::Google, &format!("u{n}@example.org"))
+                .ok_or("account")?;
+            assert_eq!(rights.add_account(more), Ok(()));
+        }
+        let late = RemoteAccount::new(Provider::Google, "late@example.org").ok_or("account")?;
+        assert_eq!(rights.add_account(late), Err(Refusal::Full));
+        let both = RemoteAccount::new(Provider::Google, "a@example.org").ok_or("account")?;
+        assert!(matches!(
+            rights.add_account(both),
+            Err(Refusal::Taken { .. })
+        ));
+        Ok(())
     }
 
     #[test]

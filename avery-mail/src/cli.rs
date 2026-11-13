@@ -128,6 +128,11 @@ fn update_failed(ctx: &Context, console: &mut Console, error: &UpdateError) -> u
         UpdateError::Refused(Refusal::Full) => console.say(&format!(
             "Es sind schon {MAX_ACCOUNTS} Konten verbunden. Zuerst eines trennen: avery mail unlink <adresse>"
         )),
+        UpdateError::Refused(Refusal::Taken { address, provider }) => console.say(&format!(
+            "Die Adresse {address} ist schon bei {} verbunden. Eine Adresse kann nur einmal verbunden werden. Zuerst trennen: avery mail unlink {}:{address}",
+            provider.display(),
+            provider.as_str()
+        )),
     }
     1
 }
@@ -782,9 +787,8 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     };
     if rights.accounts.len() >= MAX_ACCOUNTS {
         console.say(&format!(
-            "Es sind schon {MAX_ACCOUNTS} Konten verbunden. Zuerst eines trennen: avery mail unlink <adresse>"
+            "Hinweis: Es sind schon {MAX_ACCOUNTS} Konten verbunden. Erneut verbinden geht nur fuer ein schon verbundenes Konto, ein neues wird abgelehnt."
         ));
-        return 1;
     }
     for line in oauth.registration {
         console.say(line);
@@ -881,41 +885,30 @@ fn single_account(
     rights: &Rights,
     wanted: &str,
 ) -> Result<(Provider, String), u8> {
-    let hits: Vec<(Provider, String)> = rights
+    let hit = rights
         .accounts
         .iter()
-        .filter(|account| !wanted.is_empty() && account.address() == wanted)
-        .map(|account| (account.provider(), account.address().to_string()))
-        .collect();
-    match hits.as_slice() {
-        [only] => Ok(only.clone()),
-        [] => {
-            if rights.accounts.is_empty() {
-                console.say("Es ist kein Konto direkt verbunden.");
-            } else {
-                console.say("Benutzung: avery mail unlink <adresse>. Verbunden:");
-                for account in &rights.accounts {
-                    console.say(&format!(
-                        "  {} ({})",
-                        account.address(),
-                        account.provider().kind()
-                    ));
-                }
-            }
+        .find(|account| !wanted.is_empty() && account.address() == wanted);
+    if let Some(account) = hit {
+        return Ok((account.provider(), account.address().to_string()));
+    }
+    if rights.accounts.is_empty() {
+        console.say("Es ist kein Konto direkt verbunden.");
+    } else {
+        console.say("Benutzung: avery mail unlink <adresse>. Verbunden:");
+        for account in &rights.accounts {
             console.say(&format!(
-                "Eine Anmeldung ohne Eintrag in der Konfiguration (etwa nach einem abgebrochenen Verbinden) entfernt: avery mail unlink {}",
-                unlink_forms()
+                "  {} ({})",
+                account.address(),
+                account.provider().kind()
             ));
-            Err(1)
-        }
-        _ => {
-            console.say(&format!(
-                "Die Adresse ist mehrfach verbunden. Benutzung: avery mail unlink {}",
-                unlink_forms()
-            ));
-            Err(1)
         }
     }
+    console.say(&format!(
+        "Eine Anmeldung ohne Eintrag in der Konfiguration (etwa nach einem abgebrochenen Verbinden) entfernt: avery mail unlink {}",
+        unlink_forms()
+    ));
+    Err(1)
 }
 
 fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
@@ -3615,10 +3608,7 @@ mod tests {
         let (code, out) = run(&demo.ctx, &["link", "google"], "");
         assert_eq!(code, 1);
         assert!(out.contains("Demo-Modus"), "{out}");
-        let accounts: Vec<String> = (0..16)
-            .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
-            .collect();
-        let full = format!(r#"{{"version": 3, "accounts": [{}]}}"#, accounts.join(","));
+        let full = sixteen(None);
         let crowded_dir = TempDir::new()?;
         let crowded = cloudy(
             &crowded_dir,
@@ -3630,8 +3620,13 @@ mod tests {
         )?;
         let (code, out) = run(&crowded.ctx, &["link", "google"], "id\nsecret\n1\n");
         assert_eq!(code, 1);
-        assert!(out.contains("Es sind schon 16 Konten verbunden"), "{out}");
-        assert!(!out.contains("Client-ID"), "{out}");
+        assert!(
+            out.contains("Hinweis: Es sind schon 16 Konten verbunden."),
+            "{out}"
+        );
+        assert!(out.contains("Client-ID"), "{out}");
+        assert!(out.contains("No sign-in arrived in time"), "{out}");
+        assert_eq!(fs::read_to_string(&crowded.ctx.settings.config_path)?, full);
         Ok(())
     }
 
@@ -3770,7 +3765,8 @@ mod tests {
     }
 
     #[test]
-    fn an_address_that_is_linked_twice_is_unlinked_with_its_provider() -> TestResult {
+    fn a_config_with_one_address_under_two_providers_is_refused_and_never_rewritten() -> TestResult
+    {
         let dir = TempDir::new()?;
         let twice = r#"{"version": 3, "accounts": [{"provider": "google", "address": "x@example.org"}, {"provider": "microsoft", "address": "x@example.org"}]}"#;
         let cloud = cloudy(
@@ -3784,17 +3780,135 @@ mod tests {
             crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
-        let (code, out) = run(&cloud.ctx, &["unlink", "x@example.org"], "j\n");
-        assert_eq!(code, 1, "{out}");
-        assert!(out.contains("mehrfach verbunden"), "{out}");
-        assert_eq!(stored(&cloud)?.accounts.len(), 2);
+        for args in [
+            vec!["accounts"],
+            vec!["status"],
+            vec!["revoke"],
+            vec!["setup"],
+            vec!["unlink", "x@example.org"],
+        ] {
+            let (code, out) = run(&cloud.ctx, &args, "j\n");
+            assert_eq!(code, 1, "{args:?}: {out}");
+            assert!(
+                out.contains("accounts[1].address is already linked under google: an address can be linked only once"),
+                "{args:?}: {out}"
+            );
+            assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, twice);
+        }
         let (code, out) = run(&cloud.ctx, &["unlink", "Microsoft:x@example.org"], "j\n");
-        assert_eq!(code, 0, "{out}");
-        let rights = stored(&cloud)?;
-        assert_eq!(rights.accounts.len(), 1);
-        assert_eq!(rights.accounts[0].provider(), Provider::Google);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("die Anmeldung im Schluesselbund ist geloescht, die Konfiguration aber nicht geaendert"),
+            "{out}"
+        );
         assert!(cloud.vault.get("microsoft:x@example.org").is_none());
         assert!(cloud.vault.get("google:x@example.org").is_some());
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, twice);
+        Ok(())
+    }
+
+    #[test]
+    fn an_address_that_is_linked_at_another_provider_is_refused_and_the_new_sign_in_removed(
+    ) -> TestResult {
+        let dir = TempDir::new()?;
+        let config = r#"{"version": 3, "accounts": [{"provider": "microsoft", "address": "alice@gmail.com", "mail": "read"}]}"#;
+        let cloud = cloudy(
+            &dir,
+            config,
+            &[("microsoft:alice@gmail.com", "Mail.Read")],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("Die Adresse alice@gmail.com ist schon bei Outlook.com verbunden. Eine Adresse kann nur einmal verbunden werden. Zuerst trennen: avery mail unlink microsoft:alice@gmail.com"),
+            "{out}"
+        );
+        assert!(out.contains("wieder entfernt"), "{out}");
+        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+        assert!(cloud.vault.get("microsoft:alice@gmail.com").is_some());
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, config);
+        Ok(())
+    }
+
+    fn sixteen(including: Option<&str>) -> String {
+        let mut accounts: Vec<String> = (0..15)
+            .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
+            .collect();
+        accounts.push(match including {
+            Some(address) => format!(
+                r#"{{"provider": "google", "address": "{address}", "mail": "write", "calendars": [{{"id": "primary", "level": "write"}}]}}"#
+            ),
+            None => r#"{"provider": "google", "address": "a15@gmail.example"}"#.to_string(),
+        });
+        format!(r#"{{"version": 3, "accounts": [{}]}}"#, accounts.join(","))
+    }
+
+    #[test]
+    fn linking_again_works_at_the_account_limit_and_still_only_lowers_the_rights() -> TestResult {
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            &sixteen(Some("alice@gmail.com")),
+            &[("google:alice@gmail.com", WRITE_SCOPE)],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("Hinweis: Es sind schon 16 Konten verbunden."),
+            "{out}"
+        );
+        assert!(out.contains("Client-ID:"), "{out}");
+        assert!(
+            out.contains("Erneut verbunden: alice@gmail.com (gmail). Mail: lesen."),
+            "{out}"
+        );
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 16);
+        assert_eq!(
+            rights.mail_level("google:alice@gmail.com"),
+            Some(Level::Read)
+        );
+        assert_eq!(
+            rights.calendar_level("google:alice@gmail.com:primary"),
+            Some(Level::Read)
+        );
+        assert!(cloud.vault.get("google:alice@gmail.com").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_account_at_the_limit_is_refused_after_the_sign_in_and_its_sign_in_removed(
+    ) -> TestResult {
+        let dir = TempDir::new()?;
+        let full = sixteen(None);
+        let cloud = cloudy(
+            &dir,
+            &full,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("Hinweis: Es sind schon 16 Konten verbunden."),
+            "{out}"
+        );
+        assert!(
+            out.contains("Es sind schon 16 Konten verbunden. Zuerst eines trennen: avery mail unlink <adresse>"),
+            "{out}"
+        );
+        assert!(out.contains("wieder entfernt"), "{out}");
+        assert!(!out.contains("Verbunden:"), "{out}");
+        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, full);
         Ok(())
     }
 

@@ -119,7 +119,8 @@ avery mail unlink alice@gmail.example   # remove the account, its grants and the
 `link` adds the account to `config.json` with the mail level you chose; calendars are chosen in `setup`. Linking an
 account again (for example to renew the sign-in) never raises the rights you set: it only lowers them where the new
 sign-in grants less. In `setup` level 0 only takes a grant away, the account stays linked (`unlink` ends it). `revoke`
-removes all grants and keeps the accounts.
+removes all grants and keeps the accounts. An address can be linked only once, under one provider, and at most 16 accounts
+can be linked; linking one of them again still works at that limit.
 
 Differences you will notice: the provider expands recurring events itself and Avery times are read and written in this
 Mac's time zone; message ids are longer texts (copy them exactly); replies take their recipients and subject from the
@@ -273,8 +274,9 @@ Set `AVERY_HOME` to use another base folder.
 }
 ```
 
-An account entry is the link: `mail` and `calendars` are optional (no `mail` means no mail access). The `apple`
-section is optional and only present while Apple Mail and Calendar are switched on. Unknown keys are rejected.
+An account entry is the link: `mail` and `calendars` are optional (no `mail` means no mail access). Each address
+appears once (the same address under Google and under Microsoft is rejected) and there are at most 16 accounts. The
+`apple` section is optional and only present while Apple Mail and Calendar are switched on. Unknown keys are rejected.
 
 ## Known limitations
 
