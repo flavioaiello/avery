@@ -6,6 +6,7 @@ use crate::osascript::{run_fed, Finished};
 pub(crate) const SECURITY: &str = "/usr/bin/security";
 const SERVICE: &str = "avery-mail";
 const TIMEOUT: Duration = Duration::from_secs(30);
+const OUTPUT_LIMIT: usize = 16 * 1024;
 const NAME_LIMIT: usize = 300;
 const SECURITY_LINE: usize = 4095;
 const LINE_MARGIN: usize = 95;
@@ -30,8 +31,8 @@ impl std::fmt::Display for VaultError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VaultError::Refused => f.write_str("entry refused"),
-            VaultError::TooLarge => f.write_str("entry too large for the Keychain"),
-            VaultError::Unreadable => f.write_str("stored entry unreadable"),
+            VaultError::TooLarge => f.write_str("entry too large"),
+            VaultError::Unreadable => f.write_str("entry unreadable"),
             VaultError::Unavailable(text) => f.write_str(text),
         }
     }
@@ -94,8 +95,8 @@ impl Keychain {
             args,
             input.as_bytes(),
             TIMEOUT,
-            MAX_STORED + 1,
-            MAX_STORED + 1,
+            OUTPUT_LIMIT,
+            OUTPUT_LIMIT,
         );
         match finished {
             Finished::Done {
@@ -501,6 +502,8 @@ esac"#;
             );
         }
         fs::write(&out, format!("{}\n", "A".repeat(MAX_STORED + 4)))?;
+        assert_eq!(keychain.load(NAME), Err(VaultError::Unreadable));
+        fs::write(&out, format!("{}\n", "A".repeat(OUTPUT_LIMIT + 4)))?;
         assert!(matches!(
             keychain.load(NAME),
             Err(VaultError::Unavailable(_))
