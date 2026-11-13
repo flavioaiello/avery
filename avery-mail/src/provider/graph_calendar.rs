@@ -14,7 +14,7 @@ use crate::calendar::{
 };
 use crate::civil::{Date, DateTime};
 use crate::error::{ToolError, ToolResult};
-use crate::http::{encode_component, query, Method};
+use crate::http::{encode_component, query, url_allowed, Method};
 use crate::json::{Json, Object};
 use crate::osascript::Host;
 use crate::text::{char_len, one_line_str, take_chars};
@@ -291,7 +291,9 @@ fn walk(
         match object.get("@odata.nextLink") {
             None | Some(Json::Null) => return Ok(()),
             Some(Json::Str(_)) if page == MAX_PAGES => return Err(too_many()),
-            Some(Json::Str(next)) if next.starts_with(ORIGIN) && next.len() <= MAX_LINK => {
+            Some(Json::Str(next))
+                if next.starts_with(ORIGIN) && next.len() <= MAX_LINK && url_allowed(next) =>
+            {
                 url = next.clone();
             }
             Some(_) => return Err(unexpected()),

@@ -74,18 +74,26 @@ pub(crate) trait Transport: Sync {
     fn send(&self, request: &Request) -> Result<Response, HttpError>;
 }
 
-fn url_allowed(url: &str) -> bool {
+fn dot_segment(segment: &str) -> bool {
+    let plain = segment.to_ascii_lowercase().replace("%2e", ".");
+    plain == "." || plain == ".."
+}
+
+pub(crate) fn url_allowed(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };
-    let host = rest.split(['/', '?']).next().unwrap_or_default();
+    let target = rest.split_once('?').map_or(rest, |(path, _)| path);
+    let mut segments = target.split('/');
+    let host = segments.next().unwrap_or_default();
     url.len() <= MAX_URL
         && Provider::ALL
             .iter()
             .any(|provider| provider.hosts().contains(&host))
+        && !segments.any(dot_segment)
         && rest
             .chars()
-            .all(|c| c.is_ascii_graphic() && !"\"\\<>#{}|^`".contains(c))
+            .all(|c| c.is_ascii_graphic() && !"\"\\<>#{}[]|^`".contains(c))
 }
 
 fn header_ok(text: &str) -> bool {
@@ -174,6 +182,7 @@ fn config_for(request: &Request) -> Option<String> {
     let mut lines = vec![
         "silent".to_string(),
         "show-error".to_string(),
+        "globoff".to_string(),
         "tlsv1.2".to_string(),
         "proto = \"=https\"".to_string(),
         "proto-redir = \"=https\"".to_string(),
@@ -434,6 +443,77 @@ mod tests {
     }
 
     #[test]
+    fn brackets_and_braces_cannot_make_curl_expand_one_url_into_many() {
+        for url in [
+            "https://graph.microsoft.com/v1.0/me/messages?$skip=[1-9999]",
+            "https://graph.microsoft.com/v1.0/me/messages?$skip=[a-z]&$top=[1-3]",
+            "https://graph.microsoft.com/v1.0/[1-3]/messages",
+            "https://graph.microsoft.com/v1.0/me/messages?x=a[b",
+            "https://graph.microsoft.com/v1.0/me/messages?x=a]b",
+            "https://graph.microsoft.com/v1.0/me/messages?x=%5B1-3%5D&y=[",
+            "https://graph.microsoft.com/v1.0/me/messages?$skip={1,2}",
+            "https://graph.microsoft.com/v1.0/{a,b}/messages",
+            "https://graph.microsoft.com/v1.0/me/messages?x=}",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=[1-5]",
+            "https://www.googleapis.com/calendar/v3/calendars/[a-b]/events",
+        ] {
+            assert!(get(url).refused(), "{url}");
+            assert!(!url_allowed(url), "{url}");
+            assert!(config_for(&get(url)).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn dot_segments_cannot_retarget_a_request_even_when_percent_encoded() {
+        for url in [
+            "https://graph.microsoft.com/v1.0/me/../users",
+            "https://graph.microsoft.com/v1.0/me/messages/../../users/other",
+            "https://graph.microsoft.com/v1.0/./me/messages",
+            "https://graph.microsoft.com/v1.0/me/messages/.",
+            "https://graph.microsoft.com/v1.0/me/messages/..",
+            "https://graph.microsoft.com/v1.0/me/messages/..?$top=1",
+            "https://graph.microsoft.com/v1.0/me/messages/.?$top=1",
+            "https://graph.microsoft.com/../x",
+            "https://graph.microsoft.com/./x",
+            "https://graph.microsoft.com/..",
+            "https://graph.microsoft.com/v1.0/me/%2e%2e/users",
+            "https://graph.microsoft.com/v1.0/me/%2E%2E/users",
+            "https://graph.microsoft.com/v1.0/me/%2e%2E/users",
+            "https://graph.microsoft.com/v1.0/me/.%2e/users",
+            "https://graph.microsoft.com/v1.0/me/%2E./users",
+            "https://graph.microsoft.com/v1.0/me/%2e/users",
+            "https://graph.microsoft.com/v1.0/me/%2E",
+            "https://www.googleapis.com/calendar/v3/calendars/../events",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/%2e%2e",
+        ] {
+            assert!(get(url).refused(), "{url}");
+            assert!(config_for(&get(url)).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn ordinary_urls_and_percent_encoded_ids_still_pass() {
+        for url in [
+            "https://graph.microsoft.com/v1.0/me/messages/AAMkAD%3D%3D?$select=id%2Csubject",
+            "https://graph.microsoft.com/v1.0/me/messages?$top=50&$skip=50&$skiptoken=abc%2Fdef%2B%3D",
+            "https://graph.microsoft.com/v1.0/users('0000')/calendars('AQMk')/calendarView?startDateTime=2026-11-19T00%3A00%3A00.0000000Z&%24top=100",
+            "https://graph.microsoft.com/v1.0/me/mailFolders('AAMk')/messages?$filter=isRead%20eq%20false",
+            "https://www.googleapis.com/calendar/v3/calendars/en.usa%23holiday%40group.v.calendar.google.com/events?timeMin=2026-01-01T00%3A00%3A00Z",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2f%2Fabc%2E",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/a.b/..c/c../...",
+            "https://graph.microsoft.com/v1.0/me/%2e%2e%2e/%252e%252e",
+            "https://graph.microsoft.com/v1.0/me/messages?next=../..&dot=.",
+            "https://graph.microsoft.com/v1.0/me/messages/",
+            "https://graph.microsoft.com?x=1",
+            "https://graph.microsoft.com",
+        ] {
+            assert!(!get(url).refused(), "{url}");
+            assert!(url_allowed(url), "{url}");
+            assert!(config_for(&get(url)).is_some(), "{url}");
+        }
+    }
+
+    #[test]
     fn headers_and_bodies_are_checked() {
         let url = "https://graph.microsoft.com/v1.0/me";
         assert!(!get(url).header("Authorization", "Bearer abc").refused());
@@ -486,9 +566,21 @@ mod tests {
         assert!(config.contains("proto = \"=https\"\n"));
         assert!(config.contains("max-redirs = 0\n"));
         assert!(config.contains("tlsv1.2\n"));
+        assert!(config.lines().any(|line| line == "globoff"));
         assert!(config.ends_with('\n'));
         assert_eq!(config.matches('\n').count(), config.lines().count());
         assert!(config_for(&get("https://evil.example/")).is_none());
+        for request in [
+            get("https://graph.microsoft.com/v1.0/me/messages?$skip=50"),
+            Request::new(
+                Method::Delete,
+                "https://graph.microsoft.com/v1.0/me/messages/AAMk%3D",
+                SECONDS,
+            ),
+        ] {
+            let config = config_for(&request).ok_or("config")?;
+            assert_eq!(config.lines().filter(|line| *line == "globoff").count(), 1);
+        }
         Ok(())
     }
 
@@ -518,7 +610,9 @@ mod tests {
         let seen_args = fs::read_to_string(&args)?;
         assert_eq!(seen_args.trim(), "-q --config -");
         assert!(!seen_args.contains("SECRET"));
-        assert!(fs::read_to_string(&record)?.contains("Bearer SECRET"));
+        let config = fs::read_to_string(&record)?;
+        assert!(config.contains("Bearer SECRET"));
+        assert!(config.lines().any(|line| line == "globoff"));
         Ok(())
     }
 

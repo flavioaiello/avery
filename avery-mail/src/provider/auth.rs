@@ -5,10 +5,10 @@ use crate::http::{self, Method, Request, Transport};
 use crate::json::{self, Json, Object};
 use crate::provider::{account_id, OAuth, Provider};
 use crate::text::one_line_str;
-use crate::vault::Vault;
+use crate::vault::{Vault, VaultError, MAX_RECORD};
 
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_TOKEN: usize = 8192;
+pub(crate) const MAX_TOKEN: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
@@ -18,9 +18,9 @@ pub(crate) struct Record {
     pub(crate) scope: String,
 }
 
-fn text_field(object: &Object, key: &str) -> Option<String> {
+fn text_field(object: &Object, key: &str, limit: usize) -> Option<String> {
     match object.get(key) {
-        Some(Json::Str(text)) if !text.is_empty() && text.len() <= MAX_TOKEN => Some(text.clone()),
+        Some(Json::Str(text)) if !text.is_empty() && text.len() <= limit => Some(text.clone()),
         _ => None,
     }
 }
@@ -49,14 +49,14 @@ impl Record {
         }
         let client_secret = match object.get("client_secret") {
             None => None,
-            Some(_) => Some(text_field(&object, "client_secret")?),
+            Some(_) => Some(text_field(&object, "client_secret", MAX_RECORD)?),
         };
         Some(Record {
-            client_id: text_field(&object, "client_id")?,
+            client_id: text_field(&object, "client_id", MAX_RECORD)?,
             client_secret,
-            refresh_token: text_field(&object, "refresh_token")?,
+            refresh_token: text_field(&object, "refresh_token", MAX_RECORD)?,
             scope: match object.get("scope") {
-                Some(Json::Str(scope)) if scope.len() <= MAX_TOKEN => scope.clone(),
+                Some(Json::Str(scope)) if scope.len() <= MAX_RECORD => scope.clone(),
                 _ => return None,
             },
         })
@@ -92,6 +92,13 @@ pub(crate) fn relink(provider: Provider) -> String {
     )
 }
 
+fn unreadable(provider: Provider) -> ToolError {
+    ToolError::msg(format!(
+        "The stored sign-in of this account is unreadable. {}",
+        relink(provider)
+    ))
+}
+
 pub(crate) fn load_record(
     vault: &dyn Vault,
     provider: Provider,
@@ -99,10 +106,11 @@ pub(crate) fn load_record(
 ) -> ToolResult<Record> {
     let name = account_id(provider, address)
         .ok_or_else(|| ToolError::msg("This account has no valid address."))?;
-    let stored = vault.load(&name).map_err(|error| {
-        ToolError::msg(format!(
-            "The Keychain is not available ({error}). Ask the user to unlock the Mac and retry."
-        ))
+    let stored = vault.load(&name).map_err(|error| match error {
+        VaultError::Unreadable => unreadable(provider),
+        other => ToolError::msg(format!(
+            "The Keychain is not available ({other}). Ask the user to unlock the Mac and retry."
+        )),
     })?;
     let Some(text) = stored else {
         return Err(ToolError::msg(format!(
@@ -110,12 +118,7 @@ pub(crate) fn load_record(
             relink(provider)
         )));
     };
-    Record::parse(&text).ok_or_else(|| {
-        ToolError::msg(format!(
-            "The stored sign-in of this account is unreadable. {}",
-            relink(provider)
-        ))
-    })
+    Record::parse(&text).ok_or_else(|| unreadable(provider))
 }
 
 fn refresh_form(oauth: &OAuth, record: &Record) -> String {
@@ -178,12 +181,12 @@ pub(crate) fn access_token(
             "The sign-in service gave an unexpected answer.",
         ));
     };
-    let Some(token) = text_field(object, "access_token") else {
+    let Some(token) = text_field(object, "access_token", MAX_TOKEN) else {
         return Err(ToolError::msg(
             "The sign-in service gave an unexpected answer.",
         ));
     };
-    if let Some(next) = text_field(object, "refresh_token") {
+    if let Some(next) = text_field(object, "refresh_token", MAX_TOKEN) {
         if next != record.refresh_token {
             let updated = Record {
                 refresh_token: next,
@@ -257,7 +260,7 @@ mod tests {
         }
         let huge = format!(
             r#"{{"client_id": "a", "refresh_token": "{}", "scope": ""}}"#,
-            "x".repeat(MAX_TOKEN + 1)
+            "x".repeat(MAX_RECORD + 1)
         );
         assert_eq!(Record::parse(&huge), None);
         Ok(())
@@ -419,6 +422,105 @@ mod tests {
         }
         assert!(access_token(&transport, &empty, Provider::Google, "nonsense").is_err());
         assert!(access_token(&transport, &empty, Provider::Apple, "alice@gmail.example").is_err());
+        assert!(transport.seen().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_rotated_record_is_stored_up_to_the_keychain_limit_and_refused_beyond_it() -> TestResult {
+        let old = microsoft_record();
+        let base = Record {
+            refresh_token: String::new(),
+            ..old.clone()
+        }
+        .to_json()
+        .len();
+        let fit = MAX_RECORD - base;
+        for (length, stored) in [(fit, true), (fit + 1, false), (MAX_RECORD + 1, false)] {
+            let vault = Memory::new().with(OUTLOOK, &old.to_json());
+            let next = "r".repeat(length);
+            let transport = token_reply(&format!(
+                r#"{{"access_token": "t", "refresh_token": "{next}"}}"#
+            ));
+            let result = access_token(
+                &transport,
+                &vault,
+                Provider::Microsoft,
+                "bob@outlook.example",
+            );
+            if stored {
+                assert_eq!(result?, "t");
+                let record = Record::parse(&vault.get(OUTLOOK).ok_or("stored")?).ok_or("record")?;
+                assert_eq!(record.refresh_token, next);
+            } else {
+                let Err(error) = result else {
+                    return Err(format!("{length}: expected an error").into());
+                };
+                assert!(error.message().contains("could not be stored"), "{error}");
+                assert!(error.message().contains("too large"), "{error}");
+                assert_eq!(vault.get(OUTLOOK), Some(old.to_json()));
+            }
+            assert_eq!(transport.seen().len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_access_token_is_never_stored_so_the_keychain_limit_does_not_apply_to_it() -> TestResult {
+        let vault = Memory::new().with(GMAIL, &google_record().to_json());
+        let long = "t".repeat(MAX_RECORD + 1500);
+        assert!(long.len() <= MAX_TOKEN);
+        let transport = token_reply(&format!(r#"{{"access_token": "{long}"}}"#));
+        assert_eq!(
+            access_token(&transport, &vault, Provider::Google, "alice@gmail.example")?,
+            long
+        );
+        let transport = token_reply(&format!(
+            r#"{{"access_token": "{}"}}"#,
+            "t".repeat(MAX_TOKEN + 1)
+        ));
+        let Err(error) = access_token(&transport, &vault, Provider::Google, "alice@gmail.example")
+        else {
+            return Err("expected an error".into());
+        };
+        assert!(error.message().contains("unexpected answer"), "{error}");
+        assert_eq!(vault.get(GMAIL), Some(google_record().to_json()));
+        Ok(())
+    }
+
+    struct Corrupt;
+
+    impl Vault for Corrupt {
+        fn load(&self, _name: &str) -> Result<Option<String>, VaultError> {
+            Err(VaultError::Unreadable)
+        }
+
+        fn store(&self, _name: &str, _secret: &str) -> Result<(), VaultError> {
+            Err(VaultError::Refused)
+        }
+
+        fn delete(&self, _name: &str) -> Result<(), VaultError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_entry_the_keychain_cannot_decode_asks_for_a_new_link() -> TestResult {
+        let transport = Scripted::new();
+        let Err(error) = access_token(
+            &transport,
+            &Corrupt,
+            Provider::Google,
+            "alice@gmail.example",
+        ) else {
+            return Err("expected an error".into());
+        };
+        assert!(error.message().contains("unreadable"), "{error}");
+        assert!(
+            error.message().contains("avery mail link google"),
+            "{error}"
+        );
+        assert!(!error.message().contains("not available"), "{error}");
         assert!(transport.seen().is_empty());
         Ok(())
     }

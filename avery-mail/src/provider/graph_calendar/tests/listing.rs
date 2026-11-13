@@ -547,6 +547,11 @@ fn next_links_that_leave_graph_are_refused() -> TestResult {
         "https://graph.microsoft.com/v1.0",
         "https://login.microsoftonline.com/v1.0/x",
         "/v1.0/me/x",
+        "https://graph.microsoft.com/v1.0/me/calendars/x/calendarView?$skip=[1-9999]",
+        "https://graph.microsoft.com/v1.0/me/calendars/x/calendarView?$skip={1,2}",
+        "https://graph.microsoft.com/v1.0/me/calendars/../users",
+        "https://graph.microsoft.com/v1.0/./me/calendars",
+        "https://graph.microsoft.com/v1.0/me/calendars/%2E%2e/users",
         "",
         long.as_str(),
     ];

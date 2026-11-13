@@ -14,7 +14,7 @@ use crate::backend::{
     MessageQuery, Person, Preview, MAX_MESSAGE_ID,
 };
 use crate::error::{ToolError, ToolResult};
-use crate::http::{encode_component, query};
+use crate::http::{encode_component, query, url_allowed};
 use crate::journal;
 use crate::json::{Json, Object};
 use crate::localtime;
@@ -88,9 +88,7 @@ fn next_link(json: &Json) -> ToolResult<Option<String>> {
     match link {
         None | Some(Json::Null) => Ok(None),
         Some(Json::Str(text))
-            if text.starts_with(LINK_PREFIX)
-                && text.len() <= MAX_LINK
-                && text.chars().all(|c| c.is_ascii_graphic()) =>
+            if text.starts_with(LINK_PREFIX) && text.len() <= MAX_LINK && url_allowed(text) =>
         {
             Ok(Some(text.clone()))
         }
@@ -1020,6 +1018,11 @@ mod tests {
             "https://graph.microsoft.com/v1.0/me/messages?a b",
             "https://graph.microsoft.com/v1.0/me/messages?\u{e4}",
             "https://graph.microsoft.com/v1.0/me/messages?\n",
+            "https://graph.microsoft.com/v1.0/me/messages?$skip=[1-9999]",
+            "https://graph.microsoft.com/v1.0/me/messages?$skip={1,2}",
+            "https://graph.microsoft.com/v1.0/me/messages/../../users",
+            "https://graph.microsoft.com/v1.0/./me/messages",
+            "https://graph.microsoft.com/v1.0/me/%2e%2E/users",
             "",
             long.as_str(),
         ] {

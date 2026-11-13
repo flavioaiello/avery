@@ -2,7 +2,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use super::auth::{load_record, Record};
+use super::auth::{load_record, Record, MAX_TOKEN};
 use crate::base64;
 use crate::http::{self, Method, Request, Transport};
 use crate::json::{self, Json, Object};
@@ -15,7 +15,7 @@ use crate::vault::Vault;
 const OPEN: &str = "/usr/bin/open";
 const DEADLINE: Duration = Duration::from_secs(180);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+const HEAD_DEADLINE: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(50);
 const MAX_REQUEST: usize = 8192;
 const MAX_CLIENT: usize = 300;
@@ -205,16 +205,22 @@ fn respond(stream: &mut TcpStream, status: &str, title: &str, text: &str) {
     let _ = stream.flush();
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<String> {
-    stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
+fn read_request(stream: &mut TcpStream, within: Duration) -> Option<String> {
+    let deadline = Instant::now() + within;
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 1024];
     while buffer.len() < MAX_REQUEST && !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
-        let count = stream.read(&mut chunk).ok()?;
-        if count == 0 {
-            break;
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
         }
-        buffer.extend_from_slice(chunk.get(..count)?);
+        stream.set_read_timeout(Some(left)).ok()?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => buffer.extend_from_slice(chunk.get(..count)?),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
     }
     String::from_utf8(buffer).ok()
 }
@@ -230,7 +236,12 @@ fn wait_for_code(
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     idle = false;
-                    let Some(request) = read_request(&mut stream) else {
+                    if stream.set_nonblocking(false).is_err()
+                        || stream.set_write_timeout(Some(HEAD_DEADLINE)).is_err()
+                    {
+                        continue;
+                    }
+                    let Some(request) = read_request(&mut stream, HEAD_DEADLINE) else {
                         respond(
                             &mut stream,
                             "400 Bad Request",
@@ -337,13 +348,13 @@ fn exchange(
         ));
     }
     let object = object.ok_or("The sign-in service gave an unexpected answer.")?;
-    let access =
-        text_of(object, "access_token", 8192).ok_or("The sign-in service gave no access token.")?;
-    let refresh = text_of(object, "refresh_token", 8192).ok_or(
+    let access = text_of(object, "access_token", MAX_TOKEN)
+        .ok_or("The sign-in service gave no access token.")?;
+    let refresh = text_of(object, "refresh_token", MAX_TOKEN).ok_or(
         "The sign-in service gave no refresh token. Remove the app's access in your account settings and try again.",
     )?;
     let scope = match object.get("scope") {
-        Some(Json::Str(scope)) if scope.len() <= 8192 => scope.clone(),
+        Some(Json::Str(scope)) if scope.len() <= MAX_TOKEN => scope.clone(),
         _ => String::new(),
     };
     Ok((access, refresh, scope))
@@ -619,6 +630,7 @@ mod tests {
     use crate::testutil::TestResult;
     use crate::vault::memory::Memory;
     use std::sync::{Arc, Mutex};
+    use std::thread;
 
     fn oauth(provider: Provider) -> Result<&'static OAuth, String> {
         provider.oauth().ok_or_else(|| "oauth".to_string())
@@ -943,6 +955,162 @@ mod tests {
         Ok(())
     }
 
+    fn connect(port: u16) -> Result<TcpStream, Box<dyn std::error::Error>> {
+        let stream = TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        Ok(stream)
+    }
+
+    fn pair() -> Result<(TcpStream, TcpStream), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let client = connect(listener.local_addr()?.port())?;
+        let (server, _) = listener.accept()?;
+        Ok((server, client))
+    }
+
+    fn callback(code: &str) -> String {
+        format!("GET /?code={code}&state=S1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    }
+
+    fn answer_of(mut stream: TcpStream) -> String {
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        answer
+    }
+
+    #[test]
+    fn a_request_that_arrives_late_on_an_open_connection_is_still_served() -> TestResult {
+        let (listeners, port) = bind()?;
+        let mut stream = connect(port)?;
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            let _ = stream.write_all(callback("late").as_bytes());
+            answer_of(stream)
+        });
+        let code = wait_for_code(&listeners, "S1", Instant::now() + Duration::from_secs(5))?;
+        assert_eq!(code, "late");
+        let answer = sender.join().map_err(|_| "sender")?;
+        assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_request_that_comes_in_pieces_within_the_deadline_is_served() -> TestResult {
+        let (listeners, port) = bind()?;
+        let mut stream = connect(port)?;
+        let sender = thread::spawn(move || {
+            for piece in [
+                "GET /?code=pie",
+                "ces&state=S1 HT",
+                "TP/1.1\r\nHost: x\r\n",
+                "\r\n",
+            ] {
+                thread::sleep(Duration::from_millis(150));
+                let _ = stream.write_all(piece.as_bytes());
+            }
+            answer_of(stream)
+        });
+        let code = wait_for_code(&listeners, "S1", Instant::now() + Duration::from_secs(5))?;
+        assert_eq!(code, "pieces");
+        let answer = sender.join().map_err(|_| "sender")?;
+        assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_trickling_request_is_cut_off_at_the_overall_deadline_and_the_next_one_is_served(
+    ) -> TestResult {
+        let (listeners, port) = bind()?;
+        let mut slow = connect(port)?;
+        let trickler = thread::spawn(move || {
+            for byte in callback("slow").as_bytes() {
+                if slow.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+            answer_of(slow)
+        });
+        let mut quick = connect(port)?;
+        quick.write_all(callback("good").as_bytes())?;
+        let started = Instant::now();
+        let code = wait_for_code(&listeners, "S1", started + Duration::from_secs(30))?;
+        let took = started.elapsed();
+        assert_eq!(code, "good");
+        assert!(
+            took + Duration::from_millis(100) >= HEAD_DEADLINE,
+            "{took:?}"
+        );
+        assert!(took < HEAD_DEADLINE + Duration::from_secs(2), "{took:?}");
+        assert!(answer_of(quick).starts_with("HTTP/1.1 200 OK"));
+        let answer = trickler.join().map_err(|_| "trickler")?;
+        assert!(!answer.contains("200 OK"), "{answer}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_head_is_read_against_one_deadline_whether_the_client_is_idle_or_trickles() -> TestResult
+    {
+        let within = Duration::from_millis(600);
+        let (mut idle, _kept_open) = pair()?;
+        let started = Instant::now();
+        assert_eq!(read_request(&mut idle, within), None);
+        let took = started.elapsed();
+        assert!(took + Duration::from_millis(50) >= within, "{took:?}");
+        assert!(took < within + Duration::from_secs(2), "{took:?}");
+        let (mut server, mut client) = pair()?;
+        let trickler = thread::spawn(move || {
+            for byte in callback("slow").as_bytes() {
+                if client.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let started = Instant::now();
+        assert_eq!(read_request(&mut server, within), None);
+        let took = started.elapsed();
+        assert!(took + Duration::from_millis(50) >= within, "{took:?}");
+        assert!(took < within + Duration::from_secs(2), "{took:?}");
+        drop(server);
+        trickler.join().map_err(|_| "trickler")?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_complete_head_is_returned_at_once_and_a_head_without_an_end_stops_at_the_size_limit(
+    ) -> TestResult {
+        let (mut server, mut client) = pair()?;
+        client.write_all(callback("quick").as_bytes())?;
+        let started = Instant::now();
+        assert_eq!(
+            read_request(&mut server, HEAD_DEADLINE),
+            Some(callback("quick"))
+        );
+        assert!(started.elapsed() < HEAD_DEADLINE);
+        let (mut server, mut client) = pair()?;
+        let flood = thread::spawn(move || {
+            let _ = client.write_all(&vec![b'a'; 4 * MAX_REQUEST]);
+        });
+        let text = read_request(&mut server, HEAD_DEADLINE).ok_or("head")?;
+        assert!(text.len() >= MAX_REQUEST && text.len() < MAX_REQUEST + 1024);
+        drop(server);
+        flood.join().map_err(|_| "flood")?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_first_forty_pairs_of_the_query_are_looked_at() {
+        let filler = "x=1&".repeat(40);
+        let late = format!("GET /?{filler}code=a&state=S1 HTTP/1.1\r\n\r\n");
+        assert_eq!(parse_callback(&late, "S1"), Callback::Wrong);
+        let early = format!("GET /?code=a&state=S1&{filler} HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            parse_callback(&early, "S1"),
+            Callback::Code("a".to_string())
+        );
+    }
+
     #[test]
     fn refusals_timeouts_and_odd_answers_end_without_storing_anything() -> TestResult {
         let cases: Vec<(Scripted, Visit, &str)> = vec![
@@ -1083,6 +1251,34 @@ mod tests {
             return Err("expected an error".into());
         };
         assert!(error.contains("Keychain"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_sign_in_that_does_not_fit_the_keychain_is_refused_and_nothing_is_stored() -> TestResult {
+        let tokens = GOOGLE_TOKENS.replace(
+            "\"1//r\"",
+            &format!("\"{}\"", "r".repeat(crate::vault::MAX_RECORD)),
+        );
+        let vault = Arc::new(Memory::new());
+        let browser = Visitor {
+            visit: Visit::Good("x"),
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let admin = Linker::new(
+            Box::new(google_transport(&tokens)),
+            Box::new(crate::vault::memory::Shared(Arc::clone(&vault))),
+            Box::new(browser),
+        )
+        .within(Duration::from_secs(10));
+        let Err(error) = admin.link(Provider::Google, &google()?, false, &mut |_| {}) else {
+            return Err("expected an error".into());
+        };
+        assert!(
+            error.contains("Keychain") && error.contains("too large"),
+            "{error}"
+        );
+        assert_eq!(vault.count(), 0);
         Ok(())
     }
 
