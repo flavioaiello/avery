@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub(crate) const OSASCRIPT: &str = "/usr/bin/osascript";
+pub(crate) const LAUNCHCTL: &str = "/bin/launchctl";
 pub(crate) const COMMON_SCRIPT: &str = include_str!("../jxa/common.js");
 pub(crate) const DIALOGS_SCRIPT: &str = include_str!("../jxa/dialogs.js");
 pub(crate) const DIALOG_SCRIPT: &str = include_str!("../jxa/dialog.js");
@@ -184,19 +185,77 @@ fn is_gui_session(managername: &str) -> bool {
     managername.trim() == "Aqua"
 }
 
-pub(crate) fn gui_session() -> bool {
-    matches!(
-        run_command("/bin/launchctl", &["managername"], Duration::from_secs(5)),
-        Finished::Done { code: Some(0), stdout, .. } if is_gui_session(&stdout)
-    )
-}
-
 pub(crate) trait Host {
     fn ensure_running(&self, app: App);
     fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished;
 }
 
 pub(crate) struct OsascriptHost;
+
+pub(crate) struct Programs {
+    osascript: Option<String>,
+    launchctl: Option<String>,
+}
+
+pub(crate) struct ScreenHost<'a> {
+    osascript: Option<&'a str>,
+}
+
+impl Programs {
+    pub(crate) fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Programs {
+        let program = |key: &str, system: &str| match lookup(key).filter(|value| !value.is_empty())
+        {
+            None => Some(system.to_string()),
+            Some(path) if path.starts_with('/') => Some(path),
+            Some(_) => None,
+        };
+        Programs {
+            osascript: program("AVERY_OSASCRIPT", OSASCRIPT),
+            launchctl: program("AVERY_LAUNCHCTL", LAUNCHCTL),
+        }
+    }
+
+    pub(crate) fn from_env() -> Programs {
+        Programs::from_lookup(&|key| {
+            std::env::var_os(key).map(|value| value.to_string_lossy().into_owned())
+        })
+    }
+
+    pub(crate) fn host(&self) -> ScreenHost<'_> {
+        ScreenHost {
+            osascript: self.osascript.as_deref(),
+        }
+    }
+
+    pub(crate) fn graphical(&self) -> bool {
+        self.launchctl.as_deref().is_some_and(|program| {
+            matches!(
+                run_command(program, &["managername"], Duration::from_secs(5)),
+                Finished::Done { code: Some(0), stdout, .. } if is_gui_session(&stdout)
+            )
+        })
+    }
+}
+
+fn run_script(program: &str, app: App, payload: &str, timeout: Duration) -> Finished {
+    let script = app.script();
+    run_command(
+        program,
+        &["-l", "JavaScript", "-e", script.as_str(), payload],
+        timeout,
+    )
+}
+
+impl Host for ScreenHost<'_> {
+    fn ensure_running(&self, _app: App) {}
+
+    fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished {
+        match (app, self.osascript) {
+            (App::Dialog, Some(program)) => run_script(program, app, payload, timeout),
+            _ => Finished::NotStarted,
+        }
+    }
+}
 
 fn running(app: App) -> bool {
     matches!(
@@ -229,12 +288,7 @@ impl Host for OsascriptHost {
     }
 
     fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished {
-        let script = app.script();
-        run_command(
-            OSASCRIPT,
-            &["-l", "JavaScript", "-e", script.as_str(), payload],
-            timeout,
-        )
+        run_script(OSASCRIPT, app, payload, timeout)
     }
 }
 
@@ -299,6 +353,25 @@ pub(crate) mod clicks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{TempDir, TestResult};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn programs(pairs: &[(&str, &str)]) -> Programs {
+        Programs::from_lookup(&|key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    fn stand_in(dir: &TempDir, name: &str, body: &str) -> Result<String, std::io::Error> {
+        let path = dir.path(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        Ok(path)
+    }
 
     fn shell(script: &str, timeout_ms: u64) -> Finished {
         run_command(
@@ -457,6 +530,104 @@ mod tests {
         ] {
             assert_eq!(is_gui_session(name), expected, "{name:?}");
         }
+    }
+
+    #[test]
+    fn the_screen_programs_are_the_system_ones_unless_an_absolute_path_replaces_them() {
+        let system = programs(&[]);
+        assert_eq!(system.osascript.as_deref(), Some(OSASCRIPT));
+        assert_eq!(system.launchctl.as_deref(), Some(LAUNCHCTL));
+        let unset = programs(&[("AVERY_OSASCRIPT", ""), ("AVERY_LAUNCHCTL", "")]);
+        assert_eq!(unset.osascript.as_deref(), Some(OSASCRIPT));
+        assert_eq!(unset.launchctl.as_deref(), Some(LAUNCHCTL));
+        let replaced = programs(&[
+            ("AVERY_OSASCRIPT", "/stand/in/osascript"),
+            ("AVERY_LAUNCHCTL", "/stand/in/launchctl"),
+        ]);
+        assert_eq!(replaced.osascript.as_deref(), Some("/stand/in/osascript"));
+        assert_eq!(replaced.launchctl.as_deref(), Some("/stand/in/launchctl"));
+        let one = programs(&[("AVERY_OSASCRIPT", "/stand/in/osascript")]);
+        assert_eq!(one.launchctl.as_deref(), Some(LAUNCHCTL));
+    }
+
+    #[test]
+    fn a_program_that_is_not_an_absolute_path_never_reaches_the_path_lookup() {
+        for bad in [
+            "osascript",
+            "./osascript",
+            "../osascript",
+            " /x/osascript",
+            "~/x",
+            "-l",
+        ] {
+            let refused = programs(&[("AVERY_OSASCRIPT", bad), ("AVERY_LAUNCHCTL", bad)]);
+            assert_eq!(refused.osascript, None, "{bad:?}");
+            assert_eq!(refused.launchctl, None, "{bad:?}");
+            assert!(!refused.graphical(), "{bad:?}");
+            assert_eq!(
+                refused
+                    .host()
+                    .run(App::Dialog, "{}", Duration::from_secs(1)),
+                Finished::NotStarted,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_screen_host_runs_the_dialog_script_through_its_own_program_and_nothing_else(
+    ) -> TestResult {
+        let dir = TempDir::new()?;
+        let log = dir.path("calls.log");
+        let osascript = stand_in(
+            &dir,
+            "osascript",
+            &format!(
+                "printf '%s|%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" \"$5\" >> '{log}'\nprintf '{{\"ok\": true, \"data\": {{\"result\": \"ok\"}}}}'"
+            ),
+        )?;
+        let programs = programs(&[("AVERY_OSASCRIPT", &osascript)]);
+        let host = programs.host();
+        let answered = host.run(App::Dialog, "{\"op\": \"ping\"}", Duration::from_secs(10));
+        assert!(
+            matches!(&answered, Finished::Done { code: Some(0), stdout, .. } if stdout.contains("\"ok\": true")),
+            "{answered:?}"
+        );
+        for app in [App::Mail, App::Calendar] {
+            assert_eq!(
+                host.run(app, "{}", Duration::from_secs(10)),
+                Finished::NotStarted,
+                "{app:?}"
+            );
+        }
+        host.ensure_running(App::Mail);
+        assert_eq!(
+            fs::read_to_string(&log)?,
+            "-l|JavaScript|-e|{\"op\": \"ping\"}\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_launchctl_that_says_aqua_makes_a_graphical_session() -> TestResult {
+        let dir = TempDir::new()?;
+        for (index, (body, expected)) in [
+            ("echo Aqua", true),
+            ("echo ' Aqua '", true),
+            ("echo Background", false),
+            ("echo Aqua; exit 1", false),
+            ("exit 0", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = stand_in(&dir, &format!("launchctl-{index}"), body)?;
+            let programs = programs(&[("AVERY_LAUNCHCTL", &path)]);
+            assert_eq!(programs.graphical(), expected, "{body}");
+        }
+        let missing = programs(&[("AVERY_LAUNCHCTL", "/nonexistent/launchctl")]);
+        assert!(!missing.graphical());
+        Ok(())
     }
 
     #[test]

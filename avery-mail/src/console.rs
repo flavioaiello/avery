@@ -25,7 +25,7 @@ pub(crate) enum Topic {
 
 pub(crate) struct Screen<'a> {
     pub(crate) host: &'a dyn Host,
-    pub(crate) gui: fn() -> bool,
+    pub(crate) gui: &'a dyn Fn() -> bool,
 }
 
 pub(crate) enum Console<'a> {

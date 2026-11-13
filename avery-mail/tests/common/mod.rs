@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +30,61 @@ impl Sandbox {
             COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
         fs::create_dir_all(&root)?;
-        Ok(Sandbox { root })
+        let sandbox = Sandbox { root };
+        sandbox.stand_ins()?;
+        Ok(sandbox)
+    }
+
+    fn stand_ins(&self) -> io::Result<()> {
+        let log = self.calls_path();
+        let quoted = log.to_string_lossy().into_owned();
+        if quoted.contains('\'') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the sandbox path has a quote",
+            ));
+        }
+        let scripts = [
+            (
+                "osascript",
+                format!("#!/bin/sh\nprintf 'osascript %s\\n' \"$5\" >> '{quoted}'\nexit 3\n"),
+            ),
+            (
+                "launchctl",
+                format!("#!/bin/sh\nprintf 'launchctl %s\\n' \"$*\" >> '{quoted}'\nexit 1\n"),
+            ),
+            (
+                "launchctl-aqua",
+                format!("#!/bin/sh\nprintf 'launchctl %s\\n' \"$*\" >> '{quoted}'\necho Aqua\n"),
+            ),
+        ];
+        fs::create_dir_all(self.screen_dir())?;
+        for (name, text) in scripts {
+            let path = self.screen_dir().join(name);
+            fs::write(&path, text)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn screen_dir(&self) -> PathBuf {
+        self.root.join("screen")
+    }
+
+    fn calls_path(&self) -> PathBuf {
+        self.screen_dir().join("calls.log")
+    }
+
+    pub(crate) fn screen_program(&self, name: &str) -> PathBuf {
+        self.screen_dir().join(name)
+    }
+
+    fn forget_calls(&self) -> io::Result<()> {
+        fs::write(self.calls_path(), "")
+    }
+
+    fn calls(&self) -> String {
+        fs::read_to_string(self.calls_path()).unwrap_or_default()
     }
 
     pub(crate) fn path(&self, name: &str) -> PathBuf {
@@ -57,6 +112,8 @@ fn command(sandbox: &Sandbox, env: &[(&str, &str)]) -> Command {
         .env_clear()
         .env("HOME", &sandbox.root)
         .env("MAIL_MCP_CONFIG", sandbox.path("config.json"))
+        .env("AVERY_OSASCRIPT", sandbox.screen_program("osascript"))
+        .env("AVERY_LAUNCHCTL", sandbox.screen_program("launchctl"))
         .envs(env.iter().copied())
         .stderr(Stdio::null());
     command
@@ -65,14 +122,16 @@ fn command(sandbox: &Sandbox, env: &[(&str, &str)]) -> Command {
 pub(crate) struct Output {
     pub(crate) code: Option<i32>,
     pub(crate) stdout: String,
+    pub(crate) calls: String,
 }
 
-pub(crate) fn run_cli(
+pub(crate) fn run_cli_allowing_the_screen(
     sandbox: &Sandbox,
     env: &[(&str, &str)],
     args: &[&str],
     input: &str,
 ) -> Result<Output, Box<dyn Error>> {
+    sandbox.forget_calls()?;
     let mut child = command(sandbox, env)
         .args(args)
         .stdin(Stdio::piped())
@@ -85,7 +144,26 @@ pub(crate) fn run_cli(
     Ok(Output {
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        calls: sandbox.calls(),
     })
+}
+
+pub(crate) fn run_cli(
+    sandbox: &Sandbox,
+    env: &[(&str, &str)],
+    args: &[&str],
+    input: &str,
+) -> Result<Output, Box<dyn Error>> {
+    let output = run_cli_allowing_the_screen(sandbox, env, args, input)?;
+    if output.calls.is_empty() {
+        Ok(output)
+    } else {
+        Err(format!(
+            "{args:?} reached the screen: {}(output: {})",
+            output.calls, output.stdout
+        )
+        .into())
+    }
 }
 
 pub(crate) struct Server {
@@ -93,6 +171,7 @@ pub(crate) struct Server {
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     next_id: u64,
+    calls: PathBuf,
 }
 
 impl Server {
@@ -111,11 +190,13 @@ impl Server {
                 }
             }
         });
+        sandbox.forget_calls()?;
         Ok(Server {
             child,
             stdin,
             lines,
             next_id: 0,
+            calls: sandbox.calls_path(),
         })
     }
 
@@ -168,6 +249,10 @@ impl Server {
         let deadline = Instant::now() + WAIT;
         loop {
             if let Some(status) = self.child.try_wait()? {
+                let calls = fs::read_to_string(&self.calls).unwrap_or_default();
+                if !calls.is_empty() {
+                    return Err(format!("the server reached the screen: {calls}").into());
+                }
                 return Ok(status.code());
             }
             if Instant::now() >= deadline {

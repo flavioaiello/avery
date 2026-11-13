@@ -266,7 +266,7 @@ pub(crate) static DARK: Dark = Dark;
 pub(crate) fn dark() -> Screen<'static> {
     Screen {
         host: &DARK,
-        gui: || false,
+        gui: &|| false,
     }
 }
 

@@ -372,6 +372,13 @@ AVERY_MAIL_BIN=$PWD/avery-mail/target/debug/avery-mail bin/avery doctor   # AVER
 AVERY_DRY_RUN=1 bin/avery model   # print the command instead of running it
 ```
 
+The setup dialogs and the check for a graphical session run `/usr/bin/osascript` and `/bin/launchctl`. For
+`avery mail onboard` and nothing else, `AVERY_OSASCRIPT` and `AVERY_LAUNCHCTL` (absolute paths) name other programs: the
+approval dialogs, the Apple bridge and the server always use the system ones and cannot reach this override. Every
+binary-level test (`avery-mail/tests` and `tests/cli.sh`) points both at stand-ins that record the call in a file and fail,
+and fails if a call was not expected, so a regression cannot open a real dialog. A value that is not an absolute path
+leaves the dialogs dark instead of searching the `PATH`.
+
 ### Logo, app and disk image
 
 The artwork is vector: `tools/gen-logo.js` writes `assets/avery-icon.svg` (squircle with margin, for the README and the

@@ -43,9 +43,12 @@ pub fn run(args: Vec<String>) -> u8 {
         let _ = writeln!(io::stderr(), "avery-mail: internal error");
     }));
     let ctx = context::Context::from_env();
+    let programs = osascript::Programs::from_env();
+    let host = programs.host();
+    let graphical = || programs.graphical();
     let screen = console::Screen {
-        host: &osascript::OsascriptHost,
-        gui: osascript::gui_session,
+        host: &host,
+        gui: &graphical,
     };
     let stdin = io::stdin();
     let stdout = io::stdout();

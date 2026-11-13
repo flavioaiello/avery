@@ -332,7 +332,10 @@ fn both_station(
 }
 
 fn run_with(station: &Station, script: &Script, gui: fn() -> bool, args: &[&str]) -> (u8, String) {
-    let screen = Screen { host: script, gui };
+    let screen = Screen {
+        host: script,
+        gui: &gui,
+    };
     let args: Vec<String> = args.iter().map(|argument| argument.to_string()).collect();
     let mut out = Vec::new();
     let code = dispatch(
@@ -1665,7 +1668,7 @@ fn no_other_command_ever_shows_a_dialog_or_calls_the_screen() -> TestResult {
     ] {
         let screen = Screen {
             host: &script,
-            gui: || true,
+            gui: &|| true,
         };
         let args: Vec<String> = args.iter().map(|argument| argument.to_string()).collect();
         let _ = dispatch(
@@ -1686,7 +1689,7 @@ fn the_server_has_no_way_to_onboard_or_to_open_a_dialog() -> TestResult {
     let script = Script::new();
     let screen = Screen {
         host: &script,
-        gui: || true,
+        gui: &|| true,
     };
     let calls = ["onboard", "link", "setup", "ask_text", "choose_list", "notify", "open_url", "ask_buttons", "dismiss", "link_account"]
         .iter()

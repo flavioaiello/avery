@@ -2,7 +2,7 @@ mod common;
 
 use std::error::Error;
 
-use common::{run_cli, Sandbox, Server, TestResult};
+use common::{run_cli, run_cli_allowing_the_screen, Sandbox, Server, TestResult};
 
 const MAIL: &str = r#"{"account": "Demo Gmail", "to": ["anna@example.org"], "subject": "Hallo", "body": "Kurzer Text."}"#;
 const READ_TOOLS: [&str; 5] = [
@@ -412,6 +412,95 @@ fn the_flag_stays_silent_when_something_is_set_up_dismissed_switched_off_or_in_d
     ] {
         assert!(!sandbox.path(name).exists(), "{name}");
     }
+    Ok(())
+}
+
+const NO_FILES: [&str; 4] = [
+    "config.json",
+    "config.lock",
+    "vault.lock",
+    "onboard.dismissed",
+];
+
+#[test]
+fn the_dialogs_go_through_the_program_the_environment_names_and_a_failing_one_ends_the_run(
+) -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let output = run_cli_allowing_the_screen(&sandbox, &[], &["onboard"], "")?;
+    assert_eq!(output.code, Some(1), "{}", output.stdout);
+    assert!(
+        output
+            .stdout
+            .starts_with("Fehler: Der Dialog ist fehlgeschlagen"),
+        "{}",
+        output.stdout
+    );
+    let calls: Vec<&str> = output.calls.lines().collect();
+    assert_eq!(calls.len(), 1, "{}", output.calls);
+    assert!(
+        calls[0].starts_with("osascript {\"op\": \"ask_buttons\""),
+        "{}",
+        calls[0]
+    );
+    assert!(calls[0].contains("Willkommen bei Avery"), "{}", calls[0]);
+    for name in NO_FILES {
+        assert!(!sandbox.path(name).exists(), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_flag_asks_the_session_probe_first_and_only_a_graphical_session_gets_the_dialogs(
+) -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let dark = run_cli_allowing_the_screen(&sandbox, &[], &["onboard", "--if-needed"], "")?;
+    assert_eq!((dark.code, dark.stdout.as_str()), (Some(0), ""));
+    assert_eq!(dark.calls, "launchctl managername\n");
+    let aqua = sandbox.screen_program("launchctl-aqua");
+    let aqua = aqua.to_string_lossy().into_owned();
+    let graphical = run_cli_allowing_the_screen(
+        &sandbox,
+        &[("AVERY_LAUNCHCTL", aqua.as_str())],
+        &["onboard", "--if-needed"],
+        "",
+    )?;
+    assert_eq!(graphical.code, Some(1), "{}", graphical.stdout);
+    let calls: Vec<&str> = graphical.calls.lines().collect();
+    assert_eq!(calls.len(), 2, "{}", graphical.calls);
+    assert_eq!(calls[0], "launchctl managername");
+    assert!(
+        calls[1].starts_with("osascript {\"op\": \"ask_buttons\""),
+        "{}",
+        calls[1]
+    );
+    for name in NO_FILES {
+        assert!(!sandbox.path(name).exists(), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_override_that_is_not_an_absolute_path_never_reaches_a_program_by_name() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let path = sandbox.screen_dir().to_string_lossy().into_owned();
+    let env = [
+        ("PATH", path.as_str()),
+        ("AVERY_OSASCRIPT", "osascript"),
+        ("AVERY_LAUNCHCTL", "launchctl-aqua"),
+    ];
+    let flag = run_cli_allowing_the_screen(&sandbox, &env, &["onboard", "--if-needed"], "")?;
+    assert_eq!((flag.code, flag.stdout.as_str()), (Some(0), ""));
+    assert_eq!(flag.calls, "");
+    let plain = run_cli_allowing_the_screen(&sandbox, &env, &["onboard"], "")?;
+    assert_eq!(plain.code, Some(1), "{}", plain.stdout);
+    assert!(
+        plain
+            .stdout
+            .starts_with("Fehler: Der Dialog ist fehlgeschlagen"),
+        "{}",
+        plain.stdout
+    );
+    assert_eq!(plain.calls, "");
     Ok(())
 }
 

@@ -7,12 +7,14 @@
 #
 # Sections: J bin/avery, L hygiene of the repository, N service commands and formula, P the Avery.app builder,
 # G opening Goose with the Avery profile, O the setup dialogs (everything that needs no screen), W the watcher,
-# Q icons, disk image, cask and publish-dmg.sh, M versions agree.
+# Q icons, disk image, cask and publish-dmg.sh, M versions agree, Z1 (always last) no stand-in of the screen was called
+# unexpectedly.
 #
 # No Mail access, no real model, no Goose, no "brew services", no dialog on your screen: whatever would start something
 # runs with AVERY_DRY_RUN=1 or against stand-ins in temporary folders, and the setup dialogs are only run in states in
-# which they stay silent. bin/avery always runs with its own HOME and without
-# the AVERY_* and MAIL_MCP_* variables of your environment.
+# which they stay silent. bin/avery always runs with its own HOME and without the AVERY_* and MAIL_MCP_* variables of
+# your environment, except two: AVERY_OSASCRIPT and AVERY_LAUNCHCTL always name stand-ins that record the call and fail,
+# so a regression cannot open a dialog; check Z1 at the end fails if anything but a check that expected it called them.
 # Output: "PASS  <name>" or "FAIL  <name>   <detail>", at the end "N bestanden, M fehlgeschlagen" (exit code 1 if
 # any check failed). A check that needs a tool you do not have (ruby, brew, ...) prints "SKIP  <name>   <reason>".
 set -u
@@ -153,10 +155,12 @@ capture() {
 }
 
 # av_build [NAME=VALUE ...] ARGS...: AV_CMD runs bin/avery in a clean environment (only PATH, HOME, TMPDIR,
-# AVERY_MAIL_BIN, AVERY_NO_ONBOARD=1 and the given variables). HOME=... picks the home (default: a new temporary
-# folder), SCRIPT=... another copy of bin/avery, AVERY_MAIL_BIN= (empty) leaves the variable out. AHOME is the home
-# used. AVERY_NO_ONBOARD=1 keeps the setup dialogs off, so that no check can ever open a dialog on your screen:
-# only the checks of section O switch it off (AVERY_NO_ONBOARD=), and they run stand-ins or states without a question.
+# AVERY_MAIL_BIN, AVERY_NO_ONBOARD=1, AVERY_OSASCRIPT, AVERY_LAUNCHCTL and the given variables). HOME=... picks the
+# home (default: a new temporary folder), SCRIPT=... another copy of bin/avery, AVERY_MAIL_BIN= (empty) leaves the
+# variable out. AHOME is the home used. AVERY_NO_ONBOARD=1 keeps the setup dialogs off, so that no check can ever open a
+# dialog on your screen: only the checks of section O switch it off (AVERY_NO_ONBOARD=), and they run stand-ins or states
+# without a question. AVERY_OSASCRIPT and AVERY_LAUNCHCTL name stand-ins (setup_screen) in every run, so that even a
+# regression of those checks fails a check instead of opening a dialog.
 av_build() {
   local home="" script="$AVERY" mailbin="$MAIL_BIN" entry
   local -a extra
@@ -173,7 +177,8 @@ av_build() {
   done
   [ -n "$home" ] || home="$(mkd home)"
   AHOME="$home"
-  AV_CMD=(env -i "PATH=$PATH" "HOME=$home" "TMPDIR=$TMPBASE" "AVERY_NO_ONBOARD=1")
+  setup_screen
+  AV_CMD=(env -i "PATH=$PATH" "HOME=$home" "TMPDIR=$TMPBASE" "AVERY_NO_ONBOARD=1" "AVERY_OSASCRIPT=$SCREEN_DIR/osascript" "AVERY_LAUNCHCTL=$SCREEN_DIR/launchctl")
   if [ -n "$mailbin" ]; then AV_CMD[${#AV_CMD[@]}]="AVERY_MAIL_BIN=$mailbin"; fi
   for entry in ${extra[@]+"${extra[@]}"}; do AV_CMD[${#AV_CMD[@]}]="$entry"; done
   AV_CMD[${#AV_CMD[@]}]="$script"
@@ -291,6 +296,32 @@ stop_process() {
   for p in $FAKE_PIDS; do [ "$p" = "$pid" ] || rest="$rest $p"; done
   FAKE_PIDS="$rest"
 }
+
+# Stand-ins for the programs behind the setup dialogs (osascript) and the session probe (launchctl). Every run of
+# bin/avery gets them (av_build): they append the call to $SCREEN_LOG and fail, so a dialog can never open. launchctl-aqua
+# is the same but says "Aqua" (a graphical session). screen_calls prints what was recorded and forgets it.
+setup_screen() {
+  [ -z "${SCREEN_DIR:-}" ] || return 0
+  SCREEN_DIR="$(mkd screen)"
+  SCREEN_LOG="$SCREEN_DIR/calls.log"
+  : > "$SCREEN_LOG"
+  write_exec "$SCREEN_DIR/osascript" <<EOF
+#!/bin/sh
+printf 'osascript %s\n' "\$5" >> "$SCREEN_LOG"
+exit 3
+EOF
+  write_exec "$SCREEN_DIR/launchctl" <<EOF
+#!/bin/sh
+printf 'launchctl %s\n' "\$*" >> "$SCREEN_LOG"
+exit 1
+EOF
+  write_exec "$SCREEN_DIR/launchctl-aqua" <<EOF
+#!/bin/sh
+printf 'launchctl %s\n' "\$*" >> "$SCREEN_LOG"
+echo Aqua
+EOF
+}
+screen_calls() { cat "$SCREEN_LOG" 2>/dev/null; : > "$SCREEN_LOG"; }
 
 # Stand-in for the avery command line: logs its arguments (used by the app builder tests).
 setup_stub() {
@@ -910,38 +941,38 @@ STUB
   mkdir -p "$home/.avery/mail"
   printf '{"version": 3, "apple": {"calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}\n' > "$home/.avery/mail/config.json"
   avery HOME="$home" AVERY_NO_ONBOARD= mail onboard --if-needed
-  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ -z "$(screen_calls)" ]
   check "O12 onboard --if-needed schweigt, wenn schon etwas eingerichtet ist (Apple-Eintrag)" $? "rc=$RC $OUT$ERR"
   home="$(mkd home)"
   mkdir -p "$home/.avery/mail"
   printf '{"version": 3, "accounts": [{"provider": "microsoft", "address": "bob@outlook.example"}]}\n' > "$home/.avery/mail/config.json"
   avery HOME="$home" AVERY_NO_ONBOARD= mail onboard --if-needed
-  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ -z "$(screen_calls)" ]
   check "O13 onboard --if-needed schweigt, wenn ein Konto verbunden ist" $? "rc=$RC $OUT$ERR"
   dismissed_home="$(mkd home)"
   mkdir -p "$dismissed_home/.avery/mail"
   : > "$dismissed_home/.avery/mail/onboard.dismissed"
   avery HOME="$dismissed_home" AVERY_NO_ONBOARD= mail onboard --if-needed
-  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ -z "$(screen_calls)" ]
   check "O14 onboard --if-needed schweigt nach 'Nicht mehr fragen' (onboard.dismissed)" $? "rc=$RC $OUT$ERR"
   avery HOME="$(mkd home)" AVERY_NO_ONBOARD=1 mail onboard --if-needed
-  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ -z "$(screen_calls)" ]
   check "O15 onboard --if-needed schweigt mit AVERY_NO_ONBOARD=1" $? "rc=$RC $OUT$ERR"
   home="$(mkd home)"
   avery HOME="$home" AVERY_NO_ONBOARD= MAIL_MCP_FAKE=1 mail onboard --if-needed
-  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ ! -e "$home/.avery" ]
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ ! -e "$home/.avery" ] && [ -z "$(screen_calls)" ]
   check "O16 onboard --if-needed schweigt im Demo-Modus und legt nichts an" $? "rc=$RC $OUT$ERR"
   avery HOME="$home" MAIL_MCP_FAKE=1 mail onboard
-  [ "$RC" = 1 ] && has "$OUT" "Demo-Modus" && [ ! -e "$home/.avery" ]
+  [ "$RC" = 1 ] && has "$OUT" "Demo-Modus" && [ ! -e "$home/.avery" ] && [ -z "$(screen_calls)" ]
   check "O17 onboard ohne Option verweigert im Demo-Modus, bevor ein Dialog erscheint" $? "rc=$RC $OUT$ERR"
   avery mail onboard --bogus
-  [ "$RC" = 2 ] && has "$OUT" "Benutzung: avery mail onboard [--if-needed]"
+  [ "$RC" = 2 ] && has "$OUT" "Benutzung: avery mail onboard [--if-needed]" && [ -z "$(screen_calls)" ]
   check "O18 onboard mit unbekannter Option: Benutzungshinweis, Exit 2" $? "rc=$RC $OUT"
   broken_home="$(mkd home)"
   mkdir -p "$broken_home/.avery/mail"
   printf '{"version": 2}\n' > "$broken_home/.avery/mail/config.json"
   avery HOME="$broken_home" AVERY_NO_ONBOARD= mail onboard --if-needed
-  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && [ "$(cat "$broken_home/.avery/mail/config.json")" = '{"version": 2}' ]
+  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && [ "$(cat "$broken_home/.avery/mail/config.json")" = '{"version": 2}' ] && [ -z "$(screen_calls)" ]
   check "O19 onboard --if-needed meldet eine unlesbare Konfiguration, statt Dialoge zu zeigen, und aendert sie nicht" $? "rc=$RC $OUT"
   avery mail help
   has "$OUT" "avery mail onboard [--if-needed]" && has "$OUT" "onboard and revoke refuse in demo mode"
@@ -974,6 +1005,18 @@ STUB
     && has "$(cat "$ROOT/README.md")" "macOS may still ask for a permission" && has "$(cat "$ROOT/README.md")" "If no dialog appears" \
     && lacks "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
   check "O26 README: die Dialoge, der Schalter, die Markierung und die moegliche Berechtigung sind beschrieben, ohne System Events" $?
+
+  # The whole way through the launcher and the real mail server, with stand-ins instead of the screen: a graphical session
+  # starts the dialogs, the first dialog is requested from the stand-in (which fails), the start is not blocked.
+  rm -f "$OPEN_LOG" "$mailstub_log"
+  screen_calls > /dev/null
+  avery "${env_o[@]}" AVERY_NO_ONBOARD= "AVERY_LAUNCHCTL=$SCREEN_DIR/launchctl-aqua" app
+  calls="$(open_calls)"
+  made="$(screen_calls)"
+  [ "$RC" = 0 ] && begins "$calls" "-n -a $FAKE_APP" && has "$ERR" "Hinweis: Die Einrichtung in Dialogen ist nicht abgeschlossen" \
+    && [ "$(printf '%s\n' "$made" | head -n 1)" = "launchctl managername" ] \
+    && begins "$(printf '%s\n' "$made" | sed -n 2p)" 'osascript {"op": "ask_buttons"' && has "$made" "Willkommen bei Avery"
+  check "O27 app in einer grafischen Sitzung: das Mail-Programm fragt den Stand-in (osascript scheitert), Goose startet trotzdem" $? "rc=$RC open=$calls calls=$made stderr=$ERR"
 }
 
 # ------------------------------------------------------------------ W: the watcher stops the model after Goose was closed
@@ -1212,6 +1255,12 @@ want O && run_O
 want W && run_W
 want Q && run_Q
 want M && run_M
+
+if [ -n "${SCREEN_LOG:-}" ]; then
+  left="$(screen_calls)"
+  [ -z "$left" ]
+  check "Z1 kein Check hat osascript oder launchctl aufgerufen, ausser dort, wo er es erwartet hat" $? "$left"
+fi
 
 [ "$SKIP" -eq 0 ] || printf '\n%d uebersprungen (siehe SKIP-Zeilen)' "$SKIP"
 printf '\n%d bestanden, %d fehlgeschlagen\n' "$PASS" "$FAIL"
