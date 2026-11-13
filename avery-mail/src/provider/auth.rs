@@ -215,18 +215,29 @@ fn keep_rotated(
         .ok_or_else(|| ToolError::msg("This account has no valid address."))?;
     let updated = Record {
         refresh_token: next,
-        ..loaded
+        ..loaded.clone()
     };
     match vault.replace(&name, stored, &updated.to_json()) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(ToolError::msg(format!(
-            "The sign-in of this account was replaced or removed while it was being renewed, so nothing was stored or used. Retry the request. If it keeps failing: {}",
-            relink(provider)
-        ))),
+        Ok(false) => match load_record(vault, provider, address) {
+            Ok(current) if rotated_elsewhere(&current, &loaded) => Ok(()),
+            _ => Err(ToolError::msg(format!(
+                "The sign-in of this account was replaced or removed while it was being renewed, so nothing was stored or used. Retry the request. If it keeps failing: {}",
+                relink(provider)
+            ))),
+        },
         Err(error) => Err(ToolError::msg(format!(
             "The renewed sign-in could not be stored in the Keychain ({error})."
         ))),
     }
+}
+
+fn rotated_elsewhere(current: &Record, loaded: &Record) -> bool {
+    current.refresh_token != loaded.refresh_token
+        && Record {
+            refresh_token: loaded.refresh_token.clone(),
+            ..current.clone()
+        } == *loaded
 }
 
 #[cfg(test)]
@@ -590,6 +601,7 @@ mod tests {
     enum Meddle {
         Delete,
         Replace(String),
+        ReplaceAndLock(String),
         Break,
     }
 
@@ -619,9 +631,13 @@ mod tests {
             if count == 0 {
                 match &self.meddle {
                     Some(Meddle::Delete) => self.inner.delete(name)?,
-                    Some(Meddle::Replace(text)) => self.inner.store(name, text)?,
+                    Some(Meddle::Replace(text) | Meddle::ReplaceAndLock(text)) => {
+                        self.inner.store(name, text)?
+                    }
                     Some(Meddle::Break) | None => {}
                 }
+            } else if matches!(self.meddle, Some(Meddle::ReplaceAndLock(_))) {
+                return Err(VaultError::Unavailable("locked".to_string()));
             }
             seen
         }
@@ -711,18 +727,29 @@ mod tests {
     }
 
     #[test]
-    fn a_rotated_token_is_not_stored_over_an_entry_that_changed_in_any_part() -> TestResult {
+    fn a_rotated_token_is_not_used_when_the_entry_changed_in_any_part_but_the_refresh_token(
+    ) -> TestResult {
         let changed = [
             Record {
                 scope: format!("{} Mail.ReadWrite", microsoft_record().scope),
                 ..microsoft_record()
             },
             Record {
-                refresh_token: "M.R3_other".into(),
+                client_id: "other-client".into(),
                 ..microsoft_record()
             },
             Record {
                 client_secret: Some("added".into()),
+                ..microsoft_record()
+            },
+            Record {
+                refresh_token: "M.R3_other".into(),
+                scope: "Mail.Read".into(),
+                ..microsoft_record()
+            },
+            Record {
+                refresh_token: "M.R3_other".into(),
+                client_id: "other-client".into(),
                 ..microsoft_record()
             },
         ];
@@ -741,6 +768,92 @@ mod tests {
             assert_eq!(vault.inner.get(OUTLOOK), Some(record.to_json()));
             assert_eq!(vault.stores(), 0);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_token_that_another_process_rotated_meanwhile_is_used_and_the_newer_one_stays() -> TestResult
+    {
+        let other = Record {
+            refresh_token: "M.R3_other_process".into(),
+            ..microsoft_record()
+        };
+        let reformatted = format!(
+            r#"{{"scope": "{}", "refresh_token": "{}", "client_id": "{}"}}"#,
+            other.scope, other.refresh_token, other.client_id
+        );
+        assert_ne!(reformatted, other.to_json());
+        for written in [other.to_json(), reformatted] {
+            let vault = Racing::new(
+                Memory::new().with(OUTLOOK, &microsoft_record().to_json()),
+                Some(Meddle::Replace(written.clone())),
+            );
+            let transport = rotation();
+            assert_eq!(
+                access_token(
+                    &transport,
+                    &vault,
+                    Provider::Microsoft,
+                    "bob@outlook.example"
+                )?,
+                "EwB.late"
+            );
+            assert_eq!(vault.inner.get(OUTLOOK), Some(written));
+            assert_eq!((vault.loads(), vault.stores()), (2, 0));
+            assert_eq!(transport.seen().len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_rewrite_that_did_not_rotate_anything_still_fails_closed() -> TestResult {
+        let same = format!(
+            r#"{{"scope": "{}", "refresh_token": "{}", "client_id": "{}"}}"#,
+            microsoft_record().scope,
+            microsoft_record().refresh_token,
+            microsoft_record().client_id
+        );
+        assert_ne!(same, microsoft_record().to_json());
+        assert_eq!(Record::parse(&same), Some(microsoft_record()));
+        let vault = Racing::new(
+            Memory::new().with(OUTLOOK, &microsoft_record().to_json()),
+            Some(Meddle::Replace(same.clone())),
+        );
+        let Err(error) = access_token(
+            &rotation(),
+            &vault,
+            Provider::Microsoft,
+            "bob@outlook.example",
+        ) else {
+            return Err("expected an error".into());
+        };
+        assert!(error.message().contains("replaced or removed"), "{error}");
+        assert_eq!(vault.inner.get(OUTLOOK), Some(same));
+        assert_eq!(vault.stores(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_rotated_token_is_not_used_when_the_entry_cannot_be_read_again() -> TestResult {
+        let other = Record {
+            refresh_token: "M.R3_other_process".into(),
+            ..microsoft_record()
+        };
+        let vault = Racing::new(
+            Memory::new().with(OUTLOOK, &microsoft_record().to_json()),
+            Some(Meddle::ReplaceAndLock(other.to_json())),
+        );
+        let Err(error) = access_token(
+            &rotation(),
+            &vault,
+            Provider::Microsoft,
+            "bob@outlook.example",
+        ) else {
+            return Err("an access token was handed out without a second look".into());
+        };
+        assert!(error.message().contains("replaced or removed"), "{error}");
+        assert_eq!(vault.inner.get(OUTLOOK), Some(other.to_json()));
+        assert_eq!(vault.stores(), 0);
         Ok(())
     }
 
@@ -862,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn two_renewals_that_rotate_at_once_leave_one_coherent_record() -> TestResult {
+    fn two_renewals_that_rotate_at_once_both_succeed_and_leave_one_coherent_record() -> TestResult {
         let vault = std::sync::Arc::new(Memory::new().with(OUTLOOK, &microsoft_record().to_json()));
         let outcomes: Vec<_> = (0..2)
             .map(|_| {
@@ -884,7 +997,7 @@ mod tests {
                 succeeded += 1;
             }
         }
-        assert!((1..=2).contains(&succeeded));
+        assert_eq!(succeeded, 2);
         let stored = Record::parse(&vault.get(OUTLOOK).ok_or("stored")?).ok_or("record")?;
         assert_eq!(stored.refresh_token, "M.R3_new");
         Ok(())
