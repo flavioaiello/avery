@@ -16,6 +16,7 @@ mod journal;
 mod json;
 mod jxa;
 mod localtime;
+mod lock;
 mod mailerror;
 mod osascript;
 mod provider;

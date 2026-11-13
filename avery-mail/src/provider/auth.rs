@@ -99,11 +99,11 @@ fn unreadable(provider: Provider) -> ToolError {
     ))
 }
 
-pub(crate) fn load_record(
+fn load_stored(
     vault: &dyn Vault,
     provider: Provider,
     address: &str,
-) -> ToolResult<Record> {
+) -> ToolResult<(String, Record)> {
     let name = account_id(provider, address)
         .ok_or_else(|| ToolError::msg("This account has no valid address."))?;
     let stored = vault.load(&name).map_err(|error| match error {
@@ -118,7 +118,16 @@ pub(crate) fn load_record(
             relink(provider)
         )));
     };
-    Record::parse(&text).ok_or_else(|| unreadable(provider))
+    let record = Record::parse(&text).ok_or_else(|| unreadable(provider))?;
+    Ok((text, record))
+}
+
+pub(crate) fn load_record(
+    vault: &dyn Vault,
+    provider: Provider,
+    address: &str,
+) -> ToolResult<Record> {
+    load_stored(vault, provider, address).map(|(_, record)| record)
 }
 
 fn refresh_form(oauth: &OAuth, record: &Record) -> String {
@@ -145,7 +154,7 @@ pub(crate) fn access_token(
     let oauth = provider
         .oauth()
         .ok_or_else(|| ToolError::internal("provider"))?;
-    let record = load_record(vault, provider, address)?;
+    let (stored, record) = load_stored(vault, provider, address)?;
     let request = Request::new(Method::Post, oauth.token, TOKEN_TIMEOUT)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(&refresh_form(oauth, &record));
@@ -188,7 +197,7 @@ pub(crate) fn access_token(
     };
     if let Some(next) = text_field(object, "refresh_token", MAX_TOKEN) {
         if next != record.refresh_token {
-            keep_rotated(vault, provider, address, record, next)?;
+            keep_rotated(vault, provider, address, &stored, record, next)?;
         }
     }
     Ok(token)
@@ -198,26 +207,26 @@ fn keep_rotated(
     vault: &dyn Vault,
     provider: Provider,
     address: &str,
+    stored: &str,
     loaded: Record,
     next: String,
 ) -> ToolResult<()> {
     let name = account_id(provider, address)
         .ok_or_else(|| ToolError::msg("This account has no valid address."))?;
-    if load_record(vault, provider, address)? != loaded {
-        return Err(ToolError::msg(format!(
-            "The sign-in of this account was replaced while it was being renewed, so nothing was stored or used. Retry the request. If it keeps failing: {}",
-            relink(provider)
-        )));
-    }
     let updated = Record {
         refresh_token: next,
         ..loaded
     };
-    vault.store(&name, &updated.to_json()).map_err(|error| {
-        ToolError::msg(format!(
+    match vault.replace(&name, stored, &updated.to_json()) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ToolError::msg(format!(
+            "The sign-in of this account was replaced or removed while it was being renewed, so nothing was stored or used. Retry the request. If it keeps failing: {}",
+            relink(provider)
+        ))),
+        Err(error) => Err(ToolError::msg(format!(
             "The renewed sign-in could not be stored in the Keychain ({error})."
-        ))
-    })
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -515,6 +524,10 @@ mod tests {
             Err(VaultError::Refused)
         }
 
+        fn replace(&self, _name: &str, _expected: &str, _secret: &str) -> Result<bool, VaultError> {
+            Err(VaultError::Refused)
+        }
+
         fn delete(&self, _name: &str) -> Result<(), VaultError> {
             Ok(())
         }
@@ -602,25 +615,33 @@ mod tests {
     impl Vault for Racing {
         fn load(&self, name: &str) -> Result<Option<String>, VaultError> {
             let count = self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let seen = self.inner.load(name);
             if count == 0 {
-                let seen = self.inner.load(name);
                 match &self.meddle {
                     Some(Meddle::Delete) => self.inner.delete(name)?,
                     Some(Meddle::Replace(text)) => self.inner.store(name, text)?,
                     Some(Meddle::Break) | None => {}
                 }
-                return seen;
             }
-            if matches!(self.meddle, Some(Meddle::Break)) {
-                return Err(VaultError::Unavailable("locked".to_string()));
-            }
-            self.inner.load(name)
+            seen
         }
 
         fn store(&self, name: &str, secret: &str) -> Result<(), VaultError> {
             self.stores
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.store(name, secret)
+        }
+
+        fn replace(&self, name: &str, expected: &str, secret: &str) -> Result<bool, VaultError> {
+            if matches!(self.meddle, Some(Meddle::Break)) {
+                return Err(VaultError::Unavailable("locked".to_string()));
+            }
+            let done = self.inner.replace(name, expected, secret)?;
+            if done {
+                self.stores
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(done)
         }
 
         fn delete(&self, name: &str) -> Result<(), VaultError> {
@@ -647,7 +668,7 @@ mod tests {
         ) else {
             return Err("an access token was handed out after the unlink".into());
         };
-        assert!(error.message().contains("not linked"), "{error}");
+        assert!(error.message().contains("replaced or removed"), "{error}");
         assert!(
             error.message().contains("avery mail link microsoft"),
             "{error}"
@@ -724,8 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rotated_token_is_not_stored_when_the_entry_became_unreadable_or_the_keychain_locked(
-    ) -> TestResult {
+    fn a_rotated_token_is_not_stored_when_the_entry_turned_into_garbage_meanwhile() -> TestResult {
         let vault = Racing::new(
             Memory::new().with(OUTLOOK, &microsoft_record().to_json()),
             Some(Meddle::Replace("garbage".into())),
@@ -738,9 +758,15 @@ mod tests {
         ) else {
             return Err("expected an error".into());
         };
-        assert!(error.message().contains("unreadable"), "{error}");
+        assert!(error.message().contains("replaced or removed"), "{error}");
         assert_eq!(vault.inner.get(OUTLOOK), Some("garbage".to_string()));
         assert_eq!(vault.stores(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_rotated_token_that_cannot_be_stored_because_the_keychain_is_unavailable_is_an_error(
+    ) -> TestResult {
         let locked = Racing::new(
             Memory::new().with(OUTLOOK, &microsoft_record().to_json()),
             Some(Meddle::Break),
@@ -754,7 +780,9 @@ mod tests {
             return Err("expected an error".into());
         };
         assert!(
-            error.message().contains("Keychain is not available"),
+            error
+                .message()
+                .contains("could not be stored in the Keychain (locked)"),
             "{error}"
         );
         assert_eq!(locked.stores(), 0);
@@ -766,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unchanged_entry_takes_the_rotated_token_after_one_check() -> TestResult {
+    fn an_unchanged_entry_takes_the_rotated_token_in_one_atomic_replace() -> TestResult {
         let vault = Racing::new(
             Memory::new().with(OUTLOOK, &microsoft_record().to_json()),
             None,
@@ -780,9 +808,34 @@ mod tests {
             )?,
             "EwB.late"
         );
-        assert_eq!((vault.loads(), vault.stores()), (2, 1));
+        assert_eq!((vault.loads(), vault.stores()), (1, 1));
         let stored = Record::parse(&vault.inner.get(OUTLOOK).ok_or("stored")?).ok_or("record")?;
         assert_eq!(stored.refresh_token, "M.R3_new");
+        Ok(())
+    }
+
+    #[test]
+    fn the_replace_expects_exactly_the_text_that_was_loaded_even_when_it_is_not_canonical(
+    ) -> TestResult {
+        let written = r#"{"scope": "offline_access User.Read Mail.Read Calendars.Read",  "refresh_token": "M.R3_old", "client_id": "ms-client"}"#;
+        assert_ne!(written, microsoft_record().to_json());
+        assert_eq!(Record::parse(written), Some(microsoft_record()));
+        let vault = Racing::new(Memory::new().with(OUTLOOK, written), None);
+        assert_eq!(
+            access_token(
+                &rotation(),
+                &vault,
+                Provider::Microsoft,
+                "bob@outlook.example"
+            )?,
+            "EwB.late"
+        );
+        let stored = vault.inner.get(OUTLOOK).ok_or("stored")?;
+        assert_eq!(
+            Record::parse(&stored).map(|record| record.refresh_token),
+            Some("M.R3_new".to_string())
+        );
+        assert_eq!(vault.stores(), 1);
         Ok(())
     }
 

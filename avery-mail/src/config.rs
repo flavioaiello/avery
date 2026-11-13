@@ -1,15 +1,15 @@
-use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::account::{self, Account};
 use crate::calendar::{self, Calendar};
 use crate::error::{ToolError, ToolResult};
 use crate::fake;
 use crate::json::{self, Json, Object};
+use crate::lock::{self, FileLock, LockError};
 use crate::rights::{Apple, Level, Refusal, Rights, CONFIG_VERSION};
 use crate::text::{clean, text_of};
 use crate::texts::{
@@ -19,8 +19,6 @@ use crate::texts::{
 
 const LINK_AGAIN: &str = "connect the accounts again with `avery mail link google` or `avery mail link microsoft` (Apple Mail and Calendar: `avery mail setup apple`)";
 const UNLINK_FIRST: &str = "Before the file goes, `avery mail unlink google:<address>` or `microsoft:<address>` removes the stored sign-in of each linked account.";
-const LOCK_WAIT: Duration = Duration::from_secs(5);
-const LOCK_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -37,16 +35,6 @@ pub(crate) enum UpdateError {
     Unreadable(ToolError),
     Refused(Refusal),
     Write(io::ErrorKind),
-}
-
-struct ConfigLock {
-    file: File,
-}
-
-impl Drop for ConfigLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,7 +69,7 @@ impl Settings {
             config_path: expanduser(&raw, lookup("HOME").as_deref()),
             fake: lookup("MAIL_MCP_FAKE").as_deref() == Some("1"),
             fake_write: lookup("MAIL_MCP_FAKE_WRITE").unwrap_or_default(),
-            lock_wait: LOCK_WAIT,
+            lock_wait: lock::WAIT,
         }
     }
 
@@ -95,6 +83,10 @@ impl Settings {
 
     pub(crate) fn lock_path(&self) -> String {
         join_path(&dirname(&self.config_path), "config.lock")
+    }
+
+    pub(crate) fn vault_lock_path(&self) -> String {
+        join_path(&dirname(&self.config_path), "vault.lock")
     }
 
     pub(crate) fn config_exists(&self) -> bool {
@@ -166,30 +158,11 @@ impl Settings {
         })
     }
 
-    fn lock(&self) -> Result<ConfigLock, UpdateError> {
-        let failed = |error: io::Error| UpdateError::Lock(error.kind());
-        make_dirs(&dirname(&self.config_path), 0o700).map_err(failed)?;
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(self.lock_path())
-            .map_err(failed)?;
-        let started = Instant::now();
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(ConfigLock { file }),
-                Err(TryLockError::Error(error)) => return Err(failed(error)),
-                Err(TryLockError::WouldBlock) => {
-                    let left = self.lock_wait.saturating_sub(started.elapsed());
-                    if left.is_zero() {
-                        return Err(UpdateError::Busy);
-                    }
-                    thread::sleep(LOCK_POLL.min(left));
-                }
-            }
-        }
+    fn lock(&self) -> Result<FileLock, UpdateError> {
+        lock::acquire(&self.lock_path(), self.lock_wait).map_err(|error| match error {
+            LockError::Busy => UpdateError::Busy,
+            LockError::Io(kind) => UpdateError::Lock(kind),
+        })
     }
 
     pub(crate) fn update_rights<T>(
@@ -510,6 +483,8 @@ mod tests {
     use std::collections::HashMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::mpsc;
+    use std::thread;
+    use std::time::Instant;
 
     fn account(provider: Provider, address: &str) -> Result<RemoteAccount, String> {
         RemoteAccount::new(provider, address).ok_or_else(|| format!("account {address}"))
@@ -524,7 +499,7 @@ mod tests {
             .map_err(|error| format!("{error:?}"))
     }
 
-    fn hold(settings: &Settings) -> Result<ConfigLock, String> {
+    fn hold(settings: &Settings) -> Result<FileLock, String> {
         settings.lock().map_err(|error| format!("{error:?}"))
     }
 
@@ -1252,19 +1227,6 @@ mod tests {
         assert!(matches!(s.lock(), Err(UpdateError::Busy)));
         drop(second);
         drop(hold(&s)?);
-        Ok(())
-    }
-
-    #[test]
-    fn dropping_the_lock_releases_it_even_while_a_copy_of_the_descriptor_lives_on() -> TestResult {
-        let dir = TempDir::new()?;
-        let mut s = settings_at(&dir.path("config.json"));
-        s.lock_wait = Duration::ZERO;
-        let first = hold(&s)?;
-        let inherited = first.file.try_clone()?;
-        drop(first);
-        drop(hold(&s)?);
-        drop(inherited);
         Ok(())
     }
 

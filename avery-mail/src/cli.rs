@@ -3287,24 +3287,71 @@ mod tests {
         apple: Untouchable,
     }
 
+    #[derive(Clone)]
+    struct Probe {
+        config_lock: String,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        violations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Probe {
+        fn new(config_lock: String) -> Probe {
+            Probe {
+                config_lock,
+                calls: Default::default(),
+                violations: Default::default(),
+            }
+        }
+
+        fn check(&self) {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if crate::lock::acquire(&self.config_lock, Duration::ZERO).is_err() {
+                self.violations.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn violations(&self) -> usize {
+            self.violations.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
     #[derive(Default)]
     struct Faults {
         on_store: Option<Box<dyn Fn()>>,
         fail_delete: bool,
+        probe: Option<Probe>,
     }
 
     impl Faults {
         fn on_store(hook: impl Fn() + 'static) -> Faults {
             Faults {
                 on_store: Some(Box::new(hook)),
-                fail_delete: false,
+                ..Faults::default()
             }
         }
 
         fn undeletable() -> Faults {
             Faults {
-                on_store: None,
                 fail_delete: true,
+                ..Faults::default()
+            }
+        }
+
+        fn probed(probe: &Probe) -> Faults {
+            Faults {
+                probe: Some(probe.clone()),
+                ..Faults::default()
+            }
+        }
+
+        fn probe(&self) {
+            if let Some(probe) = &self.probe {
+                probe.check();
             }
         }
     }
@@ -3316,17 +3363,30 @@ mod tests {
 
     impl crate::vault::Vault for Meddling {
         fn load(&self, name: &str) -> Result<Option<String>, crate::vault::VaultError> {
+            self.faults.probe();
             self.inner.load(name)
         }
 
         fn store(&self, name: &str, secret: &str) -> Result<(), crate::vault::VaultError> {
+            self.faults.probe();
             if let Some(hook) = &self.faults.on_store {
                 hook();
             }
             self.inner.store(name, secret)
         }
 
+        fn replace(
+            &self,
+            name: &str,
+            expected: &str,
+            secret: &str,
+        ) -> Result<bool, crate::vault::VaultError> {
+            self.faults.probe();
+            self.inner.replace(name, expected, secret)
+        }
+
         fn delete(&self, name: &str) -> Result<(), crate::vault::VaultError> {
+            self.faults.probe();
             if self.faults.fail_delete {
                 return Err(crate::vault::VaultError::Unavailable("locked".to_string()));
             }
@@ -4821,6 +4881,76 @@ mod tests {
             out.contains(&gm("alice@{gmail}  [gmail]  alice@{gmail}  [schreiben]  [Anmeldung fehlt, neu verbinden mit: avery mail link]")),
             "{out}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn no_vault_call_ever_happens_while_the_config_lock_is_held() -> TestResult {
+        let dir = TempDir::new()?;
+        let probe = Probe::new(settings_at(&dir.path("config.json")).lock_path());
+        let remote: Remote = vec![(
+            "alice@gmail.example",
+            Ok(vec![info(
+                "alice@gmail.example",
+                "alice@gmail.example",
+                true,
+            )]),
+        )];
+        let cloud = meddled(
+            &dir,
+            &gm(LINKED_GMAIL),
+            &[
+                (gm("google:alice@{gmail}").as_str(), WRITE_SCOPE),
+                ("microsoft:bob@outlook.example", "Mail.Read"),
+            ],
+            remote,
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(true)),
+            Faults::probed(&probe),
+        )?;
+        for (args, input) in [
+            (vec!["link", "google"], "id1\nsecret1\n2\n"),
+            (vec!["accounts"], ""),
+            (vec!["status"], ""),
+            (vec!["calendars"], ""),
+            (vec!["selftest"], ""),
+            (vec!["setup"], "\n\n\n\n\n\nj\n"),
+            (vec!["revoke"], ""),
+            (vec!["unlink", "bob@outlook.example"], "j\n"),
+            (vec!["unlink", "google:orphan@gmail.example"], "j\n"),
+        ] {
+            let (_, out) = run(&cloud.ctx, &args, input);
+            assert!(!out.contains("Ein anderer Avery-Befehl"), "{args:?}: {out}");
+        }
+        assert!(probe.calls() >= 8, "{}", probe.calls());
+        assert_eq!(probe.violations(), 0);
+        let refused = TempDir::new()?;
+        let second = Probe::new(settings_at(&refused.path("config.json")).lock_path());
+        let path = refused.path("config.json");
+        let accounts: Vec<String> = (0..16)
+            .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
+            .collect();
+        let full = format!(r#"{{"version": 3, "accounts": [{}]}}"#, accounts.join(","));
+        let faults = Faults {
+            probe: Some(second.clone()),
+            ..Faults::on_store(move || {
+                let _ = fs::write(&path, &full);
+            })
+        };
+        let rolled_back = meddled(
+            &refused,
+            r#"{"version": 3}"#,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+            faults,
+        )?;
+        let (code, out) = run(&rolled_back.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("wieder entfernt"), "{out}");
+        assert!(second.calls() >= 2, "{}", second.calls());
+        assert_eq!(second.violations(), 0);
         Ok(())
     }
 

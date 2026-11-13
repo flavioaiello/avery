@@ -394,6 +394,15 @@ impl Vault for Forgetful {
         Err(crate::vault::VaultError::Refused)
     }
 
+    fn replace(
+        &self,
+        _name: &str,
+        _expected: &str,
+        _secret: &str,
+    ) -> Result<bool, crate::vault::VaultError> {
+        Err(crate::vault::VaultError::Refused)
+    }
+
     fn delete(&self, _name: &str) -> Result<(), crate::vault::VaultError> {
         Ok(())
     }
@@ -426,10 +435,10 @@ impl Linker {
         }
     }
 
-    pub(crate) fn system() -> Linker {
+    pub(crate) fn system(vault_lock: &str) -> Linker {
         Linker::new(
             Box::new(crate::http::Curl::system()),
-            Box::new(crate::vault::Keychain::system()),
+            Box::new(crate::vault::Keychain::system(vault_lock)),
             Box::new(SystemBrowser),
         )
     }

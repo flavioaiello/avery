@@ -48,11 +48,12 @@ impl Context {
                 Linker::inert(),
             );
         }
+        let vault_lock = settings.vault_lock_path();
         Context::new(
             settings,
-            Box::new(Mail::system()),
-            Box::new(Calendars::system()),
-            Linker::system(),
+            Box::new(Mail::system(&vault_lock)),
+            Box::new(Calendars::system(&vault_lock)),
+            Linker::system(&vault_lock),
         )
     }
 }

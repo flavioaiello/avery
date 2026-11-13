@@ -543,11 +543,11 @@ impl Mail {
         }
     }
 
-    pub(crate) fn system() -> Mail {
+    pub(crate) fn system(vault_lock: &str) -> Mail {
         Mail::new(
             Box::new(RealBackend::system()),
             Box::new(Curl::system()),
-            Box::new(Keychain::system()),
+            Box::new(Keychain::system(vault_lock)),
             Box::new(OsascriptHost),
         )
     }
@@ -657,11 +657,11 @@ impl Calendars {
         }
     }
 
-    pub(crate) fn system() -> Calendars {
+    pub(crate) fn system(vault_lock: &str) -> Calendars {
         Calendars::new(
             Box::new(RealCalendar::system()),
             Box::new(Curl::system()),
-            Box::new(Keychain::system()),
+            Box::new(Keychain::system(vault_lock)),
             Box::new(OsascriptHost),
         )
     }
