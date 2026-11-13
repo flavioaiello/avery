@@ -96,6 +96,7 @@ impl MessageId {
         let text = text.trim();
         (!text.is_empty()
             && text.len() <= MAX_MESSAGE_ID
+            && !text.contains("..")
             && text
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "_=+/.-".contains(c)))
@@ -339,7 +340,8 @@ mod tests {
             Some("7".to_string())
         );
         for bad in [
-            "", "  ", "a b", "a\"b", "a\nb", "ä", "a;b", "a?b", "a#b", "a%b",
+            "", "  ", "a b", "a\"b", "a\nb", "ä", "a;b", "a?b", "a#b", "a%b", "..", "a..b", "../x",
+            "a/../b",
         ] {
             assert!(MessageId::parse(bad).is_none(), "{bad:?}");
         }

@@ -1100,15 +1100,14 @@ mod details {
                 "GET https://www.googleapis.com/calendar/v3/calendars/alice%40gmail.example/events/a%2Fb%3Fc%23d%20e%25f%C3%A4%26x%3D1?timeZone=Europe%2FZurich"
             ]
         );
-        for bad in ["", ".", ".."] {
+        for bad in ["", ".", "..", "...", "a..b", "../x"] {
             let transport = Scripted::new();
             assert_eq!(failure(read(&transport, bad))?, event_gone());
             assert!(transport.seen().is_empty());
         }
         let dotted = Scripted::new().json(Method::Get, "/events/", 404, "{}");
-        assert_eq!(failure(read(&dotted, "..."))?, event_gone());
         assert_eq!(failure(read(&dotted, "a.b"))?, event_gone());
-        assert_eq!(dotted.seen().len(), 2);
+        assert_eq!(dotted.seen().len(), 1);
         Ok(())
     }
 
@@ -2686,5 +2685,22 @@ mod writing {
             }
         }
         Ok(())
+    }
+}
+
+#[test]
+fn ids_that_could_walk_the_path_are_refused() {
+    for id in [
+        "alice@gmail.example",
+        "en.usa#holiday@group.v.calendar.google.com",
+        "abc123_20300101T100000Z",
+        "a/b",
+    ] {
+        assert!(usable_id(id), "{id:?}");
+        assert!(segment(id).is_some(), "{id:?}");
+    }
+    for id in ["", ".", "..", "a..b", "../x", "a/../b", "..%2Fx"] {
+        assert!(!usable_id(id), "{id:?}");
+        assert!(segment(id).is_none(), "{id:?}");
     }
 }

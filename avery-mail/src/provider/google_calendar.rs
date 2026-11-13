@@ -52,7 +52,7 @@ fn invalid_range() -> ToolError {
 }
 
 fn usable_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= MAX_ID && id != "." && id != ".."
+    !id.is_empty() && id.len() <= MAX_ID && id != "." && !id.contains("..")
 }
 
 fn segment(id: &str) -> Option<String> {

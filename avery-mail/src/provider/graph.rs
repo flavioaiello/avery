@@ -1674,7 +1674,6 @@ mod tests {
     fn ids_are_percent_encoded_in_the_path() -> TestResult {
         for (id, encoded) in [
             ("a+b/c=d.e-f_g", "a%2Bb%2Fc%3Dd.e-f_g"),
-            ("../../me", "..%2F..%2Fme"),
             ("a//b", "a%2F%2Fb"),
         ] {
             let transport = Scripted::new().json(Method::Get, "/messages/", 200, &message(vec![]));

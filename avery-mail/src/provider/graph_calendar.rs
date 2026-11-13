@@ -204,7 +204,7 @@ fn still_there() -> ToolError {
 }
 
 fn id_ok(id: &str) -> bool {
-    !id.is_empty() && id.len() <= MAX_ID
+    !id.is_empty() && id.len() <= MAX_ID && !id.contains("..")
 }
 
 fn checked_zone(zone: &str) -> ToolResult<&'static str> {

@@ -450,3 +450,15 @@ fn the_fixture_event_parses_as_the_fixture_fields() -> TestResult {
     assert_eq!(row.event.attendees, Some(0));
     Ok(())
 }
+
+#[test]
+fn ids_that_could_walk_the_path_are_refused() {
+    for id in ["AQMkAD-_=+", "a/b", "a+b/c=d.e-f_g"] {
+        assert!(id_ok(id), "{id:?}");
+    }
+    for id in ["", "..", "a..b", "../x", "a/../b", "..%2Fx"] {
+        assert!(!id_ok(id), "{id:?}");
+    }
+    assert!(checked_calendar("../x").is_err());
+    assert!(checked_calendar("AQMkCAL").is_ok());
+}
