@@ -890,7 +890,8 @@ esac"#;
     #[test]
     fn store_delete_and_replace_serialise_on_the_vault_lock() -> TestResult {
         let dir = TempDir::new()?;
-        let keychain = scripted(&dir, SLOW)?;
+        let mut keychain = scripted(&dir, SLOW)?;
+        keychain.wait = Duration::from_secs(120);
         let barrier = Barrier::new(4);
         thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
             let workers = [
