@@ -2537,8 +2537,8 @@ fn original() -> String {
             ("To", "Alice <alice@gmail.example>, Bob <bob@example.org>"),
             ("Cc", "carl@example.org"),
             ("Subject", "Plan"),
-            ("Message-ID", "<orig1@mail.example.org>"),
-            ("References", "<root@mail.example.org>"),
+            ("Message-ID", "<orig1@mail.example>"),
+            ("References", "<root@mail.example>"),
         ],
     )
 }
@@ -2610,13 +2610,10 @@ fn a_reply_goes_to_the_sender_and_joins_the_thread() -> TestResult {
     );
     assert_eq!(message.header("To"), Some("anna@example.org"));
     assert_eq!(message.header("Subject"), Some("Re: Plan"));
-    assert_eq!(
-        message.header("In-Reply-To"),
-        Some("<orig1@mail.example.org>")
-    );
+    assert_eq!(message.header("In-Reply-To"), Some("<orig1@mail.example>"));
     assert_eq!(
         message.header("References"),
-        Some("<root@mail.example.org> <orig1@mail.example.org>")
+        Some("<root@mail.example> <orig1@mail.example>")
     );
     assert_eq!(message.body, "Gerne, bis dann.");
     let shown = dialog_payload(&host)?;
@@ -2660,7 +2657,7 @@ fn reply_all_adds_the_other_recipients_but_not_the_own_addresses() -> TestResult
                 "carl@example.org, Alias@gmail.example, BOB@example.org",
             ),
             ("Subject", "re: Plan"),
-            ("Message-ID", "<orig1@mail.example.org>"),
+            ("Message-ID", "<orig1@mail.example>"),
         ],
     );
     let transport = replying(&original);
@@ -2681,10 +2678,7 @@ fn reply_all_adds_the_other_recipients_but_not_the_own_addresses() -> TestResult
         Some("anna@example.org, bob@example.org")
     );
     assert_eq!(message.header("Cc"), Some("carl@example.org"));
-    assert_eq!(
-        message.header("References"),
-        Some("<orig1@mail.example.org>")
-    );
+    assert_eq!(message.header("References"), Some("<orig1@mail.example>"));
     Ok(())
 }
 
@@ -2725,7 +2719,7 @@ fn an_own_message_is_answered_to_its_recipients() -> TestResult {
             ("From", "Alice <alice@gmail.example>"),
             ("To", "Anna <anna@example.org>, Bob <bob@example.org>"),
             ("Subject", "Plan"),
-            ("Message-ID", "<orig1@mail.example.org>"),
+            ("Message-ID", "<orig1@mail.example>"),
         ],
     );
     let transport = replying(&original);
@@ -3301,11 +3295,11 @@ fn long_ascii_subjects_and_recipient_lists_are_folded_and_unfold_to_the_original
         .collect::<Vec<_>>()
         .join(" ");
     let long = [
-        "firstname.lastname.one@subdomain.example.org",
-        "firstname.lastname.two@subdomain.example.org",
-        "firstname.lastname.three@subdomain.example.org",
-        "firstname.lastname.four@subdomain.example.org",
-        "firstname.lastname.five@subdomain.example.org",
+        "firstname.lastname.one@subdomain.example",
+        "firstname.lastname.two@subdomain.example",
+        "firstname.lastname.three@subdomain.example",
+        "firstname.lastname.four@subdomain.example",
+        "firstname.lastname.five@subdomain.example",
     ];
     let transport = sender().json(Method::Post, "/messages/send", 200, SENT_ANSWER);
     let host = Dialog::deciding("send");
@@ -3458,7 +3452,7 @@ fn an_unsafe_letter_is_refused_by_the_builder_stage() {
 fn usable_addresses_are_single_plain_tokens() {
     for good in [
         "alice@gmail.example",
-        "a.b+c@sub.example.org",
+        "a.b+c@sub.example",
         "o'neil@example.org",
         "x@y",
     ] {
