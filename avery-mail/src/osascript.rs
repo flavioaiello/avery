@@ -228,6 +228,64 @@ impl Host for OsascriptHost {
 }
 
 #[cfg(test)]
+pub(crate) mod clicks {
+    use super::*;
+    use crate::json::{self, Json};
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    pub(crate) struct Clicks {
+        click: &'static str,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Clicks {
+        pub(crate) fn new(click: &'static str) -> Clicks {
+            Clicks {
+                click,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        pub(crate) fn dialogs(&self) -> Vec<String> {
+            self.seen
+                .lock()
+                .map(|seen| seen.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl Host for Clicks {
+        fn ensure_running(&self, _app: App) {}
+
+        fn run(&self, _app: App, payload: &str, _timeout: Duration) -> Finished {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(payload.to_string());
+            }
+            let op = match json::parse(payload) {
+                Ok(Json::Obj(object)) => object
+                    .get("op")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => String::new(),
+            };
+            let decision = match (op.as_str(), self.click) {
+                ("approve_send", "yes") => "send",
+                ("approve_change", "yes") => "approved",
+                (_, "timeout") => "timeout",
+                _ => "declined",
+            };
+            Finished::Done {
+                code: Some(0),
+                stdout: format!("{{\"ok\": true, \"data\": {{\"decision\": \"{decision}\"}}}}"),
+                stderr: String::new(),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

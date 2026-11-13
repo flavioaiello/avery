@@ -378,6 +378,14 @@ pub(crate) mod scripted {
         }
     }
 
+    pub(crate) struct Shared(pub(crate) std::sync::Arc<Scripted>);
+
+    impl Transport for Shared {
+        fn send(&self, request: &Request) -> Result<Response, HttpError> {
+            self.0.send(request)
+        }
+    }
+
     pub(crate) fn ok(body: &str) -> Result<Response, HttpError> {
         Ok(Response {
             status: 200,
