@@ -222,7 +222,7 @@ function changeEvent(cal, req) {
   if (!cal.writable()) { throw new Error('calendar_read_only'); }
   if (req.action === 'create') {
     localDate(after.start); localDate(after.end);
-    if (Array.from(after.notes).length > 1200) { throw new Error('notes_too_long'); }
+    if (Array.from(after.notes).length > (req.undo ? 4000 : 1200)) { throw new Error('notes_too_long'); }
   } else {
     ev = verifiedEvent(cal, req);
     if (req.action === 'update') { localDate(after.start); localDate(after.end); }

@@ -1100,6 +1100,32 @@ function run(argv) {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_undo_may_recreate_an_event_with_long_notes_but_a_new_event_may_not() -> TestResult {
+        let notes = "n".repeat(3000);
+        let kept = fields_json("A", "2030-05-06 09:00", "2030-05-06 10:00", "", &notes);
+        let undone = change("[]", &change_request("create", "", "null", &kept, true), "")?;
+        assert!(undone.ok, "{}", undone.error);
+        assert_eq!((undone.status.as_str(), undone.created), ("applied", 1));
+        let new = change(
+            "[]",
+            &change_request("create", "", "null", &kept, false),
+            "",
+        )?;
+        assert_eq!(new.error, "notes_too_long");
+        let huge = fields_json(
+            "A",
+            "2030-05-06 09:00",
+            "2030-05-06 10:00",
+            "",
+            &"n".repeat(4100),
+        );
+        let refused = change("[]", &change_request("create", "", "null", &huge, true), "")?;
+        assert_eq!(refused.error, "notes_too_long");
+        Ok(())
+    }
+
     #[test]
     fn a_change_request_carries_the_snapshots_and_a_longer_deadline() -> TestResult {
         let (backend, script) = backend(vec![ok(

@@ -1,5 +1,5 @@
 class Avery < Formula
-  desc "Private AI agent for macOS: Goose, a local model and an Apple Mail bridge"
+  desc "Private AI agent for macOS: Goose, a local model and an Apple Mail and Calendar bridge"
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,
@@ -67,6 +67,8 @@ class Avery < Formula
     JSON
     output = pipe_output("#{bin}/avery-mail serve", requests)
     assert_match "list_messages", output
+    assert_match "list_events", output
     refute_match "send_message", output
+    refute_match "create_event", output
   end
 end

@@ -1,5 +1,5 @@
 #!/bin/bash
-# avery - private AI agent on macOS: Goose Desktop + local model (Splash) + Apple Mail bridge.
+# avery - private AI agent on macOS: Goose Desktop + local model (Splash) + Apple Mail and Calendar bridge.
 # Layout (same in the git checkout and in the Homebrew prefix):
 #   bin/avery  bin/avery-mail  libexec/avery-make-app  share/avery/...
 set -euo pipefail
@@ -169,7 +169,7 @@ install_file() {
 
 usage() {
   cat <<EOF
-avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Apple-Mail-Anbindung)
+avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Apple-Mail- und Kalender-Anbindung)
 
 Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
