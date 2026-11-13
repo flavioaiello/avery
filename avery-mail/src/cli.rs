@@ -11,7 +11,7 @@ use crate::calendar::{
 use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
 use crate::config::{UpdateError, WriteSettings};
-use crate::console::{ask_levels, failed, level_word, Choice, Console};
+use crate::console::{failed, level_word, Choice, Console, Topic};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::localtime;
@@ -357,7 +357,7 @@ fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights
         "  Kalender: {}",
         granted(&calendar_grants(rights))
     ));
-    if !console.confirm("Korrekt? [j/N] ") {
+    if !console.confirm("Korrekt?") {
         console.say("Abgebrochen.");
         return 1;
     }
@@ -366,8 +366,8 @@ fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights
         .update_rights(|fresh| fresh.apply(before, rights))
     {
         Ok(()) => {
-            console.say(&format!("Gespeichert in {}", ctx.settings.config_path));
-            console.say("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
+            console.hint(&format!("Gespeichert in {}", ctx.settings.config_path));
+            console.hint("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
             0
         }
         Err(error) => update_failed(ctx, console, &error),
@@ -375,23 +375,95 @@ fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights
 }
 
 fn explain_levels(ctx: &Context, console: &mut Console, rights: &Rights) {
-    console.say("Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.");
+    console.hint("Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.");
     console
-        .say("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Entwuerfe, Senden und Termine aendern,");
-    console.say("jedes Mal erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
-    console.say(&format!(
+        .hint("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Entwuerfe, Senden und Termine aendern,");
+    console.hint("jedes Mal erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
+    console.hint(&format!(
         "Mail-Grenzen: Klartext, kein Bcc, keine Anhaenge, max. {MAX_RECIPIENTS} Empfaenger, max. {MAX_SEND_CHARS} Zeichen pro gesendeter Mail,"
     ));
-    console.say(&format!(
+    console.hint(&format!(
         "         max. {MAX_SEND_LINES} Zeilen, max. {} gesendete Mails und max. {MAX_DRAFTS_PER_HOUR} Entwuerfe pro Stunde. Jeder Versuch steht in {}",
         rights.sends_per_hour,
         ctx.settings.sendlog_path()
     ));
-    console.say(&format!(
+    console.hint(&format!(
         "Kalender-Grenzen: nur einzelne Termine ohne Teilnehmer und ohne Wiederholung, max. {} Aenderungen pro Stunde. Jeder Versuch steht in {}",
         rights.changes_per_hour,
         ctx.settings.changes_path()
     ));
+}
+
+fn known_calendars(
+    console: &mut Console,
+    account: &RemoteAccount,
+    listing: ToolResult<Vec<Listed>>,
+) -> Option<Vec<Listed>> {
+    match listing {
+        Ok(listed) => Some(listed),
+        Err(error) => {
+            console.say(&format!(
+                "Hinweis: Kalender von {} nicht lesbar ({error}); deren Freigaben bleiben unveraendert.",
+                account.address()
+            ));
+            None
+        }
+    }
+}
+
+fn setup_calendars(
+    console: &mut Console,
+    account: &mut RemoteAccount,
+    listed: Vec<Listed>,
+) -> Result<(), u8> {
+    let choices: Vec<Choice> = listed
+        .iter()
+        .map(|entry| {
+            let writable = entry.info.writable && entry.write_capable;
+            let highest = if writable { Level::Write } else { Level::Read };
+            Choice {
+                title: if writable {
+                    one_line_str(&entry.info.name, 120)
+                } else {
+                    format!(
+                        "{} [schreibgeschuetzt]",
+                        one_line_str(&entry.info.name, 120)
+                    )
+                },
+                current: account
+                    .calendars
+                    .iter()
+                    .find(|grant| grant.id == entry.info.id)
+                    .map(|grant| grant.level.min(highest)),
+                highest,
+            }
+        })
+        .collect();
+    let levels = console.ask_levels(&choices)?;
+    let gone: Vec<String> = account
+        .calendars
+        .iter()
+        .filter(|grant| !listed.iter().any(|entry| entry.info.id == grant.id))
+        .map(|grant| grant.name.clone())
+        .collect();
+    if !gone.is_empty() {
+        console.say(&format!(
+            "Nicht mehr vorhanden, wird entfernt: {}",
+            gone.join(", ")
+        ));
+    }
+    account.calendars = listed
+        .into_iter()
+        .zip(levels)
+        .filter_map(|(entry, level)| {
+            level.map(|level| CalendarGrant {
+                id: entry.info.id,
+                name: entry.info.name,
+                level,
+            })
+        })
+        .collect();
+    Ok(())
 }
 
 fn setup_account(
@@ -411,69 +483,16 @@ fn setup_account(
     } else {
         Level::Read
     };
-    let mut choices = vec![Choice {
+    let mail = Choice {
         title: format!("Mail{}", link_note(ctx, account)),
         current: account.mail.map(|level| level.min(mail_highest)),
         highest: mail_highest,
-    }];
-    let listed = match listing {
-        Ok(listed) => Some(listed),
-        Err(error) => {
-            console.say(&format!(
-                "Hinweis: Kalender von {} nicht lesbar ({error}); deren Freigaben bleiben unveraendert.",
-                account.address()
-            ));
-            None
-        }
     };
-    if let Some(listed) = &listed {
-        choices.extend(listed.iter().map(|entry| {
-            let writable = entry.info.writable && entry.write_capable;
-            let highest = if writable { Level::Write } else { Level::Read };
-            Choice {
-                title: if writable {
-                    one_line_str(&entry.info.name, 120)
-                } else {
-                    format!(
-                        "{} [schreibgeschuetzt]",
-                        one_line_str(&entry.info.name, 120)
-                    )
-                },
-                current: account
-                    .calendars
-                    .iter()
-                    .find(|grant| grant.id == entry.info.id)
-                    .map(|grant| grant.level.min(highest)),
-                highest,
-            }
-        }));
-    }
-    let mut levels = ask_levels(console, &choices)?.into_iter();
-    account.mail = levels.next().flatten();
+    let listed = known_calendars(console, account, listing);
+    let levels = console.ask_levels(&[mail])?;
+    account.mail = levels.into_iter().next().flatten();
     if let Some(listed) = listed {
-        let gone: Vec<String> = account
-            .calendars
-            .iter()
-            .filter(|grant| !listed.iter().any(|entry| entry.info.id == grant.id))
-            .map(|grant| grant.name.clone())
-            .collect();
-        if !gone.is_empty() {
-            console.say(&format!(
-                "Nicht mehr vorhanden, wird entfernt: {}",
-                gone.join(", ")
-            ));
-        }
-        account.calendars = listed
-            .into_iter()
-            .zip(levels)
-            .filter_map(|(entry, level)| {
-                level.map(|level| CalendarGrant {
-                    id: entry.info.id,
-                    name: entry.info.name,
-                    level,
-                })
-            })
-            .collect();
+        setup_calendars(console, account, listed)?;
     }
     Ok(())
 }
@@ -498,7 +517,7 @@ fn setup_apple_entries(console: &mut Console, apple: &mut Apple) -> Result<(), u
             highest: Level::Write,
         }))
         .collect();
-    let mut levels = ask_levels(console, &choices)?.into_iter();
+    let mut levels = console.ask_levels(&choices)?.into_iter();
     apple.mail = apple
         .mail
         .drain(..)
@@ -578,11 +597,9 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
         Err(error) => return failed(console, &error),
     };
     let before = rights.clone();
-    console.say(&format!(
-        "{} einbeziehen (optional). Dazu startet Avery Mail und Kalender;",
-        Provider::Apple.display()
-    ));
-    console.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
+    if !console.explain(Topic::AppleAccess) {
+        return 1;
+    }
     let mail = match ctx.backend.all_accounts() {
         Ok(found) => unique(found.into_iter().map(sanitized).collect(), |account| {
             account.id.as_str()
@@ -656,7 +673,7 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
             }
         }))
         .collect();
-    let levels = match ask_levels(console, &choices) {
+    let levels = match console.ask_levels(&choices) {
         Ok(levels) => levels,
         Err(code) => return code,
     };
@@ -764,15 +781,6 @@ fn cmd_revoke(ctx: &Context, console: &mut Console) -> u8 {
     0
 }
 
-fn prompt_level(console: &mut Console) -> Option<bool> {
-    let answer = console.ask("Stufe: 1 = lesen, 2 = schreiben (Entwuerfe, Senden, Termine aendern; jedes Mal mit Klick) [1]: ")?;
-    match answer.trim() {
-        "" | "1" => Some(false),
-        "2" => Some(true),
-        _ => None,
-    }
-}
-
 fn abandon(ctx: &Context, console: &mut Console, provider: Provider, address: &str) {
     match ctx.linker.unlink(provider, address) {
         Ok(()) => {
@@ -790,78 +798,54 @@ fn abandon(ctx: &Context, console: &mut Console, provider: Provider, address: &s
     }
 }
 
-fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 {
-    if !editable(ctx, console) {
-        return 1;
-    }
-    let Some(provider) = provider.and_then(Provider::parse_remote) else {
-        console.say(&format!(
-            "Benutzung: avery mail link {}",
-            Provider::remote_ids(" | ")
-        ));
-        return 2;
-    };
-    let Some(oauth) = provider.oauth() else {
+struct LinkDone {
+    address: String,
+    relinked: bool,
+    level: Option<Level>,
+}
+
+fn link_account(ctx: &Context, console: &mut Console, provider: Provider) -> Result<LinkDone, u8> {
+    if provider.oauth().is_none() {
         console.say("Dieser Anbieter braucht keine Anmeldung.");
-        return 2;
-    };
+        return Err(2);
+    }
     let rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
-        Err(error) => return failed(console, &error),
+        Err(error) => return Err(failed(console, &error)),
     };
     if rights.accounts.len() >= MAX_ACCOUNTS {
         console.say(&format!(
             "Hinweis: Es sind schon {MAX_ACCOUNTS} Konten verbunden. Erneut verbinden geht nur fuer ein schon verbundenes Konto, ein neues wird abgelehnt."
         ));
     }
-    for line in oauth.registration {
-        console.say(line);
+    if !console.explain(Topic::Registration(provider)) {
+        return Err(1);
     }
-    console.say(&format!(
-        "Details: README, Abschnitt '{}'.",
-        Provider::remote_names(" and ")
-    ));
-    console.say("Avery speichert die Anmeldung im macOS-Schluesselbund (Dienst avery-mail), nie in einer Datei.");
-    console.say(
-        "Der Agent bekommt nur das, was du danach mit 'avery mail setup' oder hier freigibst.",
-    );
-    let Some(id) = console.ask("Client-ID: ") else {
-        console.say("Ungueltige Eingabe.");
-        return 1;
-    };
-    let secret = if oauth.secret {
-        let Some(secret) = console.ask("Client-Secret: ") else {
-            console.say("Ungueltige Eingabe.");
-            return 1;
-        };
-        secret
-    } else {
-        String::new()
+    let Some((id, secret)) = console.ask_client(provider) else {
+        return Err(1);
     };
     let client = match Client::new(provider, &id, &secret) {
         Ok(client) => client,
         Err(error) => {
             console.say(&format!("Fehler: {error}"));
-            return 1;
+            return Err(1);
         }
     };
-    let Some(write) = prompt_level(console) else {
-        console.say("Ungueltige Eingabe.");
-        return 1;
+    let Some(write) = console.ask_write() else {
+        return Err(1);
     };
-    console.say("\nDer Browser oeffnet sich. Melde dich an und erlaube den Zugriff. Falls nicht, oeffne diese Adresse:");
-    let mut announce = |url: &str| console.say(&format!("  {url}"));
+    let mut announce = |url: &str| console.browser(url);
     let linked = match ctx.linker.link(provider, &client, write, &mut announce) {
         Ok(linked) => linked,
         Err(error) => {
             console.say(&format!("Fehler: {error}"));
-            return 1;
+            return Err(1);
         }
     };
     let Some(mut fresh) = RemoteAccount::new(provider, &linked.address) else {
         console.say("Fehler: Die Adresse des Kontos ist nicht verwendbar.");
         abandon(ctx, console, provider, &linked.address);
-        return 1;
+        return Err(1);
     };
     fresh.mail = Some(if write && linked.write_mail {
         Level::Write
@@ -877,26 +861,47 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         rights.add_account(fresh)?;
         Ok((false, level))
     });
-    let (relinked, level) = match saved {
-        Ok(done) => done,
+    match saved {
+        Ok((relinked, level)) => Ok(LinkDone {
+            address: linked.address,
+            relinked,
+            level,
+        }),
         Err(error) => {
             let code = update_failed(ctx, console, &error);
             abandon(ctx, console, provider, &linked.address);
-            return code;
+            Err(code)
         }
+    }
+}
+
+fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 {
+    if !editable(ctx, console) {
+        return 1;
+    }
+    let Some(provider) = provider.and_then(Provider::parse_remote) else {
+        console.say(&format!(
+            "Benutzung: avery mail link {}",
+            Provider::remote_ids(" | ")
+        ));
+        return 2;
+    };
+    let done = match link_account(ctx, console, provider) {
+        Ok(done) => done,
+        Err(code) => return code,
     };
     console.say(&format!(
         "\n{}: {} ({}). Mail: {}.",
-        if relinked {
+        if done.relinked {
             "Erneut verbunden"
         } else {
             "Verbunden"
         },
-        linked.address,
+        done.address,
         provider.kind(),
-        level_word(level)
+        level_word(done.level)
     ));
-    if relinked {
+    if done.relinked {
         console.say("Freigaben bleiben wie sie waren, hoechstens abgesenkt auf das, was die neue Anmeldung erlaubt.");
     }
     console.say("Kalender freigeben: avery mail setup. Pruefen: avery mail selftest");
@@ -970,12 +975,10 @@ fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 
         return 1;
     }
     let question = if configured {
-        format!(
-            "{address} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht. [j/N] "
-        )
+        format!("{address} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht.")
     } else {
         format!(
-            "{}:{address} steht nicht in der Konfiguration, aber seine Anmeldung liegt noch im Schluesselbund. Anmeldung loeschen? [j/N] ",
+            "{}:{address} steht nicht in der Konfiguration, aber seine Anmeldung liegt noch im Schluesselbund. Anmeldung loeschen?",
             provider.as_str()
         )
     };
@@ -1231,7 +1234,7 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         title_of(entry),
         undo_text(entry)
     ));
-    if !console.confirm("Rueckgaengig machen? Ein Freigabedialog erscheint. [j/N] ") {
+    if !console.confirm("Rueckgaengig machen? Ein Freigabedialog erscheint.") {
         console.say("Abgebrochen.");
         return 1;
     }
@@ -1624,9 +1627,7 @@ fn selftest_write_mail(
                 console.say(&format!("FAIL  Entwurf: {error}"));
             }
         }
-        if console
-            .confirm("\n3) Test-Mail an dich selbst senden? Der Freigabedialog erscheint. [j/N] ")
-        {
+        if console.confirm("\n3) Test-Mail an dich selbst senden? Der Freigabedialog erscheint.") {
             let send = self_message(
                 Mode::Send,
                 vec![own.clone()],
@@ -1650,9 +1651,9 @@ fn selftest_write_mail(
                 }
             }
         }
-        if console.confirm(
-            "\n4) Antworten testen: Entwurf und Antwort auf die Test-Mail an dich selbst? [j/N] ",
-        ) {
+        if console
+            .confirm("\n4) Antworten testen: Entwurf und Antwort auf die Test-Mail an dich selbst?")
+        {
             console.say(
                 "   Suche die Test-Mail 'Scout Selbsttest - Mail' im Posteingang (bis zu 60 s) ...",
             );
@@ -1794,7 +1795,7 @@ fn selftest_write_calendar(
         "\nKalender-Test fuer {}. Es wird ein Test-Termin angelegt, geaendert und wieder geloescht, jeweils mit Freigabedialog.",
         one_line_str(&calendar.label, 80)
     ));
-    if !console.confirm("Test-Termin anlegen? Der Freigabedialog erscheint. [j/N] ") {
+    if !console.confirm("Test-Termin anlegen? Der Freigabedialog erscheint.") {
         return;
     }
     let created_fields = EventFields {
@@ -1824,7 +1825,7 @@ fn selftest_write_calendar(
         return;
     };
     let mut current = created.after.clone().unwrap_or(created_fields);
-    if console.confirm("Test-Termin aendern (Titel)? Der Freigabedialog erscheint. [j/N] ") {
+    if console.confirm("Test-Termin aendern (Titel)? Der Freigabedialog erscheint.") {
         let after = EventFields {
             summary: "Scout Selbsttest - Termin geaendert (bitte loeschen)".to_string(),
             ..current.clone()
@@ -1843,7 +1844,7 @@ fn selftest_write_calendar(
             current = changed.after.clone().unwrap_or(after);
         }
     }
-    if console.confirm("Test-Termin loeschen? Der Freigabedialog erscheint. [j/N] ") {
+    if console.confirm("Test-Termin loeschen? Der Freigabedialog erscheint.") {
         let change = Change::Delete {
             uid,
             before: current,
@@ -1879,7 +1880,7 @@ fn selftest_write_all_day(
         return;
     };
     if !console.confirm(
-        "Ganztaegigen Test-Termin anlegen? Das prueft, wie Calendar das Ende von Ganztagsterminen speichert. [j/N] ",
+        "Ganztaegigen Test-Termin anlegen? Das prueft, wie Calendar das Ende von Ganztagsterminen speichert.",
     ) {
         return;
     }
@@ -1932,7 +1933,7 @@ fn selftest_write_all_day(
         }
     }
     let current = created.after.clone().unwrap_or(fields);
-    if console.confirm("Ganztaegigen Test-Termin loeschen? Der Freigabedialog erscheint. [j/N] ") {
+    if console.confirm("Ganztaegigen Test-Termin loeschen? Der Freigabedialog erscheint.") {
         let change = Change::Delete {
             uid,
             before: current,

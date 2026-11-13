@@ -1,11 +1,19 @@
 use std::io::{BufRead, Write};
 
 use crate::error::ToolError;
+use crate::provider::Provider;
 use crate::rights::Level;
 use crate::server::{self, Line};
 
 const MAX_ANSWER_BYTES: usize = 8192;
 const LEVEL_ATTEMPTS: usize = 3;
+const INVALID: &str = "Ungueltige Eingabe.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Topic {
+    Registration(Provider),
+    AppleAccess,
+}
 
 pub(crate) struct Console<'a> {
     pub(crate) input: &'a mut dyn BufRead,
@@ -17,6 +25,10 @@ impl Console<'_> {
         let _ = writeln!(self.out, "{text}");
     }
 
+    pub(crate) fn hint(&mut self, text: &str) {
+        self.say(text);
+    }
+
     pub(crate) fn ask(&mut self, prompt: &str) -> Option<String> {
         let _ = write!(self.out, "{prompt}");
         let _ = self.out.flush();
@@ -26,13 +38,107 @@ impl Console<'_> {
         }
     }
 
-    pub(crate) fn confirm(&mut self, prompt: &str) -> bool {
-        self.ask(prompt).is_some_and(|answer| {
-            matches!(
-                answer.trim().to_lowercase().as_str(),
-                "j" | "ja" | "y" | "yes"
-            )
-        })
+    pub(crate) fn confirm(&mut self, question: &str) -> bool {
+        self.ask(&format!("{question} [j/N] "))
+            .is_some_and(|answer| {
+                matches!(
+                    answer.trim().to_lowercase().as_str(),
+                    "j" | "ja" | "y" | "yes"
+                )
+            })
+    }
+
+    pub(crate) fn explain(&mut self, topic: Topic) -> bool {
+        match topic {
+            Topic::Registration(provider) => {
+                for line in provider.oauth().map_or(&[][..], |oauth| oauth.registration) {
+                    self.say(line);
+                }
+                self.say(&format!(
+                    "Details: README, Abschnitt '{}'.",
+                    Provider::remote_names(" and ")
+                ));
+                self.say("Avery speichert die Anmeldung im macOS-Schluesselbund (Dienst avery-mail), nie in einer Datei.");
+                self.say("Der Agent bekommt nur das, was du danach mit 'avery mail setup' oder hier freigibst.");
+            }
+            Topic::AppleAccess => {
+                self.say(&format!(
+                    "{} einbeziehen (optional). Dazu startet Avery Mail und Kalender;",
+                    Provider::Apple.display()
+                ));
+                self.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
+            }
+        }
+        true
+    }
+
+    pub(crate) fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
+        let Some(id) = self.ask("Client-ID: ") else {
+            self.say(INVALID);
+            return None;
+        };
+        if !provider.oauth().is_some_and(|oauth| oauth.secret) {
+            return Some((id, String::new()));
+        }
+        let Some(secret) = self.ask("Client-Secret: ") else {
+            self.say(INVALID);
+            return None;
+        };
+        Some((id, secret))
+    }
+
+    pub(crate) fn ask_write(&mut self) -> Option<bool> {
+        let answer = self.ask("Stufe: 1 = lesen, 2 = schreiben (Entwuerfe, Senden, Termine aendern; jedes Mal mit Klick) [1]: ");
+        match answer.as_deref().map(str::trim) {
+            Some("" | "1") => Some(false),
+            Some("2") => Some(true),
+            _ => {
+                self.say(INVALID);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn browser(&mut self, url: &str) {
+        self.say("\nDer Browser oeffnet sich. Melde dich an und erlaube den Zugriff. Falls nicht, oeffne diese Adresse:");
+        self.say(&format!("  {url}"));
+    }
+
+    pub(crate) fn ask_levels(&mut self, choices: &[Choice]) -> Result<Vec<Option<Level>>, u8> {
+        let mut chosen = Vec::with_capacity(choices.len());
+        for choice in choices {
+            let prompt = format!(
+                "{}  (aktuell: {})  Stufe 0=aus 1=lesen 2=schreiben, Enter=unveraendert: ",
+                choice.title,
+                level_word(choice.current)
+            );
+            let mut answer = None;
+            for _ in 0..LEVEL_ATTEMPTS {
+                let Some(line) = self.ask(&prompt) else {
+                    self.say(INVALID);
+                    return Err(1);
+                };
+                match line.trim() {
+                    "" => answer = Some(choice.current),
+                    "0" => answer = Some(None),
+                    "1" => answer = Some(Some(Level::Read)),
+                    "2" if choice.highest == Level::Write => answer = Some(Some(Level::Write)),
+                    "2" => self.say("Dieser Eintrag ist schreibgeschuetzt (hoechstens Stufe 1)."),
+                    _ => self.say(INVALID),
+                }
+                if answer.is_some() {
+                    break;
+                }
+            }
+            match answer {
+                Some(level) => chosen.push(level),
+                None => {
+                    self.say("Zu viele ungueltige Eingaben.");
+                    return Err(1);
+                }
+            }
+        }
+        Ok(chosen)
     }
 }
 
@@ -53,46 +159,6 @@ pub(crate) struct Choice {
     pub(crate) title: String,
     pub(crate) current: Option<Level>,
     pub(crate) highest: Level,
-}
-
-pub(crate) fn ask_levels(
-    console: &mut Console,
-    choices: &[Choice],
-) -> Result<Vec<Option<Level>>, u8> {
-    let mut chosen = Vec::with_capacity(choices.len());
-    for choice in choices {
-        let prompt = format!(
-            "{}  (aktuell: {})  Stufe 0=aus 1=lesen 2=schreiben, Enter=unveraendert: ",
-            choice.title,
-            level_word(choice.current)
-        );
-        let mut answer = None;
-        for _ in 0..LEVEL_ATTEMPTS {
-            let Some(line) = console.ask(&prompt) else {
-                console.say("Ungueltige Eingabe.");
-                return Err(1);
-            };
-            match line.trim() {
-                "" => answer = Some(choice.current),
-                "0" => answer = Some(None),
-                "1" => answer = Some(Some(Level::Read)),
-                "2" if choice.highest == Level::Write => answer = Some(Some(Level::Write)),
-                "2" => console.say("Dieser Eintrag ist schreibgeschuetzt (hoechstens Stufe 1)."),
-                _ => console.say("Ungueltige Eingabe."),
-            }
-            if answer.is_some() {
-                break;
-            }
-        }
-        match answer {
-            Some(level) => chosen.push(level),
-            None => {
-                console.say("Zu viele ungueltige Eingaben.");
-                return Err(1);
-            }
-        }
-    }
-    Ok(chosen)
 }
 
 #[cfg(test)]
@@ -123,7 +189,7 @@ mod tests {
                 input: &mut reader,
                 out: &mut out,
             };
-            ask_levels(&mut console, &choices())
+            console.ask_levels(&choices())
         };
         (result, String::from_utf8_lossy(&out).into_owned())
     }
@@ -163,6 +229,148 @@ mod tests {
         let (result, out) = asked(&long);
         assert_eq!(result, Err(1));
         assert!(out.contains("Ungueltige Eingabe."));
+    }
+
+    fn terminal(input: &str) -> (Vec<u8>, Cursor<Vec<u8>>) {
+        (Vec::new(), Cursor::new(input.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn a_confirmation_adds_the_choice_marker_and_accepts_only_yes_words() {
+        for (input, expected) in [
+            ("j\n", true),
+            (" Ja \n", true),
+            ("y\n", true),
+            ("YES\n", true),
+            ("\n", false),
+            ("n\n", false),
+            ("jein\n", false),
+            ("", false),
+        ] {
+            let (mut out, mut reader) = terminal(input);
+            let mut console = Console {
+                input: &mut reader,
+                out: &mut out,
+            };
+            assert_eq!(console.confirm("Korrekt?"), expected, "{input:?}");
+            assert_eq!(String::from_utf8_lossy(&out), "Korrekt? [j/N] ");
+        }
+    }
+
+    #[test]
+    fn a_hint_is_printed_like_a_line_of_text() {
+        let (mut out, mut reader) = terminal("");
+        let mut console = Console {
+            input: &mut reader,
+            out: &mut out,
+        };
+        console.hint("eins");
+        console.say("zwei");
+        assert_eq!(String::from_utf8_lossy(&out), "eins\nzwei\n");
+    }
+
+    #[test]
+    fn the_client_is_asked_with_a_secret_only_where_the_provider_needs_one() {
+        let (mut out, mut reader) = terminal("id-1\nsecret-1\n");
+        let mut console = Console {
+            input: &mut reader,
+            out: &mut out,
+        };
+        assert_eq!(
+            console.ask_client(Provider::Google),
+            Some(("id-1".to_string(), "secret-1".to_string()))
+        );
+        assert_eq!(String::from_utf8_lossy(&out), "Client-ID: Client-Secret: ");
+        let (mut out, mut reader) = terminal("id-2\nignored\n");
+        let mut console = Console {
+            input: &mut reader,
+            out: &mut out,
+        };
+        assert_eq!(
+            console.ask_client(Provider::Microsoft),
+            Some(("id-2".to_string(), String::new()))
+        );
+        assert_eq!(String::from_utf8_lossy(&out), "Client-ID: ");
+        for (input, shown) in [("", "Client-ID: "), ("id\n", "Client-ID: Client-Secret: ")] {
+            let (mut out, mut reader) = terminal(input);
+            let mut console = Console {
+                input: &mut reader,
+                out: &mut out,
+            };
+            assert_eq!(console.ask_client(Provider::Google), None, "{input:?}");
+            assert_eq!(String::from_utf8_lossy(&out), format!("{shown}{INVALID}\n"));
+        }
+    }
+
+    #[test]
+    fn the_write_level_defaults_to_read_and_refuses_nonsense() {
+        for (input, expected) in [
+            ("\n", Some(false)),
+            ("1\n", Some(false)),
+            (" 2 \n", Some(true)),
+            ("3\n", None),
+            ("x\n", None),
+            ("", None),
+        ] {
+            let (mut out, mut reader) = terminal(input);
+            let mut console = Console {
+                input: &mut reader,
+                out: &mut out,
+            };
+            assert_eq!(console.ask_write(), expected, "{input:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out).contains(INVALID),
+                expected.is_none(),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn topics_are_explained_in_lines_and_never_stop_the_command_line() {
+        for provider in Provider::remote() {
+            let (mut out, mut reader) = terminal("");
+            let mut console = Console {
+                input: &mut reader,
+                out: &mut out,
+            };
+            assert!(console.explain(Topic::Registration(provider)));
+            let text = String::from_utf8_lossy(&out).into_owned();
+            let registration = provider.oauth().map_or(&[][..], |oauth| oauth.registration);
+            assert!(!registration.is_empty());
+            for line in registration {
+                assert!(text.contains(line), "{text}");
+            }
+            assert!(text.contains("Schluesselbund"), "{text}");
+        }
+        let (mut out, mut reader) = terminal("");
+        let mut console = Console {
+            input: &mut reader,
+            out: &mut out,
+        };
+        assert!(console.explain(Topic::AppleAccess));
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("Automation-Berechtigung"), "{text}");
+        assert!(
+            text.contains("Apple Mail und Kalender einbeziehen"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_browser_hint_names_the_address() {
+        let (mut out, mut reader) = terminal("");
+        let mut console = Console {
+            input: &mut reader,
+            out: &mut out,
+        };
+        console.browser("https://accounts.example/auth?x=1");
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("Der Browser oeffnet sich"), "{text}");
+        assert!(
+            text.ends_with("  https://accounts.example/auth?x=1\n"),
+            "{text}"
+        );
     }
 
     #[test]
