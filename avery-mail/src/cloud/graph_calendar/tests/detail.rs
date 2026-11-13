@@ -405,6 +405,33 @@ fn unknown_ids_are_not_found() -> TestResult {
 }
 
 #[test]
+fn an_unknown_zone_is_refused_by_name_before_any_request() -> TestResult {
+    let transport = Scripted::new();
+    for zone in ["Mars/Olympus", "W. Europe Standard Time", ""] {
+        let error = refusal(event(&api(&transport), CAL, EV, zone))?;
+        assert!(error.message().contains("time zone of this Mac"), "{zone}");
+    }
+    let error = refusal(event(&api(&transport), CAL, EV, "Mars/Olympus"))?;
+    assert!(error.message().contains("(Mars/Olympus)"), "{error}");
+    assert!(transport.seen().is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_detail_in_another_zone_than_the_one_asked_for_is_refused() -> TestResult {
+    for label in ["Europe/Zurich", "Pacific Standard Time", "UTC"] {
+        let ev = Ev {
+            start: ("2026-11-20T09:00:00.0000000", label),
+            end: ("2026-11-20T10:00:00.0000000", label),
+            ..Ev::default()
+        };
+        let error = refusal(read(&serve(&ev)))?;
+        assert!(error.message().contains("time zone of this Mac"), "{label}");
+    }
+    Ok(())
+}
+
+#[test]
 fn cancelled_events_are_not_returned() -> TestResult {
     let ev = Ev {
         cancelled: true,
@@ -452,7 +479,7 @@ fn a_shifted_all_day_detail_is_resolved_by_a_second_lookup_in_utc() -> TestResul
         EV,
         "2026-11-20T01:00:00.0000000",
         "2026-11-21T01:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let second = format!(
         concat!(
@@ -489,7 +516,7 @@ fn a_shifted_all_day_detail_is_resolved_by_a_second_lookup_in_utc() -> TestResul
         EV,
         "2026-11-20T00:00:00.0000000",
         "2026-11-21T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let transport = serve(&aligned);
     assert_eq!(
@@ -506,12 +533,12 @@ fn a_failing_second_lookup_fails_the_detail() -> TestResult {
         EV,
         "2026-11-20T01:00:00.0000000",
         "2026-11-21T01:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let wrong_zone = format!(
         concat!(
             "{{\"id\": {}, \"start\": {{\"dateTime\": \"2026-11-20T00:00:00.0000000\", ",
-            "\"timeZone\": \"Europe/Zurich\"}}, \"end\": {{\"dateTime\": \"2026-11-21T00:00:00.0000000\", ",
+            "\"timeZone\": \"W. Europe Standard Time\"}}, \"end\": {{\"dateTime\": \"2026-11-21T00:00:00.0000000\", ",
             "\"timeZone\": \"UTC\"}}}}"
         ),
         q(EV)

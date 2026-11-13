@@ -261,8 +261,8 @@ fn a_window_at_the_edge_of_the_calendar_is_refused_before_any_request() -> TestR
 fn events_are_filtered_by_the_local_window() -> TestResult {
     let at = |id: &'static str, start: &'static str, end: &'static str| Ev {
         id,
-        start: (start, ZONE),
-        end: (end, ZONE),
+        start: (start, WINDOWS),
+        end: (end, WINDOWS),
         ..Ev::default()
     };
     let items = [
@@ -609,8 +609,8 @@ fn too_many_events_are_refused() -> TestResult {
 #[test]
 fn events_outside_the_window_do_not_count_against_the_limit() -> TestResult {
     let old = Ev {
-        start: ("2026-11-10T09:00:00.0000000", ZONE),
-        end: ("2026-11-10T10:00:00.0000000", ZONE),
+        start: ("2026-11-10T09:00:00.0000000", WINDOWS),
+        end: ("2026-11-10T10:00:00.0000000", WINDOWS),
         ..Ev::default()
     }
     .json();
@@ -645,8 +645,8 @@ fn a_calendar_that_does_not_exist_is_reported() -> TestResult {
 #[test]
 fn malformed_events_fail_closed() -> TestResult {
     let base = Ev::default().json();
-    let start = "{\"dateTime\": \"2026-11-20T09:00:00.0000000\", \"timeZone\": \"Europe/Zurich\"}";
-    let end = "{\"dateTime\": \"2026-11-20T10:00:00.0000000\", \"timeZone\": \"Europe/Zurich\"}";
+    let start = "{\"dateTime\": \"2026-11-20T09:00:00.0000000\", \"timeZone\": \"W. Europe Standard Time\"}";
+    let end = "{\"dateTime\": \"2026-11-20T10:00:00.0000000\", \"timeZone\": \"W. Europe Standard Time\"}";
     let cases: Vec<(&str, String)> = vec![
         ("string", "\"x\"".to_string()),
         ("number", "5".to_string()),
@@ -674,7 +674,7 @@ fn malformed_events_fail_closed() -> TestResult {
         ("end text", base.replace(end, "[]")),
         (
             "start without time",
-            base.replace(start, "{\"timeZone\": \"Europe/Zurich\"}"),
+            base.replace(start, "{\"timeZone\": \"W. Europe Standard Time\"}"),
         ),
         (
             "start without zone",
@@ -738,21 +738,23 @@ fn a_malformed_page_fails_closed() -> TestResult {
 
 #[test]
 fn times_in_another_zone_are_refused() -> TestResult {
-    let utc = Ev {
-        start: ("2026-11-20T08:00:00.0000000", "UTC"),
-        end: ("2026-11-20T09:00:00.0000000", "UTC"),
-        ..Ev::default()
-    };
-    let windows = Ev {
-        start: ("2026-11-20T09:00:00.0000000", "W. Europe Standard Time"),
-        end: ("2026-11-20T10:00:00.0000000", "W. Europe Standard Time"),
+    let at = |zone: &'static str| Ev {
+        start: ("2026-11-20T09:00:00.0000000", zone),
+        end: ("2026-11-20T10:00:00.0000000", zone),
         ..Ev::default()
     };
     let mixed = Ev {
         end: ("2026-11-20T09:00:00.0000000", "UTC"),
         ..Ev::default()
     };
-    for ev in [utc, windows, mixed] {
+    for ev in [
+        at("UTC"),
+        at("Pacific Standard Time"),
+        at("Central Europe Standard Time"),
+        at("Europe/Zurich"),
+        at("Etc/UTC"),
+        mixed,
+    ] {
         let transport =
             Scripted::new().json(Method::Get, "/calendarView?", 200, &page(&[ev.json()]));
         let error = refusal(events(&api(&transport), CAL, week()?, ZONE))?;
@@ -763,10 +765,10 @@ fn times_in_another_zone_are_refused() -> TestResult {
 }
 
 #[test]
-fn zone_labels_are_compared_without_regard_to_case_and_utc_spellings() -> TestResult {
+fn an_echoed_windows_name_is_accepted_and_compared_without_regard_to_case() -> TestResult {
     let lower = Ev {
-        start: ("2026-11-20T09:00:00.0000000", "europe/zurich"),
-        end: ("2026-11-20T10:00:00.0000000", "EUROPE/ZURICH"),
+        start: ("2026-11-20T09:00:00.0000000", "w. europe standard time"),
+        end: ("2026-11-20T10:00:00.0000000", "W. EUROPE STANDARD TIME"),
         ..Ev::default()
     };
     let transport =
@@ -774,7 +776,7 @@ fn zone_labels_are_compared_without_regard_to_case_and_utc_spellings() -> TestRe
     assert_eq!(events(&api(&transport), CAL, week()?, ZONE)?.len(), 1);
     let utc = Ev {
         start: ("2026-11-20T09:00:00.0000000", "UTC"),
-        end: ("2026-11-20T10:00:00.0000000", "Etc/UTC"),
+        end: ("2026-11-20T10:00:00.0000000", "utc"),
         ..Ev::default()
     };
     let transport = Scripted::new().json(Method::Get, "/calendarView?", 200, &page(&[utc.json()]));
@@ -783,6 +785,60 @@ fn zone_labels_are_compared_without_regard_to_case_and_utc_spellings() -> TestRe
     let seen = transport.seen();
     let request = seen.first().ok_or("request")?;
     assert_eq!(header(request, "Prefer"), Some(PREFER_UTC));
+    Ok(())
+}
+
+#[test]
+fn every_zone_is_asked_for_and_accepted_by_its_windows_name() -> TestResult {
+    let cases = [
+        ("Europe/Zurich", "W. Europe Standard Time"),
+        ("Europe/Berlin", "W. Europe Standard Time"),
+        ("America/New_York", "Eastern Standard Time"),
+        ("Asia/Tokyo", "Tokyo Standard Time"),
+        ("Asia/Kolkata", "India Standard Time"),
+        ("UTC", "UTC"),
+        ("Etc/UTC", "UTC"),
+    ];
+    for (zone, windows) in cases {
+        let ev = Ev {
+            start: ("2026-11-20T09:00:00.0000000", windows),
+            end: ("2026-11-20T10:00:00.0000000", windows),
+            ..Ev::default()
+        };
+        let transport =
+            Scripted::new().json(Method::Get, "/calendarView?", 200, &page(&[ev.json()]));
+        let found = events(&api(&transport), CAL, week()?, zone)?;
+        assert_eq!(found.len(), 1, "{zone}");
+        let seen = transport.seen();
+        let request = seen.first().ok_or("request")?;
+        assert_eq!(
+            header(request, "Prefer"),
+            Some(format!("outlook.timezone=\"{windows}\", IdType=\"ImmutableId\"").as_str()),
+            "{zone}"
+        );
+        let other = Ev {
+            start: ("2026-11-20T09:00:00.0000000", "Mars Standard Time"),
+            end: ("2026-11-20T10:00:00.0000000", "Mars Standard Time"),
+            ..Ev::default()
+        };
+        let transport =
+            Scripted::new().json(Method::Get, "/calendarView?", 200, &page(&[other.json()]));
+        let error = refusal(events(&api(&transport), CAL, week()?, zone))?;
+        assert!(error.message().contains("time zone of this Mac"), "{zone}");
+        let iana = Ev {
+            start: ("2026-11-20T09:00:00.0000000", zone),
+            end: ("2026-11-20T10:00:00.0000000", zone),
+            ..Ev::default()
+        };
+        if zone != windows {
+            let transport =
+                Scripted::new().json(Method::Get, "/calendarView?", 200, &page(&[iana.json()]));
+            assert!(
+                events(&api(&transport), CAL, week()?, zone).is_err(),
+                "{zone}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -798,6 +854,8 @@ fn unsafe_zones_and_calendar_ids_never_reach_a_request() -> TestResult {
         "../etc",
         "/etc/localtime",
         "Europe/Z\u{fc}rich",
+        "Mars/Olympus",
+        "W. Europe Standard Time",
         long.as_str(),
     ] {
         let error = refusal(events(&api(&transport), CAL, week()?, zone))?;
@@ -805,7 +863,11 @@ fn unsafe_zones_and_calendar_ids_never_reach_a_request() -> TestResult {
             error.message().contains("time zone of this Mac"),
             "{zone:?}: {error}"
         );
+        assert!(!error.message().contains(['\r', '\n']), "{zone:?}: {error}");
     }
+    let error = refusal(events(&api(&transport), CAL, week()?, "Mars/Olympus"))?;
+    assert!(error.message().contains("(Mars/Olympus)"), "{error}");
+    assert!(error.message().contains("not known"), "{error}");
     let too_long = "c".repeat(513);
     for calendar in ["", too_long.as_str()] {
         let error = refusal(events(&api(&transport), calendar, week()?, ZONE))?;

@@ -6,11 +6,12 @@ fn prefer(zone: &str) -> String {
 
 fn view(
     zone: &'static str,
+    label: &'static str,
     shifted: (&'static str, &'static str),
     utc: (&str, &str),
 ) -> Res<(Vec<RawEvent>, Scripted)> {
     let second = page(&[utc_item("AD1", true, utc.0, utc.1)]);
-    let first = page(&[Ev::all_day("AD1", shifted.0, shifted.1, zone).json()]);
+    let first = page(&[Ev::all_day("AD1", shifted.0, shifted.1, label).json()]);
     let transport = Scripted::new()
         .json(Method::Get, "$select=id,start,end,isAllDay", 200, &second)
         .json(Method::Get, "/calendarView?", 200, &first);
@@ -28,13 +29,13 @@ fn all_day_events_created_in_the_mac_zone_come_out_as_whole_dates() -> TestResul
         "single",
         "2026-11-21T00:00:00.0000000",
         "2026-11-22T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let long = Ev::all_day(
         "long",
         "2026-11-23T00:00:00.0000000",
         "2026-11-26T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let items = [single.json(), long.json()];
     let transport = Scripted::new().json(Method::Get, "/calendarView?", 200, &page(&items));
@@ -98,6 +99,7 @@ fn all_day_events_at_midnight_are_dates_whatever_label_the_provider_gives() -> T
 fn shifted_all_day_events_east_of_utc_are_resolved_from_the_utc_view() -> TestResult {
     let (found, transport) = view(
         ZONE,
+        WINDOWS,
         ("2026-11-20T01:00:00.0000000", "2026-11-21T01:00:00.0000000"),
         ("2026-11-20T00:00:00.0000000", "2026-11-21T00:00:00.0000000"),
     )?;
@@ -126,6 +128,7 @@ fn shifted_all_day_events_east_of_utc_are_resolved_from_the_utc_view() -> TestRe
 fn shifted_all_day_events_west_of_utc_are_resolved_from_the_utc_view() -> TestResult {
     let (found, transport) = view(
         "America/Los_Angeles",
+        "Pacific Standard Time",
         ("2026-11-19T16:00:00.0000000", "2026-11-20T16:00:00.0000000"),
         ("2026-11-20T00:00:00.0000000", "2026-11-21T00:00:00.0000000"),
     )?;
@@ -137,7 +140,7 @@ fn shifted_all_day_events_west_of_utc_are_resolved_from_the_utc_view() -> TestRe
     assert_eq!(seen.len(), 2);
     assert_eq!(
         seen.first().and_then(|r| header(r, "Prefer")),
-        Some(prefer("America/Los_Angeles").as_str())
+        Some(prefer("Pacific Standard Time").as_str())
     );
     assert_eq!(
         seen.get(1).and_then(|r| header(r, "Prefer")),
@@ -150,6 +153,7 @@ fn shifted_all_day_events_west_of_utc_are_resolved_from_the_utc_view() -> TestRe
 fn shifted_all_day_events_far_east_of_utc_are_resolved_from_the_utc_view() -> TestResult {
     let (found, transport) = view(
         "Pacific/Auckland",
+        "New Zealand Standard Time",
         ("2026-11-20T13:00:00.0000000", "2026-11-21T13:00:00.0000000"),
         ("2026-11-20T00:00:00.0000000", "2026-11-21T00:00:00.0000000"),
     )?;
@@ -165,6 +169,7 @@ fn shifted_all_day_events_far_east_of_utc_are_resolved_from_the_utc_view() -> Te
 fn an_all_day_event_made_in_a_third_zone_is_resolved_by_its_utc_time() -> TestResult {
     let (found, _) = view(
         "America/Los_Angeles",
+        "Pacific Standard Time",
         ("2026-11-19T15:00:00.0000000", "2026-11-20T15:00:00.0000000"),
         ("2026-11-19T23:00:00.0000000", "2026-11-20T23:00:00.0000000"),
     )?;
@@ -174,6 +179,7 @@ fn an_all_day_event_made_in_a_third_zone_is_resolved_by_its_utc_time() -> TestRe
     );
     let (found, _) = view(
         ZONE,
+        WINDOWS,
         ("2026-11-20T11:00:00.0000000", "2026-11-21T11:00:00.0000000"),
         ("2026-11-20T10:00:00.0000000", "2026-11-21T10:00:00.0000000"),
     )?;
@@ -188,6 +194,7 @@ fn an_all_day_event_made_in_a_third_zone_is_resolved_by_its_utc_time() -> TestRe
 fn a_shifted_multi_day_event_keeps_its_length() -> TestResult {
     let (found, _) = view(
         ZONE,
+        WINDOWS,
         ("2026-11-23T01:00:00.0000000", "2026-11-26T01:00:00.0000000"),
         ("2026-11-23T00:00:00.0000000", "2026-11-26T00:00:00.0000000"),
     )?;
@@ -226,13 +233,13 @@ fn the_utc_view_is_only_requested_when_an_event_needs_it() -> TestResult {
         "aligned",
         "2026-11-24T00:00:00.0000000",
         "2026-11-25T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let shifted = Ev::all_day(
         "shifted",
         "2026-11-21T01:00:00.0000000",
         "2026-11-22T01:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let items = [timed.json(), shifted.json(), aligned.json()];
     let second = page(&[
@@ -275,12 +282,14 @@ fn the_utc_view_is_only_requested_when_an_event_needs_it() -> TestResult {
 fn a_resolved_all_day_event_outside_the_window_is_dropped() -> TestResult {
     let (found, _) = view(
         ZONE,
+        WINDOWS,
         ("2026-11-27T01:00:00.0000000", "2026-11-28T01:00:00.0000000"),
         ("2026-11-27T00:00:00.0000000", "2026-11-28T00:00:00.0000000"),
     )?;
     assert!(found.is_empty());
     let (found, _) = view(
         ZONE,
+        WINDOWS,
         ("2026-11-19T01:00:00.0000000", "2026-11-20T01:00:00.0000000"),
         ("2026-11-19T00:00:00.0000000", "2026-11-20T00:00:00.0000000"),
     )?;
@@ -294,7 +303,7 @@ fn an_all_day_event_that_vanished_between_the_two_views_is_an_error() -> TestRes
         "AD1",
         "2026-11-20T01:00:00.0000000",
         "2026-11-21T01:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let second = page(&[utc_item(
         "other",
@@ -320,12 +329,12 @@ fn the_utc_view_must_really_be_in_utc_and_readable() -> TestResult {
         "AD1",
         "2026-11-20T01:00:00.0000000",
         "2026-11-21T01:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let wrong = concat!(
         "{\"id\": \"AD1\", \"isAllDay\": true, ",
-        "\"start\": {\"dateTime\": \"2026-11-20T01:00:00.0000000\", \"timeZone\": \"Europe/Zurich\"}, ",
-        "\"end\": {\"dateTime\": \"2026-11-21T01:00:00.0000000\", \"timeZone\": \"Europe/Zurich\"}}"
+        "\"start\": {\"dateTime\": \"2026-11-20T01:00:00.0000000\", \"timeZone\": \"W. Europe Standard Time\"}, ",
+        "\"end\": {\"dateTime\": \"2026-11-21T01:00:00.0000000\", \"timeZone\": \"W. Europe Standard Time\"}}"
     )
     .to_string();
     let broken = [
@@ -362,7 +371,7 @@ fn the_utc_view_is_paged_with_the_same_bounds() -> TestResult {
         "AD1",
         "2026-11-20T01:00:00.0000000",
         "2026-11-21T01:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let link = |number: usize| format!("{}&$skiptoken=U{number}", utc_url());
     let mut transport = Scripted::new();
@@ -400,13 +409,13 @@ fn nonsense_all_day_spans_are_repaired_to_a_single_day() -> TestResult {
         "empty",
         "2026-11-21T00:00:00.0000000",
         "2026-11-21T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let backwards = Ev::all_day(
         "backwards",
         "2026-11-24T00:00:00.0000000",
         "2026-11-23T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let transport = Scripted::new().json(
         Method::Get,

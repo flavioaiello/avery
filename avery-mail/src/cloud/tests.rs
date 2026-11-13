@@ -836,9 +836,7 @@ fn a_google_calendar_change_needs_the_click_and_is_logged_with_its_origin() -> T
     Ok(())
 }
 
-#[test]
-fn an_outlook_calendar_is_listed_through_the_tools_in_local_time() -> TestResult {
-    let zone = crate::localtime::zone().ok_or("zone")?;
+fn outlook_listing(zone: &str) -> Result<(Wired, Result<String, ToolError>), Box<dyn Error>> {
     let item = format!(
         r#"{{"value": [{{"id": "EV1", "subject": "Zahnarzt", "start": {{"dateTime": "2030-05-06T09:00:00.0000000", "timeZone": "{zone}"}}, "end": {{"dateTime": "2030-05-06T10:00:00.0000000", "timeZone": "{zone}"}}, "isAllDay": false, "location": {{"displayName": "Praxis"}}, "attendees": [], "isCancelled": false}}]}}"#
     );
@@ -852,17 +850,45 @@ fn an_outlook_calendar_is_listed_through_the_tools_in_local_time() -> TestResult
         "no",
     )?;
     let listed =
-        crate::calendar::list_events(&wired.ctx, &args(r#"{"start": "2030-05-06", "days": 2}"#)?)?;
+        crate::calendar::list_events(&wired.ctx, &args(r#"{"start": "2030-05-06", "days": 2}"#)?);
+    Ok((wired, listed))
+}
+
+fn asked_zone(wired: &Wired) -> Result<String, Box<dyn Error>> {
+    let views = calls(wired, Method::Get, "/calendarView");
+    let [view] = views.as_slice() else {
+        return Err(format!("one calendar view, saw {}", views.len()).into());
+    };
+    let prefer = header(view, "Prefer").ok_or("Prefer header")?;
+    let zone = prefer
+        .strip_prefix("outlook.timezone=\"")
+        .and_then(|rest| rest.split_once('"'))
+        .map(|(zone, _)| zone.to_string())
+        .ok_or("time zone preference")?;
+    Ok(zone)
+}
+
+#[test]
+fn an_outlook_calendar_is_listed_through_the_tools_in_local_time() -> TestResult {
+    let iana = crate::localtime::zone().ok_or("zone")?;
+    let (probe, listed) = outlook_listing("Probe Standard Time")?;
+    let Err(refused) = listed else {
+        return Err("an unexpected zone must be refused".into());
+    };
+    assert!(
+        refused.message().contains("time zone of this Mac"),
+        "{refused}"
+    );
+    let asked = asked_zone(&probe)?;
+    assert!(!asked.is_empty() && !asked.contains('/'), "{asked}");
+    assert!(asked == "UTC" || asked != iana, "{asked} {iana}");
+
+    let (wired, listed) = outlook_listing(&asked)?;
+    let listed = listed?;
     assert!(listed.contains("Zahnarzt"), "{listed}");
     assert!(listed.contains("09:00-10:00"), "{listed}");
     assert!(listed.contains("Praxis"), "{listed}");
-    let view = calls(&wired, Method::Get, "/calendarView");
-    assert_eq!(view.len(), 1);
-    assert!(
-        header(&view[0], "Prefer").is_some_and(|value| value.contains(&zone)),
-        "{:?}",
-        header(&view[0], "Prefer")
-    );
+    assert_eq!(asked_zone(&wired)?, asked);
     let refused = crate::calendar::create_event(
         &wired.ctx,
         &args(r#"{"summary": "x", "start": "2030-05-07 10:00"}"#)?,
