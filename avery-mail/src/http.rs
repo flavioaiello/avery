@@ -119,7 +119,11 @@ impl Request {
     }
 
     pub(crate) fn body(mut self, body: &str) -> Request {
-        if body.len() > REQUEST_LIMIT {
+        if body.len() > REQUEST_LIMIT
+            || body
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
             self.refused = true;
         }
         self.body = Some(body.to_string());
@@ -440,6 +444,13 @@ mod tests {
         assert!(get(url).header("X", "ä").refused());
         assert!(!get(url).body("x").refused());
         assert!(get(url).body(&"x".repeat(REQUEST_LIMIT + 1)).refused());
+        assert!(!get(url).body("a\nb\r\tc ä").refused());
+        for control in ["\u{0}", "\u{1b}", "\u{7f}", "\u{85}"] {
+            assert!(
+                get(url).body(&format!("a{control}b")).refused(),
+                "{control:?}"
+            );
+        }
     }
 
     #[test]

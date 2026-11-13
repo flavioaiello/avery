@@ -252,6 +252,56 @@ mod tests {
     }
 
     #[test]
+    fn input_reaches_standard_input_and_is_optional() {
+        assert_eq!(
+            run_fed(
+                "/bin/cat",
+                &[],
+                b"hello",
+                Duration::from_secs(5),
+                1024,
+                1024
+            ),
+            Finished::Done {
+                code: Some(0),
+                stdout: "hello".into(),
+                stderr: String::new()
+            }
+        );
+        assert_eq!(
+            run_fed("/bin/cat", &[], b"", Duration::from_secs(5), 1024, 1024),
+            Finished::Done {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn a_child_that_ignores_its_input_does_not_block_the_caller() {
+        let big = vec![b'x'; 4 * 1024 * 1024];
+        let started = Instant::now();
+        let finished = run_fed(
+            "/bin/sh",
+            &["-c", "printf done"],
+            &big,
+            Duration::from_secs(10),
+            1024,
+            1024,
+        );
+        assert_eq!(
+            finished,
+            Finished::Done {
+                code: Some(0),
+                stdout: "done".into(),
+                stderr: String::new()
+            }
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn a_missing_program_is_reported_as_not_started() {
         assert_eq!(
             run_command("/nonexistent/program", &[], Duration::from_secs(1)),
