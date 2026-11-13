@@ -558,9 +558,14 @@ mod tests {
         assert_eq!(s.config_path, "/home/x/.avery/mail/config.json");
         assert_eq!(s.sendlog_path(), "/home/x/.avery/mail/sendlog.jsonl");
         assert_eq!(s.changes_path(), "/home/x/.avery/mail/changes.jsonl");
+        assert_eq!(
+            s.onboard_marker_path(),
+            "/home/x/.avery/mail/onboard.dismissed"
+        );
         assert!(!s.fake);
         let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x"), ("AVERY_HOME", "/opt/av/")]));
         assert_eq!(s.config_path, "/opt/av/mail/config.json");
+        assert_eq!(s.onboard_marker_path(), "/opt/av/mail/onboard.dismissed");
         let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x"), ("AVERY_HOME", "~/own")]));
         assert_eq!(s.config_path, "/home/x/own/mail/config.json");
         let s = Settings::from_lookup(&lookup(&[
@@ -570,6 +575,7 @@ mod tests {
         ]));
         assert_eq!(s.config_path, "/etc/c.json");
         assert_eq!(s.sendlog_path(), "/etc/sendlog.jsonl");
+        assert_eq!(s.onboard_marker_path(), "/etc/onboard.dismissed");
         let s = Settings::from_lookup(&lookup(&[
             ("HOME", "/home/x"),
             ("MAIL_MCP_CONFIG", ""),
@@ -590,6 +596,22 @@ mod tests {
             let s = Settings::from_lookup(&lookup(&[("MAIL_MCP_FAKE", value)]));
             assert_eq!(s.fake, expected, "{value:?}");
         }
+    }
+
+    #[test]
+    fn only_the_exact_value_one_switches_the_setup_dialogs_off() {
+        for (value, expected) in [
+            ("1", true),
+            ("true", false),
+            ("0", false),
+            ("", false),
+            (" 1", false),
+            ("yes", false),
+        ] {
+            let s = Settings::from_lookup(&lookup(&[("AVERY_NO_ONBOARD", value)]));
+            assert_eq!(s.no_onboard, expected, "{value:?}");
+        }
+        assert!(!Settings::from_lookup(&lookup(&[])).no_onboard);
     }
 
     #[test]

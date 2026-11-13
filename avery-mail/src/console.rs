@@ -244,6 +244,7 @@ pub(crate) struct Choice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TestResult;
     use std::io::Cursor;
 
     fn choices() -> Vec<Choice> {
@@ -421,6 +422,28 @@ mod tests {
             text.ends_with("  https://accounts.example/auth?x=1\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_dialog_console_shows_lines_with_the_next_question_and_drops_the_hints() -> TestResult {
+        use crate::testutil::{Reply, Script};
+        let script = Script::new()
+            .then("ask_buttons", Reply::Button(1))
+            .then("notify", Reply::Done)
+            .then("ask_text", Reply::text("42"));
+        let mut talk = Talk::new();
+        let mut console = Console::Dialogs(Dialogs::new(&script, &mut talk));
+        console.say("Neue Freigaben:");
+        console.hint("Goose danach neu starten.");
+        assert!(console.confirm("Korrekt?"));
+        console.browser("https://accounts.example/auth?state=geheim");
+        assert_eq!(console.ask("Nummer?"), Some("42".to_string()));
+        let seen = script.seen();
+        assert_eq!(seen[0].text("text"), "Neue Freigaben:\n\nKorrekt?");
+        assert!(!seen[1].payload.contains("geheim"), "{}", seen[1].payload);
+        assert_eq!(seen[2].text("text"), "Nummer?");
+        assert!(script.mismatches().is_empty());
+        Ok(())
     }
 
     #[test]

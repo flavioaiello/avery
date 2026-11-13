@@ -974,6 +974,28 @@ mod tests {
     }
 
     #[test]
+    fn button_labels_are_cleaned_and_bounded_like_every_other_text() -> TestResult {
+        let script = Script::new().then("ask_buttons", Reply::Button(1));
+        let mut talk = Talk::new();
+        let long = "L".repeat(500);
+        let answer = Dialogs::new(&script, &mut talk).ask_buttons(&Buttons {
+            text: "x",
+            buttons: &["Ab\u{202e}bre\u{200b}chen", &long],
+            default: 1,
+            cancel: Some(0),
+            icon: Icon::Note,
+        });
+        assert_eq!(answer, Ok(1));
+        let names = script.seen()[0].field("buttons").ok_or("buttons")?;
+        let names = names.as_array().ok_or("array")?;
+        assert_eq!(names[0].as_str(), Some("Abbrechen"));
+        let second = names[1].as_str().ok_or("label")?;
+        assert!(chars(second) <= MAX_LABEL + 6, "{}", chars(second));
+        assert!(!second.contains('\n'));
+        Ok(())
+    }
+
+    #[test]
     fn a_button_that_does_not_exist_is_not_believed() -> TestResult {
         for reply in [
             Reply::Button(2),

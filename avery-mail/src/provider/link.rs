@@ -256,7 +256,7 @@ fn wait_for_code(
                                 &mut stream,
                                 "200 OK",
                                 "Avery",
-                                "Sign-in complete. You can close this window and go back to the terminal.",
+                                "Sign-in complete. You can close this window and go back to Avery.",
                             );
                             return Ok(code);
                         }

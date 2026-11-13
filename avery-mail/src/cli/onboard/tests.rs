@@ -1709,3 +1709,149 @@ fn the_command_is_listed_in_the_help_and_among_the_suggestions() {
     assert_eq!(crate::cli::closest_command("onbord"), Some("onboard"));
     assert_eq!(crate::cli::closest_command("onboarding"), Some("onboard"));
 }
+
+fn gmail_station_with_list(status: u16, list: &str) -> Result<Station, Box<dyn Error>> {
+    let transport = google_transport(&google_tokens(false))
+        .json(
+            Method::Post,
+            "oauth2.googleapis.com/token",
+            200,
+            &google_tokens(false),
+        )
+        .json(Method::Get, "/users/me/calendarList", status, list);
+    station(None, transport, Visit::Good("c"), Orchard::empty())
+}
+
+#[test]
+fn an_unreadable_calendar_list_is_reported_and_the_account_stays_linked() -> TestResult {
+    let station = gmail_station_with_list(403, r#"{"error": {"message": "API not enabled"}}"#)?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0]),
+        link_google(false),
+        vec![("ask_buttons", Reply::Button(0))],
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let notice = script.seen()[8].text("text");
+    assert!(notice.contains("nicht lesbar"), "{notice}");
+    assert!(
+        notice.contains("deren Freigaben bleiben unveraendert"),
+        "{notice}"
+    );
+    let rights = station.rights()?;
+    assert_eq!(rights.accounts.len(), 1);
+    assert!(rights.calendars_at(Level::Read).is_empty());
+    assert_eq!(station.tokens(), 1);
+    Ok(())
+}
+
+#[test]
+fn an_account_without_calendars_gets_a_notice_instead_of_an_empty_list() -> TestResult {
+    let station =
+        gmail_station_with_list(200, r#"{"kind": "calendar#calendarList", "items": []}"#)?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0]),
+        link_google(false),
+        vec![("ask_buttons", Reply::Button(0))],
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    assert!(script.seen()[8]
+        .text("text")
+        .contains("Dieses Konto hat keine Kalender."));
+    assert!(
+        script
+            .ops()
+            .iter()
+            .filter(|op| *op == "choose_list")
+            .count()
+            == 1
+    );
+    Ok(())
+}
+
+#[test]
+fn hostile_calendar_names_are_cleaned_and_bounded_before_they_are_shown() -> TestResult {
+    let nasty = format!("Fa\u{202e}mi\u{200b}lie\n{}", "x".repeat(500));
+    let list = format!(
+        r#"{{"kind": "calendar#calendarList", "items": [{{"id": "familie@group.example", "summary": {}, "accessRole": "owner"}}]}}"#,
+        json::dumps(&Json::from(nasty.as_str()), true)
+    );
+    let station = gmail_station_with_list(200, &list)?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0]),
+        link_google(false),
+        read_calendars(&[0]),
+        summary_later(),
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let items = script.seen()[8].field("items").ok_or("items")?;
+    let item = items
+        .as_array()
+        .and_then(|list| list.first())
+        .and_then(Json::as_str)
+        .ok_or("item")?;
+    assert!(
+        !item.contains('\u{202e}') && !item.contains('\u{200b}') && !item.contains('\n'),
+        "{item}"
+    );
+    assert!(item.chars().count() <= 180, "{}", item.chars().count());
+    assert!(item.starts_with("1. Familie"), "{item}");
+    let rights = station.rights()?;
+    assert_eq!(rights.calendars_at(Level::Read).len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_new_account_at_the_limit_is_refused_after_the_sign_in_and_its_token_removed() -> TestResult {
+    let accounts_json: Vec<String> = (0..16)
+        .map(|number| {
+            format!(r#"{{"provider": "microsoft", "address": "user{number}@outlook.example"}}"#)
+        })
+        .collect();
+    let config = format!(
+        r#"{{"version": 3, "accounts": [{}]}}"#,
+        accounts_json.join(", ")
+    );
+    let transport = google_transport(&google_tokens(false));
+    let station = station(Some(&config), transport, Visit::Good("c"), Orchard::empty())?;
+    let script = scripted(&[
+        welcome(),
+        accounts(&[0]),
+        link_google(false)[..5].to_vec(),
+        vec![
+            ("ask_buttons", Reply::Cancel),
+            ("ask_buttons", Reply::Button(0)),
+        ],
+    ]);
+    let (code, out) = onboard(&station, &script);
+    assert_eq!(code, 0, "{out}");
+    assert_clean(&script);
+    let seen = script.seen();
+    assert!(
+        seen[2]
+            .text("text")
+            .starts_with("Hinweis: Es sind schon 16 Konten verbunden."),
+        "{}",
+        seen[2].text("text")
+    );
+    assert!(
+        seen[7]
+            .text("text")
+            .contains("Es sind schon 16 Konten verbunden."),
+        "{}",
+        seen[7].text("text")
+    );
+    assert_eq!(station.tokens(), 0);
+    assert_eq!(station.config(), config);
+    Ok(())
+}
