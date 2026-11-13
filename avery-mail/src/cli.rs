@@ -10,13 +10,14 @@ use crate::context::Context;
 use crate::error::ToolError;
 use crate::json::{Json, Object};
 use crate::localtime;
-use crate::sendlog::{self, LogEntry, Outcome};
+use crate::sendlog::{self, Outcome};
 use crate::server::{self, Line};
 use crate::text::{one_line_str, to_int};
 use crate::texts::{
-    COMMANDS, DEFAULT_SENDS_PER_HOUR, HELP, MAX_RECIPIENTS, MAX_SEND_CHARS, NO_ACCOUNTS, VERSION,
-    WRITE_OFF,
+    COMMANDS, DEFAULT_SENDS_PER_HOUR, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
+    MAX_SEND_LINES, NO_ACCOUNTS, VERSION, WRITE_OFF,
 };
+use crate::write_tools;
 
 const MAX_ANSWER_BYTES: usize = 8192;
 const SENDLOG_LINES: usize = 200;
@@ -304,7 +305,7 @@ fn cmd_write_enable(ctx: &Context, console: &mut Console) -> u8 {
         "Grenzen: Klartext, kein Bcc, keine Anhaenge, max. {MAX_RECIPIENTS} Empfaenger, max. {MAX_SEND_CHARS} Zeichen pro gesendeter Mail,"
     ));
     console.say(&format!(
-        "         max. {DEFAULT_SENDS_PER_HOUR} gesendete Mails pro Stunde. Jeder Versuch steht in {}",
+        "         max. {MAX_SEND_LINES} Zeilen, max. {DEFAULT_SENDS_PER_HOUR} gesendete Mails und max. {MAX_DRAFTS_PER_HOUR} Entwuerfe pro Stunde. Jeder Versuch steht in {}",
         ctx.settings.sendlog_path()
     ));
     let chosen = match choose(
@@ -379,7 +380,10 @@ fn cmd_write_disable(ctx: &Context, console: &mut Console) -> u8 {
 }
 
 fn cmd_sendlog(ctx: &Context, console: &mut Console) -> u8 {
-    let view = sendlog::read_entries(&ctx.settings, SENDLOG_LINES);
+    let view = match sendlog::read_entries(&ctx.settings, SENDLOG_LINES) {
+        Ok(view) => view,
+        Err(error) => return failed(console, &error),
+    };
     let attempts = sendlog::attempts(&view.entries);
     if attempts.is_empty() && view.unreadable == 0 {
         console.say("Noch keine Eintraege.");
@@ -394,14 +398,14 @@ fn cmd_sendlog(ctx: &Context, console: &mut Console) -> u8 {
         let to = if entry.to.is_empty() {
             "-".to_string()
         } else {
-            entry.to.join(", ")
+            one_line_str(&entry.to.join(", "), 200)
         };
         console.say(&format!(
             "{}  {:<5} {:<9} {} -> {} | {}",
             localtime::minute(entry.ts),
             entry.mode.as_str(),
             outcome,
-            entry.account,
+            one_line_str(&entry.account, 80),
             to,
             one_line_str(&entry.subject, 80)
         ));
@@ -585,24 +589,6 @@ fn probe_query(days: i64, text: Option<&str>, limit: i64) -> MessageQuery {
     }
 }
 
-fn log_selftest(
-    ctx: &Context,
-    account: &Account,
-    request: &ComposeRequest,
-    outcome: Outcome,
-    preview: Option<&crate::backend::Preview>,
-) {
-    let entry = LogEntry::for_attempt(
-        sendlog::now_seconds(),
-        &account.label,
-        request,
-        outcome,
-        preview,
-        None,
-    );
-    let _ = sendlog::append(&ctx.settings, &entry, false);
-}
-
 fn self_message(
     mode: Mode,
     to: Vec<String>,
@@ -685,7 +671,7 @@ fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
             "Testentwurf. Er wurde nicht gesendet.",
             None,
         );
-        match ctx.backend.compose(account, &draft) {
+        match write_tools::perform_draft(ctx, account, &draft) {
             Ok(preview) => console.say(&format!(
                 "PASS  Entwurf angelegt, Absender: {}{}",
                 one_line_str(&preview.from, 100),
@@ -710,21 +696,13 @@ fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
                 "Test des Freigabedialogs. Du kannst diese Mail loeschen.",
                 None,
             );
-            match ctx.backend.compose(account, &send) {
+            match write_tools::perform_send(ctx, account, &send, settings.max_per_hour) {
                 Err(error) => {
                     failures.push("send".into());
-                    log_selftest(ctx, account, &send, Outcome::Error, None);
                     console.say(&format!("FAIL  Senden: {error}"));
                 }
-                Ok(preview) => {
-                    log_selftest(
-                        ctx,
-                        account,
-                        &send,
-                        Outcome::from_status(&preview.status),
-                        Some(&preview),
-                    );
-                    if preview.status == "sent" {
+                Ok((preview, outcome)) => {
+                    if outcome == Outcome::Sent {
                         console.say(&format!(
                             "PASS  Mail an {own} an Mail uebergeben (Posteingang und Gesendet pruefen)"
                         ));
@@ -785,21 +763,19 @@ fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
                 if mode == Mode::Send {
                     console.say("   Jetzt erscheint der Freigabedialog fuer die Antwort (geht an dich selbst).");
                 }
-                match ctx.backend.compose(account, &request) {
+                let result = match mode {
+                    Mode::Draft => write_tools::perform_draft(ctx, account, &request),
+                    Mode::Send => {
+                        write_tools::perform_send(ctx, account, &request, settings.max_per_hour)
+                            .map(|(preview, _)| preview)
+                    }
+                };
+                match result {
                     Err(error) => {
                         failures.push(format!("reply-{}", mode.as_str()));
                         console.say(&format!("FAIL  Antwort ({}): {error}", mode.as_str()));
                     }
                     Ok(preview) => {
-                        if mode == Mode::Send {
-                            log_selftest(
-                                ctx,
-                                account,
-                                &request,
-                                Outcome::from_status(&preview.status),
-                                Some(&preview),
-                            );
-                        }
                         console.say(&format!(
                             "PASS  Antwort ({}): Status {}, An: {}",
                             if mode == Mode::Draft {
@@ -1413,9 +1389,67 @@ mod tests {
         let outbox = fs::read_to_string(dir.path("outbox.jsonl"))?;
         assert!(outbox.contains("Scout Selbsttest - Entwurf"));
         assert!(outbox.contains("\"status\": \"sent\""));
-        let view = sendlog::read_entries(&ctx.settings, 10);
-        assert_eq!(view.entries.len(), 1);
-        assert_eq!(view.entries[0].outcome, Outcome::Sent);
+        let view = sendlog::read_entries(&ctx.settings, 10)?;
+        let outcomes: Vec<Outcome> = view.entries.iter().map(|entry| entry.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [Outcome::Drafted, Outcome::Pending, Outcome::Sent]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_write_cannot_send_when_the_log_cannot_be_written() -> TestResult {
+        let dir = TempDir::new()?;
+        let options = FakeOptions {
+            approve: "yes".into(),
+            outbox: Some(dir.path("outbox.jsonl")),
+            ..FakeOptions::default()
+        };
+        let ctx = context(&dir, true, "FAKE-GMAIL", None, options)?;
+        fs::create_dir_all(ctx.settings.sendlog_path())?;
+        let (code, out) = run(
+            &ctx,
+            &["selftest-write"],
+            "j
+j
+",
+        );
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("FAIL  Entwurf: The send log is not writable"));
+        assert!(out.contains("FAIL  Senden: The send log is not writable"));
+        assert_eq!(
+            fs::read_to_string(dir.path("outbox.jsonl")).unwrap_or_default(),
+            ""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_write_respects_the_send_limits() -> TestResult {
+        let dir = TempDir::new()?;
+        let options = FakeOptions {
+            approve: "yes".into(),
+            outbox: Some(dir.path("outbox.jsonl")),
+            ..FakeOptions::default()
+        };
+        let ctx = context(&dir, true, "FAKE-GMAIL", None, options)?;
+        let now = sendlog::now_seconds();
+        for index in 0..5 {
+            let entry = log_entry(now - 1000 - index, Outcome::Sent, None);
+            sendlog::append(&ctx.settings, &entry, true)?;
+        }
+        let (code, out) = run(
+            &ctx,
+            &["selftest-write"],
+            "j
+",
+        );
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("FAIL  Senden: Send limit reached (5 per hour)"));
+        assert!(!fs::read_to_string(dir.path("outbox.jsonl"))
+            .unwrap_or_default()
+            .contains("\"status\": \"sent\""));
         Ok(())
     }
 
@@ -1433,7 +1467,9 @@ mod tests {
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("(Antwort: Abbrechen)"));
         assert!(!out.contains("an Mail uebergeben"));
-        assert!(sendlog::read_entries(&ctx.settings, 10).entries.is_empty());
+        let view = sendlog::read_entries(&ctx.settings, 10)?;
+        let outcomes: Vec<Outcome> = view.entries.iter().map(|entry| entry.outcome).collect();
+        assert_eq!(outcomes, [Outcome::Drafted]);
         Ok(())
     }
 

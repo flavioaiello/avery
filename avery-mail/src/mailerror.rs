@@ -1,5 +1,6 @@
 use crate::error::ToolError;
 use crate::text::clean_str;
+use crate::texts::MAX_RECIPIENTS;
 
 pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
     let low = text.to_lowercase();
@@ -28,6 +29,26 @@ pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
     }
     if has("no_recipients") {
         return "Mail did not accept the recipients. NOTHING was sent.".to_string();
+    }
+    if has("send_state_unknown") {
+        return concat!(
+            "Mail reported an error while sending. The message may or may not have been sent: ask the ",
+            "user to check Sent in Mail before you try again."
+        )
+        .to_string();
+    }
+    if has("too_many_recipients") {
+        return format!(
+            "The message would go to more than {MAX_RECIPIENTS} recipients, so NOTHING was sent. Use create_draft so that the user can send it from Mail, or answer without reply_all."
+        );
+    }
+    if has("recipient_invalid") {
+        return concat!(
+            "Mail would send to an address that the approval dialog cannot show completely (plain ASCII ",
+            "addresses up to 254 characters only), so NOTHING was sent. Use create_draft and let the user ",
+            "send it from Mail."
+        )
+        .to_string();
     }
     if has("content_mismatch") {
         return concat!(
@@ -65,7 +86,10 @@ pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
         return "The mailbox changed while reading. Please retry.".to_string();
     }
     if matches!(op, Some("read" | "compose"))
-        && (has("can't get") || has("can\u{2019}t get") || has("invalid index"))
+        && (has("can't get")
+            || has("can\u{2019}t get")
+            || has("invalid index")
+            || has("message_not_in_account"))
     {
         return concat!(
             "Message not found. Use an id from list_messages or search_messages together ",
@@ -97,7 +121,10 @@ fn hit_count(low: &str) -> Option<String> {
 
 pub(crate) fn failure(text: &str, op: Option<&str>, uncertain: bool) -> ToolError {
     let low = text.to_lowercase();
-    let timed_out = low.contains("-1712") || low.contains("timed out") || low.contains("timeout");
+    let timed_out = low.contains("-1712")
+        || low.contains("timed out")
+        || low.contains("timeout")
+        || low.contains("send_state_unknown");
     if op == Some("compose") && (uncertain || timed_out) {
         let mut message = map_error(text, op);
         if !message.contains("may or may not") {
@@ -193,6 +220,48 @@ mod tests {
                 map_error(text, Some("messages")).starts_with("Mail error: "),
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn a_failure_while_sending_after_the_click_is_uncertain() {
+        let error = failure(
+            "send_state_unknown: Connection is invalid. (-609)",
+            Some("compose"),
+            false,
+        );
+        assert!(matches!(
+            &error,
+            ToolError::Uncertain(m)
+                if m.starts_with("Mail reported an error while sending.")
+                    && m.contains("may or may not have been sent")
+                    && !m.contains("-609")
+        ));
+        assert!(matches!(
+            failure("send_state_unknown: x", Some("read"), false),
+            ToolError::Msg(_)
+        ));
+    }
+
+    #[test]
+    fn recipient_rules_say_nothing_was_sent() {
+        let too_many = map_error("too_many_recipients", Some("compose"));
+        assert!(
+            too_many.contains("more than 5 recipients") && too_many.contains("NOTHING was sent")
+        );
+        assert!(too_many.contains("create_draft"));
+        let invalid = map_error("recipient_invalid", Some("compose"));
+        assert!(invalid.contains("NOTHING was sent") && invalid.contains("254"));
+        assert!(matches!(
+            failure("too_many_recipients", Some("compose"), false),
+            ToolError::Msg(_)
+        ));
+    }
+
+    #[test]
+    fn a_message_of_another_account_is_reported_as_not_found() {
+        for op in ["read", "compose"] {
+            assert!(map_error("message_not_in_account", Some(op)).starts_with("Message not found."));
         }
     }
 

@@ -80,6 +80,7 @@ pub(crate) fn log_entry(ts: i64, outcome: Outcome, id: Option<&str>) -> LogEntry
         cc: vec![],
         subject: String::new(),
         reply_to_id: None,
+        recipients: 0,
         chars: 0,
         sha256: String::new(),
         id: id.map(str::to_string),

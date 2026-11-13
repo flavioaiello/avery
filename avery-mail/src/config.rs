@@ -97,10 +97,13 @@ impl Settings {
         let directory = dirname(&self.config_path);
         make_dirs(&directory, 0o700)?;
         let temporary = format!("{}.tmp", self.config_path);
+        match fs::remove_file(&temporary) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
         let mut file = OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&temporary)?;
         file.write_all(json::dumps_pretty(&Json::Obj(data.clone()), 2, false).as_bytes())?;
@@ -316,8 +319,8 @@ pub(crate) fn make_dirs(path: &str, mode: u32) -> io::Result<()> {
         return Ok(());
     }
     if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            fs::create_dir_all(parent)?;
+        if let Some(text) = parent.to_str() {
+            make_dirs(text, mode)?;
         }
     }
     match DirBuilder::new().mode(mode).create(path) {
@@ -674,17 +677,34 @@ mod tests {
     }
 
     #[test]
-    fn make_dirs_gives_only_the_last_directory_the_private_mode() -> TestResult {
+    fn make_dirs_gives_every_directory_it_creates_the_private_mode() -> TestResult {
         let dir = TempDir::new()?;
         make_dirs(&dir.path("p/q/r"), 0o700)?;
         let mode = |sub: &str| -> io::Result<u32> {
             Ok(fs::metadata(dir.path(sub))?.permissions().mode() & 0o777)
         };
-        assert_eq!(mode("p/q/r")?, 0o700);
-        assert_ne!(mode("p")?, 0o700);
+        for sub in ["p", "p/q", "p/q/r"] {
+            assert_eq!(mode(sub)?, 0o700, "{sub}");
+        }
+        assert_ne!(mode("")?, 0o700);
         make_dirs(&dir.path("p/q/r"), 0o700)?;
         fs::write(dir.path("file"), "x")?;
         assert!(make_dirs(&dir.path("file"), 0o700).is_err());
+        assert!(make_dirs(&dir.path("file/sub"), 0o700).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn save_config_replaces_a_planted_temporary_file_instead_of_following_it() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = settings_at(&dir.path("config.json"));
+        fs::write(dir.path("victim"), "keep")?;
+        std::os::unix::fs::symlink(dir.path("victim"), format!("{}.tmp", s.config_path))?;
+        let mut config = Object::new();
+        config.insert("version", 2i64);
+        s.save_config(&config)?;
+        assert_eq!(fs::read_to_string(dir.path("victim"))?, "keep");
+        assert!(fs::read_to_string(&s.config_path)?.contains("\"version\": 2"));
         Ok(())
     }
 }

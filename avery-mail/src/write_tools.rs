@@ -7,7 +7,9 @@ use crate::sendlog::{self, LogEntry, Outcome};
 use crate::text::{
     bracketed, char_len, clean, clean_str, one_line, one_line_str, to_bool, to_int_opt,
 };
-use crate::texts::{MAX_DRAFT_CHARS, MAX_RECIPIENTS, MAX_SEND_CHARS, MAX_SUBJECT};
+use crate::texts::{
+    MAX_DRAFT_CHARS, MAX_RECIPIENTS, MAX_SEND_CHARS, MAX_SEND_LINES, MAX_SUBJECT, UNTRUSTED,
+};
 
 const COMPOSE_ARGS: [&str; 8] = [
     "account",
@@ -21,7 +23,6 @@ const COMPOSE_ARGS: [&str; 8] = [
 ];
 const MAX_ADDRESS_PIECES: usize = 50;
 const MAX_ADDRESS_CHARS: usize = 254;
-const LOG_TAIL_LINES: usize = 300;
 
 fn valid_label(label: &str) -> bool {
     let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
@@ -145,6 +146,12 @@ pub(crate) fn compose_request(
             "The text has {length} characters but send_message allows {MAX_SEND_CHARS}. Use create_draft so that the user can read and send it in Mail."
         )));
     }
+    let lines = body.lines().count();
+    if mode == Mode::Send && lines > MAX_SEND_LINES {
+        return Err(ToolError::msg(format!(
+            "The text has {lines} lines but send_message allows {MAX_SEND_LINES}. Use create_draft so that the user can read and send it in Mail."
+        )));
+    }
     if length > MAX_DRAFT_CHARS {
         return Err(ToolError::msg(format!(
             "The text is too long (max {MAX_DRAFT_CHARS} characters)."
@@ -258,59 +265,68 @@ fn summary(preview: &Preview) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn create_draft(ctx: &Context, args: &Object) -> ToolResult<String> {
-    let (account, _, request) = compose_request(ctx, args, Mode::Draft)?;
-    let preview = match ctx.backend.compose(&account, &request) {
-        Ok(preview) => preview,
-        Err(error) => {
-            if error.is_tool_error() {
-                log_attempt(ctx, &account, &request, Outcome::Error, None, None, false)?;
-            }
-            return Err(error);
-        }
-    };
-    log_attempt(
-        ctx,
-        &account,
-        &request,
-        Outcome::Drafted,
-        Some(&preview),
-        None,
-        false,
-    )?;
-    let note = if preview.saved.unwrap_or(true) {
-        ""
-    } else {
-        " (the window is open; Mail saves it to Drafts when closed)"
-    };
-    Ok(format!(
-        "Draft opened in Mail{note}. NOTHING was sent. Tell the user to review it and send it in Mail.\n{}",
-        summary(&preview)
-    ))
+fn guard(ctx: &Context, mode: Mode, max_per_hour: i64) -> ToolResult<()> {
+    let now = sendlog::now_seconds();
+    let history = sendlog::read_window(&ctx.settings, now)?;
+    match mode {
+        Mode::Send => sendlog::check_send_limits(&history.entries, now, max_per_hour)?,
+        Mode::Draft => sendlog::check_draft_limit(&history.entries, now)?,
+    }
+    sendlog::ensure_writable(&ctx.settings)
 }
 
-pub(crate) fn send_message(ctx: &Context, args: &Object) -> ToolResult<String> {
-    let (account, max_per_hour, request) = compose_request(ctx, args, Mode::Send)?;
-    let history = sendlog::read_entries(&ctx.settings, LOG_TAIL_LINES);
-    sendlog::check_send_limits(&history.entries, sendlog::now_seconds(), max_per_hour)?;
-    sendlog::ensure_writable(&ctx.settings)?;
+pub(crate) fn perform_draft(
+    ctx: &Context,
+    account: &Account,
+    request: &ComposeRequest,
+) -> ToolResult<Preview> {
+    guard(ctx, Mode::Draft, 0)?;
+    match ctx.backend.compose(account, request) {
+        Ok(preview) => {
+            log_attempt(
+                ctx,
+                account,
+                request,
+                Outcome::Drafted,
+                Some(&preview),
+                None,
+                false,
+            )?;
+            Ok(preview)
+        }
+        Err(error) => {
+            if error.is_tool_error() {
+                log_attempt(ctx, account, request, Outcome::Error, None, None, false)?;
+            }
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn perform_send(
+    ctx: &Context,
+    account: &Account,
+    request: &ComposeRequest,
+    max_per_hour: i64,
+) -> ToolResult<(Preview, Outcome)> {
+    guard(ctx, Mode::Send, max_per_hour)?;
     let id = sendlog::attempt_id()?;
     log_attempt(
         ctx,
-        &account,
-        &request,
+        account,
+        request,
         Outcome::Pending,
         None,
         Some(&id),
         true,
     )?;
-    let preview = match ctx.backend.compose(&account, &request) {
+    let preview = match ctx.backend.compose(account, request) {
         Ok(preview) => preview,
         Err(ToolError::Msg(message)) => {
             log_attempt(
                 ctx,
-                &account,
-                &request,
+                account,
+                request,
                 Outcome::Error,
                 None,
                 Some(&id),
@@ -323,16 +339,36 @@ pub(crate) fn send_message(ctx: &Context, args: &Object) -> ToolResult<String> {
     let outcome = Outcome::from_status(&preview.status);
     log_attempt(
         ctx,
-        &account,
-        &request,
+        account,
+        request,
         outcome,
         Some(&preview),
         Some(&id),
         false,
     )?;
+    Ok((preview, outcome))
+}
+
+pub(crate) fn create_draft(ctx: &Context, args: &Object) -> ToolResult<String> {
+    let (account, _, request) = compose_request(ctx, args, Mode::Draft)?;
+    let preview = perform_draft(ctx, &account, &request)?;
+    let note = if preview.saved.unwrap_or(true) {
+        ""
+    } else {
+        " (the window is open; Mail saves it to Drafts when closed)"
+    };
+    Ok(format!(
+        "Draft opened in Mail{note}. NOTHING was sent. Tell the user to review it and send it in Mail.\n{UNTRUSTED}\n{}",
+        summary(&preview)
+    ))
+}
+
+pub(crate) fn send_message(ctx: &Context, args: &Object) -> ToolResult<String> {
+    let (account, max_per_hour, request) = compose_request(ctx, args, Mode::Send)?;
+    let (preview, outcome) = perform_send(ctx, &account, &request, max_per_hour)?;
     Ok(match outcome {
         Outcome::Sent => format!(
-            "Sent: the user approved and Mail took the message for delivery.\n{}",
+            "Sent: the user approved and Mail took the message for delivery.\n{UNTRUSTED}\n{}",
             summary(&preview)
         ),
         Outcome::Timeout => "The user did not answer the approval dialog in time. NOTHING was sent. Ask the user whether to try again.".to_string(),
@@ -406,12 +442,12 @@ mod tests {
         string_list(entry.as_object().and_then(|object| object.get(key)))
     }
 
-    fn outcomes(ctx: &Context) -> Vec<Outcome> {
-        sendlog::read_entries(&ctx.settings, 300)
+    fn outcomes(ctx: &Context) -> Result<Vec<Outcome>, ToolError> {
+        Ok(sendlog::read_entries(&ctx.settings, 300)?
             .entries
             .iter()
             .map(|entry| entry.outcome)
-            .collect()
+            .collect())
     }
 
     fn seed(ctx: &Context, entries: &[LogEntry]) -> ToolResult<()> {
@@ -525,7 +561,7 @@ mod tests {
         assert!(refused(send_message(&ctx, &mail()?), "not enabled"));
         assert!(refused(create_draft(&ctx, &mail()?), "not enabled"));
         assert!(outbox(&dir)?.is_empty());
-        assert!(outcomes(&ctx).is_empty());
+        assert!(outcomes(&ctx)?.is_empty());
         Ok(())
     }
 
@@ -536,7 +572,7 @@ mod tests {
         let text = send_message(&ctx, &mail()?)?;
         assert!(text.contains("did NOT approve"));
         assert!(outbox(&dir)?.is_empty());
-        let entries = sendlog::read_entries(&ctx.settings, 300).entries;
+        let entries = sendlog::read_entries(&ctx.settings, 300)?.entries;
         let outcomes: Vec<Outcome> = entries.iter().map(|entry| entry.outcome).collect();
         assert_eq!(outcomes, [Outcome::Pending, Outcome::Declined]);
         assert!(entries[0].id.is_some());
@@ -556,7 +592,7 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(field(&sent[0], "status"), "drafted");
         assert_eq!(list(&sent[0], "to"), ["anna@example.org"]);
-        assert_eq!(outcomes(&ctx), [Outcome::Drafted]);
+        assert_eq!(outcomes(&ctx)?, [Outcome::Drafted]);
         Ok(())
     }
 
@@ -673,7 +709,7 @@ mod tests {
             assert!(refused(send_message(&ctx, &args), needle), "{changes:?}");
         }
         assert!(outbox(&dir)?.is_empty());
-        assert!(outcomes(&ctx).is_empty());
+        assert!(outcomes(&ctx)?.is_empty());
         Ok(())
     }
 
@@ -727,7 +763,7 @@ mod tests {
         }
         assert!(refused(create_draft(&ctx, &reply("999")?), "not found"));
         assert_eq!(
-            outcomes(&ctx),
+            outcomes(&ctx)?,
             [Outcome::Drafted, Outcome::Drafted, Outcome::Error]
         );
         Ok(())
@@ -763,7 +799,7 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(list(&sent[0], "to"), ["anna@example.org"]);
         assert_eq!(list(&sent[0], "cc"), ["bob@example.org"]);
-        let entries = sendlog::read_entries(&ctx.settings, 300).entries;
+        let entries = sendlog::read_entries(&ctx.settings, 300)?.entries;
         assert_eq!(
             entries.iter().map(|e| e.outcome).collect::<Vec<_>>(),
             [Outcome::Pending, Outcome::Sent]
@@ -910,7 +946,7 @@ mod tests {
             send_message(&ctx, &mail()?),
             Err(ToolError::internal("RuntimeError"))
         );
-        assert_eq!(outcomes(&ctx).last(), Some(&Outcome::Pending));
+        assert_eq!(outcomes(&ctx)?.last(), Some(&Outcome::Pending));
         assert!(outbox(&dir)?.is_empty());
         assert!(refused(send_message(&ctx, &mail()?), "Send limit reached"));
         Ok(())
@@ -926,7 +962,113 @@ mod tests {
         let ctx = writer(&dir, "FAKE-GMAIL", "yes", options);
         let result = send_message(&ctx, &mail()?);
         assert!(matches!(result, Err(ToolError::Uncertain(m)) if m.contains("may or may not")));
-        assert_eq!(outcomes(&ctx), [Outcome::Pending]);
+        assert_eq!(outcomes(&ctx)?, [Outcome::Pending]);
+        Ok(())
+    }
+
+    #[test]
+    fn drafts_are_limited_per_hour_and_refusals_are_not_logged() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "no");
+        for number in 0..30 {
+            let subject = format!("\"Entwurf {number}\"");
+            assert!(create_draft(&ctx, &with(&[("subject", subject.as_str())])?).is_ok());
+        }
+        assert!(refused(
+            create_draft(&ctx, &mail()?),
+            "Draft limit reached (30 per hour)"
+        ));
+        assert_eq!(outbox(&dir)?.len(), 30);
+        assert_eq!(outcomes(&ctx)?.len(), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn failing_drafts_count_against_the_limit_too() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "no");
+        let missing = args(r#"{"account": "Demo Gmail", "reply_to_id": 999999, "body": "x"}"#)?;
+        for _ in 0..30 {
+            assert!(refused(create_draft(&ctx, &missing), "not found"));
+        }
+        assert!(refused(create_draft(&ctx, &missing), "Draft limit reached"));
+        assert_eq!(outcomes(&ctx)?.len(), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn a_flood_of_drafts_cannot_push_the_send_history_out_of_sight() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        let now = sendlog::now_seconds();
+        let mut history: Vec<LogEntry> = (0..5)
+            .map(|index| log_entry(now - 1800 - index, Outcome::Sent, None))
+            .collect();
+        for index in 0..400 {
+            let mut draft = log_entry(now - 600 + index % 50, Outcome::Drafted, None);
+            draft.mode = Mode::Draft;
+            history.push(draft);
+        }
+        seed(&ctx, &history)?;
+        assert!(refused(
+            send_message(&ctx, &mail()?),
+            "Send limit reached (5 per hour)"
+        ));
+        assert!(outbox(&dir)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_or_trusted_blocks_sending_and_drafts() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        fs::write(ctx.settings.sendlog_path(), "garbage line\n")?;
+        for result in [send_message(&ctx, &mail()?), create_draft(&ctx, &mail()?)] {
+            assert!(refused(result, "cannot be read"));
+        }
+        assert!(outbox(&dir)?.is_empty());
+        fs::remove_file(ctx.settings.sendlog_path())?;
+        fs::create_dir_all(ctx.settings.sendlog_path())?;
+        for result in [send_message(&ctx, &mail()?), create_draft(&ctx, &mail()?)] {
+            assert!(refused(result, "send log is not writable"));
+        }
+        assert!(outbox(&dir)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn results_that_repeat_mail_data_carry_the_untrusted_banner() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        let reply = args(r#"{"account": "Demo Gmail", "reply_to_id": 101, "body": "Danke!"}"#)?;
+        for text in [create_draft(&ctx, &reply)?, send_message(&ctx, &reply)?] {
+            assert!(text.contains(UNTRUSTED), "{text}");
+            let banner = text.find(UNTRUSTED).ok_or("banner")?;
+            let subject = text.find("Subject:").ok_or("subject")?;
+            assert!(banner < subject);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn long_texts_by_line_count_are_drafts_only() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        let many = vec!["Zeile"; 41].join("\n");
+        let mut tall = mail()?;
+        tall.insert("body", Json::Str(many.clone()));
+        assert!(refused(
+            send_message(&ctx, &tall),
+            "41 lines but send_message allows 40"
+        ));
+        assert!(create_draft(&ctx, &tall).is_ok());
+        let mut edge = mail()?;
+        edge.insert("body", Json::Str(vec!["Zeile"; 40].join("\n")));
+        assert!(send_message(&ctx, &edge).is_ok());
+        let spaced = vec!["Zeile"; 20].join("\n\n\n\n");
+        let mut blanks = mail()?;
+        blanks.insert("body", Json::Str(spaced));
+        assert!(send_message(&ctx, &blanks).is_ok());
         Ok(())
     }
 
@@ -936,7 +1078,7 @@ mod tests {
         let ctx = gmail(&dir, "yes");
         let reply = args(r#"{"account": "Demo Gmail", "reply_to_id": 999, "body": "x"}"#)?;
         assert!(refused(send_message(&ctx, &reply), "not found"));
-        let entries = sendlog::read_entries(&ctx.settings, 300).entries;
+        let entries = sendlog::read_entries(&ctx.settings, 300)?.entries;
         assert_eq!(
             entries.iter().map(|e| e.outcome).collect::<Vec<_>>(),
             [Outcome::Pending, Outcome::Error]
