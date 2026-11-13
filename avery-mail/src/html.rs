@@ -484,6 +484,7 @@ mod tests {
         );
         assert_eq!(to_text("a<br>b<br/>c<BR />d"), "a\nb\nc\nd");
         assert_eq!(to_text("a<br>b<br><br>c<br/>d"), "a\nb\n\nc\nd");
+        assert_eq!(to_text("a<br><br>b"), "a\n\nb");
         assert_eq!(to_text("<div>a</div><div>b</div>"), "a\nb");
         assert_eq!(to_text("vor<div>mitte</div>nach"), "vor\nmitte\nnach");
         assert_eq!(
@@ -536,11 +537,17 @@ mod tests {
             "a b"
         );
         assert_eq!(
+            to_text("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>"),
+            "a b\nc d"
+        );
+        assert_eq!(
             to_text("<table><tr><th>h1</th><th>h2</th></tr><tr><td>1</td><td></td><td>3</td></tr></table>"),
             "h1 h2\n1 3"
         );
         assert_eq!(to_text("a<td>b"), "a b");
         assert_eq!(to_text("<dl><dt>k</dt><dd>v</dd></dl>"), "k\nv");
+        assert_eq!(to_text("<ul><li>a</li><li>b</li></ul>"), "a\nb");
+        assert_eq!(to_text("<div>one</div><div>two</div>"), "one\ntwo");
     }
 
     #[test]
@@ -827,6 +834,11 @@ mod tests {
             assert_eq!(to_text(same), same, "{same:?}");
             assert_eq!(to_notes(same), same, "{same:?}");
         }
+        assert_eq!(to_text("&#0;&#xD800;&#x110000;"), "&#xD800;&#x110000;");
+        assert_eq!(
+            to_text("&#0; &#xD800; &#; &#x; &#99999999999;"),
+            "&#xD800; &#; &#x; &#99999999999;"
+        );
         assert_eq!(to_text("&#x10FFFF;"), "\u{10ffff}");
         assert_eq!(to_text("&#1114111;"), "\u{10ffff}");
         assert_eq!(to_text("&#xFFFD;"), "\u{fffd}");
@@ -856,6 +868,7 @@ mod tests {
         assert_eq!(to_text("a\u{2003}\u{3000}\u{2028}\u{85}\u{b}\u{c}b"), "a b");
         assert_eq!(to_text("a\rb"), "a b");
         assert_eq!(to_text("a&nbsp;&nbsp;b&nbsp;"), "a b");
+        assert_eq!(to_text("a&nbsp;b&nbsp;&nbsp;c"), "a b c");
         assert_eq!(to_text("&nbsp;&nbsp;lead"), "lead");
     }
 
@@ -907,6 +920,10 @@ mod tests {
         assert_eq!(to_text("a<b<c>d"), "ad");
         assert_eq!(to_text("x<b"), "x");
         assert_eq!(to_text("x<b y=\"z\""), "x");
+        assert_eq!(to_text("tail <b"), "tail");
+        assert_eq!(to_text("</ x>y"), "y");
+        assert_eq!(to_text("a <b and c"), "a");
+        assert_eq!(to_text("a<b<c"), "a");
     }
 
     #[test]
@@ -1149,6 +1166,13 @@ mod tests {
         assert_eq!(to_text(&"&nbsp;".repeat(MAX_INPUT / 6)), "");
         assert_eq!(to_text(&"x<br>".repeat(100_000)).lines().count(), 100_000);
         assert_eq!(to_text(&"x<p>".repeat(100_000)).lines().count(), 199_999);
+        let words = to_text(&"<p>word</p>".repeat(100_000));
+        assert_eq!(
+            words.lines().filter(|line| *line == "word").count(),
+            100_000
+        );
+        assert_eq!(words.lines().count(), 199_999);
+        assert_eq!(to_text(&"&amp;".repeat(100_000)).chars().count(), 100_000);
     }
 
     #[test]
@@ -1368,7 +1392,10 @@ mod tests {
         for hostile in [
             filled("<a ", HOSTILE),
             filled("<a b=\"", HOSTILE),
+            filled("<a \"", HOSTILE),
             filled("<a '", HOSTILE),
+            filled("<a>", HOSTILE),
+            filled("<\"", HOSTILE),
             filled("<!--", HOSTILE),
             filled("<!", HOSTILE),
             filled("<?", HOSTILE),
