@@ -48,7 +48,7 @@ fn all_day_ev() -> Ev {
         EV,
         "2026-11-24T00:00:00.0000000",
         "2026-11-25T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     )
 }
 
@@ -66,7 +66,7 @@ fn holiday() -> Res<EventFields> {
 #[test]
 fn an_update_patches_only_the_changed_fields() -> TestResult {
     let before = dentist()?;
-    let zone = "\"timeZone\": \"Europe/Zurich\"";
+    let zone = "\"timeZone\": \"W. Europe Standard Time\"";
     let at = |first: &str, second: &str| {
         format!(
             "\"isAllDay\": false, \"start\": {{\"dateTime\": \"{first}\", {zone}}}, \"end\": {{\"dateTime\": \"{second}\", {zone}}}"
@@ -195,7 +195,7 @@ fn an_all_day_move_patches_both_dates_in_the_zone() -> TestResult {
         EV,
         "2026-11-25T00:00:00.0000000",
         "2026-11-27T00:00:00.0000000",
-        ZONE,
+        WINDOWS,
     );
     let transport = updating(&all_day_ev(), &moved);
     let (result, _) = run(
@@ -209,8 +209,8 @@ fn an_all_day_move_patches_both_dates_in_the_zone() -> TestResult {
     let patch = sent.first().ok_or("patch")?;
     let expected = concat!(
         "{\"isAllDay\": true, ",
-        "\"start\": {\"dateTime\": \"2026-11-25T00:00:00\", \"timeZone\": \"Europe/Zurich\"}, ",
-        "\"end\": {\"dateTime\": \"2026-11-27T00:00:00\", \"timeZone\": \"Europe/Zurich\"}}"
+        "\"start\": {\"dateTime\": \"2026-11-25T00:00:00\", \"timeZone\": \"W. Europe Standard Time\"}, ",
+        "\"end\": {\"dateTime\": \"2026-11-27T00:00:00\", \"timeZone\": \"W. Europe Standard Time\"}}"
     );
     assert_eq!(
         json::parse(patch.body.as_deref().ok_or("body")?)?,
@@ -338,14 +338,14 @@ fn a_stale_before_is_refused_before_the_dialog() -> TestResult {
         (
             "start",
             Ev {
-                start: ("2026-11-20T09:30:00.0000000", ZONE),
+                start: ("2026-11-20T09:30:00.0000000", WINDOWS),
                 ..Ev::default()
             },
         ),
         (
             "end",
             Ev {
-                end: ("2026-11-20T10:30:00.0000000", ZONE),
+                end: ("2026-11-20T10:30:00.0000000", WINDOWS),
                 ..Ev::default()
             },
         ),
@@ -376,7 +376,7 @@ fn a_stale_before_is_refused_before_the_dialog() -> TestResult {
                 EV,
                 "2026-11-20T00:00:00.0000000",
                 "2026-11-21T00:00:00.0000000",
-                ZONE,
+                WINDOWS,
             ),
         ),
         (

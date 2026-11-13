@@ -17,6 +17,7 @@ use std::time::Duration;
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 const ZONE: &str = "Europe/Zurich";
+const WINDOWS: &str = "W. Europe Standard Time";
 const CAL: &str = "AQMkADAwATM3ZmYAZS0wYzBhLTQ4ADgxLTAwAi0wMAoARgAAA-cal==";
 const CAL_ENC: &str = "AQMkADAwATM3ZmYAZS0wYzBhLTQ4ADgxLTAwAi0wMAoARgAAA-cal%3D%3D";
 const OTHER_CAL: &str = "AQMkADAwATM3ZmYAZS0wYzBhLTQ4ADgxLTAwAi0wMAoARgAAA-other==";
@@ -25,9 +26,9 @@ const EV_ENC: &str = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqGpjeuZLQESC3qXtNlA-Ag
 const NEW: &str = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqGpjeuZLQESC3qXtNlA-AgAAAAAAAQAAB=";
 const NEW_ENC: &str = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqGpjeuZLQESC3qXtNlA-AgAAAAAAAQAAB%3D";
 const GRAPH: &str = "https://graph.microsoft.com/v1.0/me";
-const PREFER: &str = "outlook.timezone=\"Europe/Zurich\", IdType=\"ImmutableId\"";
+const PREFER: &str = "outlook.timezone=\"W. Europe Standard Time\", IdType=\"ImmutableId\"";
 const PREFER_TEXT: &str = concat!(
-    "outlook.timezone=\"Europe/Zurich\", IdType=\"ImmutableId\", ",
+    "outlook.timezone=\"W. Europe Standard Time\", IdType=\"ImmutableId\", ",
     "outlook.body-content-type=\"text\""
 );
 const PREFER_UTC: &str = "outlook.timezone=\"UTC\", IdType=\"ImmutableId\"";
@@ -162,8 +163,8 @@ impl Default for Ev {
         Ev {
             id: EV,
             subject: "Dentist".to_string(),
-            start: ("2026-11-20T09:00:00.0000000", ZONE),
-            end: ("2026-11-20T10:00:00.0000000", ZONE),
+            start: ("2026-11-20T09:00:00.0000000", WINDOWS),
+            end: ("2026-11-20T10:00:00.0000000", WINDOWS),
             all_day: false,
             location: "Praxis".to_string(),
             body: Some(("text", "Bring the card".to_string())),
@@ -443,7 +444,7 @@ fn the_fixture_event_parses_as_the_fixture_fields() -> TestResult {
     let value = j(&Ev::default().json())?;
     let object = value.as_object().ok_or("object")?;
     assert_eq!(object.get("id").and_then(Json::as_str), Some(EV));
-    let row = parse_event(object, ZONE)?;
+    let row = parse_event(object, WINDOWS)?;
     assert_eq!(row.event.summary, "Dentist");
     assert!(!row.pending);
     assert_eq!(row.event.attendees, Some(0));

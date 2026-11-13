@@ -1,9 +1,9 @@
 use super::charset;
 use super::header;
-use super::html;
 use super::message;
 use crate::backend::Attachment;
 use crate::base64;
+use crate::html;
 use crate::json::{Json, Object};
 
 const MAX_DEPTH: usize = 12;

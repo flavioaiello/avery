@@ -123,7 +123,8 @@ removes all grants and keeps the accounts. An address can be linked only once, u
 can be linked; linking one of them again still works at that limit.
 
 Differences you will notice: the provider expands recurring events itself and Avery times are read and written in this
-Mac's time zone; message ids are longer texts (copy them exactly); replies take their recipients and subject from the
+Mac's time zone (for Outlook.com it is sent as a Windows zone name from a built-in table; a zone the table does not
+know is refused); message ids are longer texts (copy them exactly); replies take their recipients and subject from the
 original and carry no quoted text; Gmail search covers subject and sender.
 
 ## Apple Mail and Calendar (optional)
@@ -208,6 +209,9 @@ doing something.
 - **Replies** use the account's reply: the recipients and the subject are taken from the original message.
 - **No retries.** A request that fails after the click is reported as an unknown outcome and counts as sent; the server
   never repeats a send or a change on its own.
+- **Subjects.** A subject with `=?` (the start of an encoded header word) is sent as plain text by Gmail and refused by
+  Outlook.com; an Outlook.com answer is also refused when the subject the server built for it cannot be shown exactly
+  (invisible characters, more than 300 characters).
 
 The dialog is the hard gate. Instructions to the model (`top-of-mind.md`) are only a second line of defence.
 The profile disables Goose's shell and file extensions; do not enable them for this profile.
@@ -334,3 +338,50 @@ Release: bump `AVERY_VERSION` in `bin/avery` and `version` in `avery-mail/Cargo.
 ## License
 
 MIT
+
+The table that maps IANA time zone names to Windows time zone names for the Outlook.com calendar
+(`avery-mail/src/cloud/graph_calendar/zones.rs`) is generated from the Unicode CLDR file
+`common/supplemental/windowsZones.xml` and the links of the IANA time zone database (public domain). The CLDR data is
+used under the Unicode License v3:
+
+```text
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```

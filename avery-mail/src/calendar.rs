@@ -8,7 +8,8 @@ use crate::error::ToolResult;
 use crate::journal;
 use crate::json::{Json, Object};
 use crate::localtime;
-use crate::provider::Provider;
+use crate::provider::{calendar_parts, Provider};
+use crate::sha256::sha256_hex;
 use crate::text::text_of;
 
 pub(crate) use crate::journal::Origin;
@@ -370,6 +371,18 @@ pub(crate) fn demo_entries() -> Vec<CalendarEntry> {
         .collect()
 }
 
+const SHORT_ID: usize = 8;
+
+fn short_id(id: &str) -> String {
+    match calendar_parts(id) {
+        Some((_, address, _)) => {
+            let digest: String = sha256_hex(id.as_bytes()).chars().take(SHORT_ID).collect();
+            format!("{address}:{digest}")
+        }
+        None => id.chars().take(SHORT_ID).collect(),
+    }
+}
+
 pub(crate) fn with_labels(entries: Vec<CalendarEntry>) -> Vec<Calendar> {
     let names: Vec<String> = entries.iter().map(|e| e.name.to_lowercase()).collect();
     entries
@@ -378,8 +391,7 @@ pub(crate) fn with_labels(entries: Vec<CalendarEntry>) -> Vec<Calendar> {
             let own = entry.name.to_lowercase();
             let duplicate = names.iter().filter(|name| **name == own).count() > 1;
             let label = if duplicate {
-                let short: String = entry.id.chars().take(8).collect();
-                format!("{} <{short}>", entry.name)
+                format!("{} <{}>", entry.name, short_id(&entry.id))
             } else {
                 entry.name.clone()
             };
@@ -416,6 +428,105 @@ mod tests {
         assert_eq!(twins[0].label, "Kalender <01234567>");
         assert_eq!(twins[1].label, "kalender <ZZ>");
         assert_eq!(twins[2].label, "Other");
+    }
+
+    fn labels(calendars: &[Calendar]) -> Vec<&str> {
+        calendars
+            .iter()
+            .map(|calendar| calendar.label.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_cloud_calendars_carry_the_account_address_and_a_digest_of_the_id() {
+        let calendars = with_labels(vec![
+            entry("microsoft:bob@outlook.example:AQMkCALENDAR1", "Calendar"),
+            entry("microsoft:eve@outlook.example:AQMkCALENDAR1", "calendar"),
+            entry("microsoft:bob@outlook.example:AQMkCALENDAR2", "Birthdays"),
+        ]);
+        assert_eq!(
+            labels(&calendars),
+            [
+                "Calendar <bob@outlook.example:aafe82be>",
+                "calendar <eve@outlook.example:6c3c914d>",
+                "Birthdays",
+            ]
+        );
+    }
+
+    #[test]
+    fn calendars_of_one_account_whose_ids_share_a_long_prefix_stay_apart() {
+        let prefix = "AQMkADAwATNiZmYAZC0yMzI1LTcyMzQtMDACLTAwCgBGAAADAAAAAAAA";
+        let calendars = with_labels(vec![
+            entry(
+                &format!("microsoft:bob@outlook.example:{prefix}B_OVmxAAA="),
+                "Birthdays",
+            ),
+            entry(
+                &format!("microsoft:bob@outlook.example:{prefix}B-FEkAAA="),
+                "Birthdays",
+            ),
+        ]);
+        assert_eq!(
+            labels(&calendars),
+            [
+                "Birthdays <bob@outlook.example:cb91960d>",
+                "Birthdays <bob@outlook.example:75ec5b39>",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_same_address_at_two_providers_gets_different_labels() {
+        let calendars = with_labels(vec![
+            entry("google:bob@example.org:primary", "Calendar"),
+            entry("microsoft:bob@example.org:primary", "Calendar"),
+        ]);
+        assert_eq!(
+            labels(&calendars),
+            [
+                "Calendar <bob@example.org:1e50393a>",
+                "Calendar <bob@example.org:7995e6a0>",
+            ]
+        );
+    }
+
+    #[test]
+    fn apple_ids_keep_their_first_eight_characters_next_to_cloud_calendars() {
+        let calendars = with_labels(vec![
+            entry("0123456789ABC", "Calendar"),
+            entry("microsoft:bob@outlook.example:AQMkCALENDAR1", "Calendar"),
+        ]);
+        assert_eq!(
+            labels(&calendars),
+            [
+                "Calendar <01234567>",
+                "Calendar <bob@outlook.example:aafe82be>",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_duplicate_label_names_exactly_one_calendar_and_the_plain_name_names_all() {
+        let calendars = with_labels(vec![
+            entry("microsoft:bob@outlook.example:AQMkCALENDAR1", "Calendar"),
+            entry("microsoft:eve@outlook.example:AQMkCALENDAR1", "Calendar"),
+            entry("google:bob@gmail.example:primary", "Calendar"),
+        ]);
+        for calendar in &calendars {
+            let wanted = calendar.label.to_lowercase();
+            let hits: Vec<&str> = calendars
+                .iter()
+                .filter(|other| other.is_named(&wanted))
+                .map(|other| other.id.as_str())
+                .collect();
+            assert_eq!(hits, [calendar.id.as_str()], "{}", calendar.label);
+        }
+        let plain = calendars
+            .iter()
+            .filter(|calendar| calendar.is_named("calendar"))
+            .count();
+        assert_eq!(plain, 3);
     }
 
     #[test]

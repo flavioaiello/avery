@@ -3,8 +3,8 @@ use super::*;
 const TENNIS_BODY: &str = concat!(
     "{\"subject\": \"Tennis\", \"body\": {\"contentType\": \"text\", \"content\": \"Rackets\\nBalls\"}, ",
     "\"location\": {\"displayName\": \"Court 3\"}, \"isAllDay\": false, ",
-    "\"start\": {\"dateTime\": \"2026-11-20T18:30:00\", \"timeZone\": \"Europe/Zurich\"}, ",
-    "\"end\": {\"dateTime\": \"2026-11-20T19:45:00\", \"timeZone\": \"Europe/Zurich\"}}"
+    "\"start\": {\"dateTime\": \"2026-11-20T18:30:00\", \"timeZone\": \"W. Europe Standard Time\"}, ",
+    "\"end\": {\"dateTime\": \"2026-11-20T19:45:00\", \"timeZone\": \"W. Europe Standard Time\"}}"
 );
 
 fn tennis() -> Res<EventFields> {
@@ -22,8 +22,8 @@ fn tennis_ev() -> Ev {
     Ev {
         id: NEW,
         subject: "Tennis".to_string(),
-        start: ("2026-11-20T18:30:00.0000000", ZONE),
-        end: ("2026-11-20T19:45:00.0000000", ZONE),
+        start: ("2026-11-20T18:30:00.0000000", WINDOWS),
+        end: ("2026-11-20T19:45:00.0000000", WINDOWS),
         location: "Court 3".to_string(),
         body: Some(("text", "Rackets\nBalls".to_string())),
         ..Ev::default()
@@ -157,7 +157,7 @@ fn an_all_day_create_writes_midnights_in_the_zone() -> TestResult {
             NEW,
             "2026-11-24T00:00:00.0000000",
             "2026-11-26T00:00:00.0000000",
-            ZONE,
+            WINDOWS,
         )
     };
     let transport = posted(
@@ -173,8 +173,8 @@ fn an_all_day_create_writes_midnights_in_the_zone() -> TestResult {
     let expected = concat!(
         "{\"subject\": \"Trip\", \"body\": {\"contentType\": \"text\", \"content\": \"\"}, ",
         "\"location\": {\"displayName\": \"\"}, \"isAllDay\": true, ",
-        "\"start\": {\"dateTime\": \"2026-11-24T00:00:00\", \"timeZone\": \"Europe/Zurich\"}, ",
-        "\"end\": {\"dateTime\": \"2026-11-26T00:00:00\", \"timeZone\": \"Europe/Zurich\"}}"
+        "\"start\": {\"dateTime\": \"2026-11-24T00:00:00\", \"timeZone\": \"W. Europe Standard Time\"}, ",
+        "\"end\": {\"dateTime\": \"2026-11-26T00:00:00\", \"timeZone\": \"W. Europe Standard Time\"}}"
     );
     assert_eq!(
         json::parse(post.body.as_deref().ok_or("body")?)?,
@@ -481,7 +481,7 @@ fn a_failing_or_surprising_read_back_never_turns_a_created_event_into_an_error()
         assert_eq!(writes(&transport).len(), 1);
     }
     let adjusted = Ev {
-        start: ("2026-11-20T19:30:00.0000000", ZONE),
+        start: ("2026-11-20T19:30:00.0000000", WINDOWS),
         ..tennis_ev()
     };
     let transport = stored(adjusted);
@@ -489,6 +489,120 @@ fn a_failing_or_surprising_read_back_never_turns_a_created_event_into_an_error()
     let after = result?.after.ok_or("after")?;
     assert_eq!(after.start.to_string(), "2026-11-20 19:30");
     assert_ne!(after, tennis()?);
+    Ok(())
+}
+
+#[test]
+fn a_create_in_another_zone_writes_and_reads_back_with_its_windows_name() -> TestResult {
+    let ev = tennis_ev();
+    let in_tokyo = Ev {
+        start: (ev.start.0, "Tokyo Standard Time"),
+        end: (ev.end.0, "Tokyo Standard Time"),
+        ..ev
+    };
+    let answer = format!("{{\"id\": {}, \"subject\": \"Tennis\"}}", q(NEW));
+    let transport = posted(editable(Scripted::new(), true), 201, &answer).json(
+        Method::Get,
+        "/events/",
+        200,
+        &in_tokyo.json(),
+    );
+    let host = Dialogs::new("approved", &transport);
+    let approval = Approval {
+        seconds: 75,
+        undo: false,
+    };
+    let result = change(
+        &api(&transport),
+        &host,
+        &calendar(),
+        CAL,
+        "Asia/Tokyo",
+        &create_with(tennis()?),
+        &approval,
+    )?;
+    assert_eq!(result.after, Some(tennis()?));
+    let sent = writes(&transport);
+    let [post] = sent.as_slice() else {
+        return Err("exactly one write".into());
+    };
+    let body = json::parse(post.body.as_deref().ok_or("body")?)?;
+    let object = body.as_object().ok_or("object")?;
+    for key in ["start", "end"] {
+        let zone = object
+            .get(key)
+            .and_then(Json::as_object)
+            .and_then(|moment| moment.get("timeZone"))
+            .and_then(Json::as_str);
+        assert_eq!(zone, Some("Tokyo Standard Time"), "{key}");
+    }
+    let seen = transport.seen();
+    assert_eq!(
+        seen.last().and_then(|r| header(r, "Prefer")),
+        Some(concat!(
+            "outlook.timezone=\"Tokyo Standard Time\", IdType=\"ImmutableId\", ",
+            "outlook.body-content-type=\"text\""
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn an_all_day_create_in_another_zone_uses_one_windows_name_for_both_ends() -> TestResult {
+    let after = fields("Trip", "2026-11-24 00:00", "2026-11-26 00:00", true, "", "")?;
+    let stored = Ev {
+        id: NEW,
+        subject: "Trip".to_string(),
+        ..Ev::all_day(
+            NEW,
+            "2026-11-24T00:00:00.0000000",
+            "2026-11-26T00:00:00.0000000",
+            "Eastern Standard Time",
+        )
+    };
+    let transport = posted(
+        editable(Scripted::new(), true),
+        201,
+        &format!("{{\"id\": {}}}", q(NEW)),
+    )
+    .json(Method::Get, "/events/", 200, &stored.json());
+    let host = Dialogs::new("approved", &transport);
+    let approval = Approval {
+        seconds: 75,
+        undo: false,
+    };
+    let result = change(
+        &api(&transport),
+        &host,
+        &calendar(),
+        CAL,
+        "America/New_York",
+        &create_with(after.clone()),
+        &approval,
+    )?;
+    assert_eq!(result.after, Some(after));
+    let sent = writes(&transport);
+    let [post] = sent.as_slice() else {
+        return Err("exactly one write".into());
+    };
+    let expected = concat!(
+        "{\"subject\": \"Trip\", \"body\": {\"contentType\": \"text\", \"content\": \"\"}, ",
+        "\"location\": {\"displayName\": \"\"}, \"isAllDay\": true, ",
+        "\"start\": {\"dateTime\": \"2026-11-24T00:00:00\", \"timeZone\": \"Eastern Standard Time\"}, ",
+        "\"end\": {\"dateTime\": \"2026-11-26T00:00:00\", \"timeZone\": \"Eastern Standard Time\"}}"
+    );
+    assert_eq!(
+        json::parse(post.body.as_deref().ok_or("body")?)?,
+        j(expected)?
+    );
+    let seen = transport.seen();
+    assert_eq!(
+        seen.last().and_then(|r| header(r, "Prefer")),
+        Some(concat!(
+            "outlook.timezone=\"Eastern Standard Time\", IdType=\"ImmutableId\", ",
+            "outlook.body-content-type=\"text\""
+        ))
+    );
     Ok(())
 }
 
@@ -527,7 +641,14 @@ fn unsafe_zones_and_calendars_stop_a_change_before_any_request() -> TestResult {
         seconds: 75,
         undo: false,
     };
-    for zone in ["", "Europe/Zurich\"", "a b", "../x"] {
+    for zone in [
+        "",
+        "Europe/Zurich\"",
+        "a b",
+        "../x",
+        "Mars/Olympus",
+        "W. Europe Standard Time",
+    ] {
         let result = change(
             &api(&transport),
             &host,
@@ -542,6 +663,16 @@ fn unsafe_zones_and_calendars_stop_a_change_before_any_request() -> TestResult {
             "{zone:?}"
         );
     }
+    let result = change(
+        &api(&transport),
+        &host,
+        &calendar(),
+        CAL,
+        "Mars/Olympus",
+        &create_with(tennis()?),
+        &approval,
+    );
+    assert!(refusal(result)?.message().contains("(Mars/Olympus)"));
     let too_long = "c".repeat(513);
     for provider in ["", too_long.as_str()] {
         let result = change(

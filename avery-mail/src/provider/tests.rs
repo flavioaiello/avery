@@ -342,6 +342,12 @@ const GOOGLE_WRITE: &str = r#"{"version": 3,
 const MICROSOFT_WRITE: &str = r#"{"version": 3,
     "accounts": [{"provider": "microsoft", "address": "bob@outlook.example", "mail": "write",
         "calendars": [{"id": "AQMkCAL", "name": "Calendar (bob@outlook.example)", "level": "read"}]}]}"#;
+const TWO_OUTLOOK: &str = r#"{"version": 3,
+    "accounts": [
+        {"provider": "microsoft", "address": "bob@outlook.example", "mail": "read",
+            "calendars": [{"id": "AQMkBOB", "name": "Calendar", "level": "write"}]},
+        {"provider": "microsoft", "address": "eve@outlook.example", "mail": "read",
+            "calendars": [{"id": "AQMkEVE", "name": "Calendar", "level": "write"}]}]}"#;
 const GOOGLE_SCOPES: &str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events";
 const MICROSOFT_SCOPES: &str =
     "Mail.Read Calendars.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite";
@@ -841,9 +847,7 @@ fn a_google_calendar_change_needs_the_click_and_is_logged_with_its_origin() -> T
     Ok(())
 }
 
-#[test]
-fn an_outlook_calendar_is_listed_through_the_tools_in_local_time() -> TestResult {
-    let zone = crate::localtime::zone().ok_or("zone")?;
+fn outlook_listing(zone: &str) -> Result<(Wired, Result<String, ToolError>), Box<dyn Error>> {
     let item = format!(
         r#"{{"value": [{{"id": "EV1", "subject": "Zahnarzt", "start": {{"dateTime": "2030-05-06T09:00:00.0000000", "timeZone": "{zone}"}}, "end": {{"dateTime": "2030-05-06T10:00:00.0000000", "timeZone": "{zone}"}}, "isAllDay": false, "location": {{"displayName": "Praxis"}}, "attendees": [], "isCancelled": false}}]}}"#
     );
@@ -857,22 +861,141 @@ fn an_outlook_calendar_is_listed_through_the_tools_in_local_time() -> TestResult
         "no",
     )?;
     let listed =
-        crate::calendar::list_events(&wired.ctx, &args(r#"{"start": "2030-05-06", "days": 2}"#)?)?;
+        crate::calendar::list_events(&wired.ctx, &args(r#"{"start": "2030-05-06", "days": 2}"#)?);
+    Ok((wired, listed))
+}
+
+fn asked_zone(wired: &Wired) -> Result<String, Box<dyn Error>> {
+    let views = calls(wired, Method::Get, "/calendarView");
+    let [view] = views.as_slice() else {
+        return Err(format!("one calendar view, saw {}", views.len()).into());
+    };
+    let prefer = header(view, "Prefer").ok_or("Prefer header")?;
+    let zone = prefer
+        .strip_prefix("outlook.timezone=\"")
+        .and_then(|rest| rest.split_once('"'))
+        .map(|(zone, _)| zone.to_string())
+        .ok_or("time zone preference")?;
+    Ok(zone)
+}
+
+#[test]
+fn an_outlook_calendar_is_listed_through_the_tools_in_local_time() -> TestResult {
+    let iana = crate::localtime::zone().ok_or("zone")?;
+    let (probe, listed) = outlook_listing("Probe Standard Time")?;
+    let Err(refused) = listed else {
+        return Err("an unexpected zone must be refused".into());
+    };
+    assert!(
+        refused.message().contains("time zone of this Mac"),
+        "{refused}"
+    );
+    let asked = asked_zone(&probe)?;
+    assert!(!asked.is_empty() && !asked.contains('/'), "{asked}");
+    assert!(asked == "UTC" || asked != iana, "{asked} {iana}");
+
+    let (wired, listed) = outlook_listing(&asked)?;
+    let listed = listed?;
     assert!(listed.contains("Zahnarzt"), "{listed}");
     assert!(listed.contains("09:00-10:00"), "{listed}");
     assert!(listed.contains("Praxis"), "{listed}");
-    let view = calls(&wired, Method::Get, "/calendarView");
-    assert_eq!(view.len(), 1);
-    assert!(
-        header(&view[0], "Prefer").is_some_and(|value| value.contains(&zone)),
-        "{:?}",
-        header(&view[0], "Prefer")
-    );
+    assert_eq!(asked_zone(&wired)?, asked);
     let refused = crate::calendar::create_event(
         &wired.ctx,
         &args(r#"{"summary": "x", "start": "2030-05-07 10:00"}"#)?,
     );
     assert!(refused.is_err());
+    assert!(calls(&wired, Method::Post, "/events").is_empty());
+    Ok(())
+}
+
+#[test]
+fn two_outlook_accounts_with_a_calendar_of_the_same_name_are_told_apart_by_the_tools() -> TestResult
+{
+    let transport = Scripted::new()
+        .json(Method::Post, "/token", 200, TOKEN)
+        .json(Method::Get, "/calendarView", 200, r#"{"value": []}"#)
+        .json(
+            Method::Get,
+            "/calendars/",
+            200,
+            r#"{"id": "x", "canEdit": true}"#,
+        );
+    let wired = wired(
+        TWO_OUTLOOK,
+        &[
+            ("microsoft:bob@outlook.example", MICROSOFT_SCOPES),
+            ("microsoft:eve@outlook.example", MICROSOFT_SCOPES),
+        ],
+        transport,
+        "no",
+    )?;
+    let labels: Vec<String> = wired
+        .ctx
+        .settings
+        .allowed_calendars()?
+        .into_iter()
+        .map(|calendar| calendar.label)
+        .collect();
+    let [bob, eve] = labels.as_slice() else {
+        return Err("two calendars".into());
+    };
+    assert!(bob.starts_with("Calendar <bob@outlook.example:"));
+    assert!(eve.starts_with("Calendar <eve@outlook.example:"));
+    let listed = crate::calendar::list_calendars(&wired.ctx, &args("{}")?)?;
+    for label in &labels {
+        assert!(listed.contains(label.as_str()), "{listed}");
+    }
+    let window = |label: &str| -> Result<crate::json::Object, Box<dyn Error>> {
+        let mut object = args(r#"{"start": "2030-05-06", "days": 1}"#)?;
+        object.insert("calendar", label);
+        Ok(object)
+    };
+    for (label, id) in labels.iter().zip(["AQMkBOB", "AQMkEVE"]) {
+        let before = calls(&wired, Method::Get, "/calendarView").len();
+        crate::calendar::list_events(&wired.ctx, &window(label)?)?;
+        let views = calls(&wired, Method::Get, "/calendarView");
+        assert_eq!(views.len(), before + 1, "{label}");
+        let last = views.last().ok_or("view")?;
+        assert!(
+            last.url.contains(&format!("/calendars/{id}/")),
+            "{}",
+            last.url
+        );
+    }
+    let before = calls(&wired, Method::Get, "/calendarView").len();
+    crate::calendar::list_events(&wired.ctx, &window("calendar")?)?;
+    assert_eq!(
+        calls(&wired, Method::Get, "/calendarView").len(),
+        before + 2
+    );
+
+    let event = r#"{"summary": "Tennis", "start": "2030-05-07 18:30", "duration_minutes": 60}"#;
+    let mut ambiguous = args(event)?;
+    ambiguous.insert("calendar", "calendar");
+    let Err(error) = crate::calendar::create_event(&wired.ctx, &ambiguous) else {
+        return Err("an ambiguous name must be refused".into());
+    };
+    assert!(error.message().contains("Unknown calendar"), "{error}");
+    for label in &labels {
+        assert!(error.message().contains(label.as_str()), "{error}");
+    }
+    assert!(calls(&wired, Method::Get, "?$select=canEdit").is_empty());
+    let mut chosen = args(event)?;
+    chosen.insert("calendar", eve.as_str());
+    let answer = crate::calendar::create_event(&wired.ctx, &chosen)?;
+    assert!(
+        answer.contains("did NOT approve") || answer.contains("declined"),
+        "{answer}"
+    );
+    let checks: Vec<String> = calls(&wired, Method::Get, "?$select=canEdit")
+        .into_iter()
+        .map(|request| request.url)
+        .collect();
+    let [check] = checks.as_slice() else {
+        return Err(format!("one writability check, saw {checks:?}").into());
+    };
+    assert!(check.contains("/calendars/AQMkEVE?"), "{check}");
     assert!(calls(&wired, Method::Post, "/events").is_empty());
     Ok(())
 }

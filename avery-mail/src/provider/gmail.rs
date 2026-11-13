@@ -1,6 +1,5 @@
 mod charset;
 mod header;
-mod html;
 mod message;
 mod mime;
 mod outgoing;
