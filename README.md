@@ -91,8 +91,9 @@ setup before Goose starts. They are a thin layer over the very same code as `ave
 
 1. **Welcome.** *Weiter* starts, *Später* asks again at the next start, *Nicht mehr fragen* never asks again (see below).
 2. **Accounts.** Choose Gmail and/or Outlook.com. Apple Mail and Calendar is optional and off unless you tick it.
-3. **Per account.** A short explanation that you need your own app registration once (with *Anleitung öffnen*, which opens
-   the README and the Google Cloud or Entra pages in the browser; the dialogs then end for now and the next start continues),
+3. **Per account.** A short explanation that you need your own app registration once (*Anleitung öffnen* lets you pick
+   pages and opens them in the browser: this README section and the Google Cloud or Entra console pages; the dialogs then
+   end for now and the next start continues),
    the client ID (for Gmail also the client secret, which is typed hidden), the level (*Nur lesen* or *Lesen und mit Freigabe
    schreiben*), the sign-in in the browser (a notification says so while Avery waits, at most 3 minutes), and a dialog with the
    result: the address that is now linked, or the reason why not.
