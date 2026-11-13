@@ -149,6 +149,7 @@ function readMessage(acc, req) {
   var mb = findMailbox(acc, req.mailbox, '', 3);
   if (!mb) { throw new Error('mailbox_not_found'); }
   var m = mb.ref.messages.byId(req.id);
+  if (!ownedBy(m, acc)) { throw new Error('message_not_in_account'); }
   var out = {mailbox: mb.path, id: req.id};
   out.subject = m.subject();
   out.from = m.sender();
@@ -192,9 +193,52 @@ function discard(msg) {
   try { mail().delete(msg); } catch (e) {}
 }
 
+function hidden(cp) {
+  for (var k = 0; k < INVISIBLE_RANGES.length; k++) {
+    if (cp >= INVISIBLE_RANGES[k][0] && cp <= INVISIBLE_RANGES[k][1]) { return true; }
+  }
+  return false;
+}
+
+function shown(value) {
+  var s = String(value === null || value === undefined ? '' : value), out = '', i, cp;
+  for (i = 0; i < s.length; i++) {
+    cp = s.codePointAt(i);
+    if (cp > 0xffff) { i++; }
+    if (!hidden(cp)) { out += String.fromCodePoint(cp); }
+  }
+  return out;
+}
+
 function flat(value, max) {
-  var s = String(value === null || value === undefined ? '' : value).replace(/[\r\n\t\u2028\u2029]+/g, ' ').trim();
-  return s.length > max ? s.substring(0, max - 1) + '\u2026' : s;
+  var chars = Array.from(shown(String(value === null || value === undefined ? '' : value).replace(/[\s\u0085]+/g, ' ')).trim());
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '\u2026' : chars.join('');
+}
+
+var ADDRESS = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]{1,64}@[A-Za-z0-9.-]{3,189}$/;
+
+function plainAddress(a) {
+  return a.length <= 254 && ADDRESS.test(a);
+}
+
+function ownedBy(m, acc) {
+  var owner;
+  try { owner = String(m.mailbox().account().id()); } catch (e) { return true; }
+  return owner === String(acc.id());
+}
+
+function snapshot(msg) {
+  var parts = [], reads = [
+    function () { return String(msg.sender()); },
+    function () { return rcptList(msg.toRecipients); },
+    function () { return rcptList(msg.ccRecipients); },
+    function () { return String(msg.subject()); },
+    function () { return squash(msg.content()); }
+  ];
+  for (var i = 0; i < reads.length; i++) {
+    try { parts.push(reads[i]()); } catch (e) { parts.push('?' + i); }
+  }
+  return JSON.stringify(parts);
 }
 
 function squash(value) {
@@ -203,7 +247,7 @@ function squash(value) {
 
 function flatList(list) {
   var out = [];
-  for (var i = 0; i < list.length; i++) { out.push(flat(list[i], 120)); }
+  for (var i = 0; i < list.length; i++) { out.push(flat(list[i], 300)); }
   return out.join(', ');
 }
 
@@ -250,6 +294,7 @@ function composeMessage(acc, req) {
     var mb = findMailbox(acc, req.reply.mailbox, '', 3);
     if (!mb) { throw new Error('mailbox_not_found'); }
     var orig = mb.ref.messages.byId(req.reply.id);
+    if (!ownedBy(orig, acc)) { throw new Error('message_not_in_account'); }
     replyInfo = {subject: String(orig.subject()), from: String(orig.sender())};
     msg = app.reply(orig, {openingWindow: draft, replyToAll: !!req.reply.all});
     var quoted = '';
@@ -271,6 +316,13 @@ function composeMessage(acc, req) {
   var preview = {from: from, to: rcptList(msg.toRecipients), cc: rcptList(msg.ccRecipients),
                  subject: String(msg.subject()), body: req.body, reply: replyInfo};
   if (!preview.to.length) { discard(msg); throw new Error('no_recipients'); }
+  if (!draft) {
+    var everyone = preview.to.concat(preview.cc);
+    if (!(everyone.length <= req.maxRecipients)) { discard(msg); throw new Error('too_many_recipients'); }
+    for (i = 0; i < everyone.length; i++) {
+      if (!plainAddress(everyone[i])) { discard(msg); throw new Error('recipient_invalid'); }
+    }
+  }
   if (draft) {
     var saved = true;
     try { msg.save(); } catch (e) { saved = false; }
@@ -289,7 +341,7 @@ function composeMessage(acc, req) {
     throw new Error('content_mismatch');
   }
   preview.body = finalText;
-  var decision;
+  var approved = snapshot(msg), decision;
   try {
     decision = askApproval(preview, req.seconds);
   } catch (e) {
@@ -297,7 +349,12 @@ function composeMessage(acc, req) {
     throw e;
   }
   if (decision !== 'send') { discard(msg); preview.status = decision; return preview; }
-  msg.send();
+  if (snapshot(msg) !== approved) { discard(msg); throw new Error('content_mismatch'); }
+  try {
+    msg.send();
+  } catch (e) {
+    throw new Error('send_state_unknown: ' + String((e && e.message) || e));
+  }
   preview.status = 'sent';
   return preview;
 }

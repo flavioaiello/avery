@@ -7,7 +7,8 @@ use crate::json::{self, Json, Object};
 use crate::read_tools;
 use crate::text::clean;
 use crate::texts::{
-    write_instructions, MAX_RECIPIENTS, MAX_SEND_CHARS, READ_INSTRUCTIONS, SERVER_NAME, VERSION,
+    write_instructions, MAX_RECIPIENTS, MAX_SEND_CHARS, MAX_SEND_LINES, READ_INSTRUCTIONS,
+    SERVER_NAME, VERSION,
 };
 use crate::write_tools;
 
@@ -244,7 +245,7 @@ fn write_tool_list() -> Vec<Json> {
         tool(
             "send_message",
             &format!(
-                "Send a mail. The user must approve each mail in a macOS dialog showing recipients and text; if they decline, nothing is sent. New mail: to, subject, body. Answer: reply_to_id (+ account and mailbox of the original) and body. Plain text up to {MAX_SEND_CHARS} characters, no Bcc, no attachments; longer texts must be drafts."
+                "Send a mail. The user must approve each mail in a macOS dialog showing recipients and text; if they decline, nothing is sent. New mail: to, subject, body. Answer: reply_to_id (+ account and mailbox of the original) and body. Plain text up to {MAX_SEND_CHARS} characters and {MAX_SEND_LINES} lines, no Bcc, no attachments; longer texts must be drafts."
             ),
             compose_properties(),
             &["body"],

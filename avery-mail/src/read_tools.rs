@@ -62,11 +62,14 @@ fn collect(ctx: &Context, args: &Object, request: Collect) -> ToolResult<String>
             }
             Err(error) => return Err(error),
         };
-        let shown_box = result
-            .mailbox
-            .clone()
-            .or_else(|| mailbox.clone())
-            .unwrap_or_else(|| "INBOX".to_string());
+        let shown_box = clean_str(
+            &result
+                .mailbox
+                .clone()
+                .or_else(|| mailbox.clone())
+                .unwrap_or_else(|| "INBOX".to_string()),
+            Some(120),
+        );
         totals.push(format!(
             "{}/{}: {} matches",
             account.label, shown_box, result.total
@@ -258,7 +261,9 @@ pub(crate) fn read_message(ctx: &Context, args: &Object) -> ToolResult<String> {
         UNTRUSTED.to_string(),
         format!(
             "Account: {} | Mailbox: {} | id: {}",
-            account.label, message.mailbox, id
+            account.label,
+            clean_str(&message.mailbox, Some(120)),
+            id
         ),
         format!("From: {}", one_line_str(&message.from, 120)),
         format!("To: {}", or_dash(people(&message.to))),

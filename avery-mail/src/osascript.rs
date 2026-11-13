@@ -8,6 +8,13 @@ use std::time::{Duration, Instant};
 
 pub(crate) const OSASCRIPT: &str = "/usr/bin/osascript";
 pub(crate) const MAIL_SCRIPT: &str = include_str!("../jxa/mail.js");
+
+pub(crate) fn mail_script() -> String {
+    format!(
+        "var INVISIBLE_RANGES = {};\n{MAIL_SCRIPT}",
+        crate::text::hidden_ranges_js()
+    )
+}
 pub(crate) const STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) const STDERR_LIMIT: usize = 64 * 1024;
 const POLL: Duration = Duration::from_millis(20);
@@ -145,9 +152,10 @@ impl Host for OsascriptHost {
     }
 
     fn run(&self, payload: &str, timeout: Duration) -> Finished {
+        let script = mail_script();
         run_command(
             OSASCRIPT,
-            &["-l", "JavaScript", "-e", MAIL_SCRIPT, payload],
+            &["-l", "JavaScript", "-e", script.as_str(), payload],
             timeout,
         )
     }
