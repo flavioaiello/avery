@@ -2943,6 +2943,52 @@ fn hostile_headers_of_the_original_cannot_inject_headers_into_the_answer() -> Te
 }
 
 #[test]
+fn a_reply_to_a_double_encoded_subject_carries_the_text_the_dialog_shows() -> TestResult {
+    let inner = format!(
+        "=?UTF-8?B?{}?=",
+        base64::encode("Rechnung \u{202e}fdp.exe\u{200b}".as_bytes())
+    );
+    let outer = format!("=?UTF-8?B?{}?=", base64::encode(inner.as_bytes()));
+    let original = metadata(
+        "orig1",
+        &["INBOX"],
+        "1700000000000",
+        &[
+            ("From", "Anna Muster <anna@example.org>"),
+            ("Subject", &outer),
+            ("Message-ID", "<orig1@mail.example>"),
+        ],
+    );
+    let wanted = format!("Re: {inner}");
+    for mode in [Mode::Send, Mode::Draft] {
+        let transport = replying(&original);
+        let host = Dialog::deciding("send");
+        let request = answer_to(mode, "orig1", false, "Danke.")?;
+        let result = run(&transport, &host, &["alice@gmail.example"], &request)?;
+        assert_eq!(result.subject, wanted, "{mode:?}");
+        assert_eq!(
+            result.reply.as_ref().map(|(subject, _)| subject.as_str()),
+            Some(inner.as_str())
+        );
+        let message = the_post(&transport)?;
+        let value = message.header("Subject").ok_or("subject")?;
+        assert!(value.is_ascii(), "{mode:?}");
+        assert!(!message.raw.contains(&inner), "{mode:?}");
+        assert_eq!(header::text(value, 500), wanted, "{mode:?}");
+        if mode == Mode::Send {
+            let shown = dialog_payload(&host)?;
+            let dialog_subject = shown
+                .get("subject")
+                .and_then(Json::as_str)
+                .ok_or("subject")?;
+            assert_eq!(dialog_subject, wanted);
+            assert_eq!(header::text(value, 500), dialog_subject);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_very_long_original_subject_is_cut_so_that_the_dialog_shows_all_of_it() -> TestResult {
     let original = metadata(
         "orig1",
@@ -3285,6 +3331,41 @@ fn a_non_ascii_subject_is_encoded_and_no_header_line_gets_long() -> TestResult {
     let header_value = message.header("Subject").ok_or("subject")?;
     assert!(header_value.is_ascii());
     assert_eq!(header::text(header_value, 500), subject);
+    Ok(())
+}
+
+#[test]
+fn an_encoded_word_in_a_new_subject_is_sent_as_the_text_the_dialog_shows() -> TestResult {
+    let word = format!(
+        "=?UTF-8?B?{}?=",
+        base64::encode("Rechnung \u{202e}fdp.exe\u{200b}".as_bytes())
+    );
+    for mode in [Mode::Send, Mode::Draft] {
+        let transport = sender()
+            .json(Method::Post, "/messages/send", 200, SENT_ANSWER)
+            .json(Method::Post, "/drafts", 200, DRAFT_ANSWER);
+        let host = Dialog::deciding("send");
+        let request = mail(mode, &["anna@example.org"], &[], &word, "Text.");
+        let result = run(&transport, &host, &[], &request)?;
+        assert_eq!(result.subject, word, "{mode:?}");
+        let message = the_post(&transport)?;
+        let value = message.header("Subject").ok_or("subject")?;
+        assert!(value.is_ascii(), "{mode:?}");
+        assert!(!message.raw.contains(&word), "{mode:?}");
+        assert_eq!(header::text(value, 500), word, "{mode:?}");
+        match mode {
+            Mode::Send => {
+                let shown = dialog_payload(&host)?;
+                let dialog_subject = shown
+                    .get("subject")
+                    .and_then(Json::as_str)
+                    .ok_or("subject")?;
+                assert_eq!(dialog_subject, word);
+                assert_eq!(header::text(value, 500), dialog_subject);
+            }
+            Mode::Draft => assert!(host.shown().is_empty()),
+        }
+    }
     Ok(())
 }
 

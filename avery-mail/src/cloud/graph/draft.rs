@@ -62,6 +62,27 @@ fn mismatch(mode: Mode) -> ToolError {
     }
 }
 
+fn subject_problem(subject: &str) -> Option<String> {
+    if subject.contains("=?") {
+        Some("contains '=?', which mail programs read as an encoded word".to_string())
+    } else if subject.chars().any(|c| c.is_control() || is_hidden(c)) {
+        Some("contains control or invisible characters".to_string())
+    } else if char_len(subject) > MAX_TEXT {
+        Some(format!("is longer than {MAX_TEXT} characters"))
+    } else {
+        None
+    }
+}
+
+fn check_subject(subject: &str) -> ToolResult<()> {
+    match subject_problem(subject) {
+        Some(problem) => Err(ToolError::msg(format!(
+            "The subject {problem}, so the approval dialog could not show it the way the recipients will see it. {NOT_SENT} Choose another subject; an answer takes the subject of the original message, so ask the user to answer in Outlook.com itself."
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn before_send(error: ToolError) -> ToolError {
     match error {
         ToolError::Msg(text) if text.contains("NOTHING") => ToolError::Msg(text),
@@ -147,6 +168,7 @@ fn vet(draft: &Draft, own: &Own, request: &ComposeRequest) -> ToolResult<()> {
     if request.mode == Mode::Send && (draft.bcc > 0 || draft.attachments) {
         return Err(mismatch(request.mode));
     }
+    check_subject(&draft.subject)?;
     if body_ok(draft, &request.body) {
         Ok(())
     } else {
@@ -315,7 +337,7 @@ fn preview_of(draft: &Draft, reply: Option<(String, String)>) -> Preview {
         from: one_line_str(&draft.from, MAX_ADDRESS),
         to: shown_addresses(&draft.to),
         cc: shown_addresses(&draft.cc),
-        subject: one_line_str(&draft.subject, MAX_TEXT),
+        subject: draft.subject.clone(),
         body: clean_str(&draft.body, None),
         reply,
         status: String::new(),
@@ -376,6 +398,7 @@ pub(crate) fn compose(
         Some(spec) => Some(original(api, &spec.id)?),
         None => {
             check_recipients(request.mode, &request.to, &request.cc)?;
+            check_subject(&request.subject)?;
             None
         }
     };
@@ -421,6 +444,9 @@ mod tests {
     const ORIGINAL_GET: &str = "GET /messages/AAMkORIGINAL%3D?$select=subject%2Cfrom";
     const SEND: &str = "POST /messages/AAMkDRAFT-1%3D/send";
     const DELETE: &str = "DELETE /messages/AAMkDRAFT-1%3D";
+    const WORD: &str = "=?UTF-8?B?UmVjaG51bmcg4oCuZmRwLmV4ZeKAiw==?=";
+    const CREATE_REPLY: &str = "POST /messages/AAMkORIGINAL%3D/createReply";
+    const PATCH: &str = "PATCH /messages/AAMkDRAFT-1%3D";
 
     struct Dialogs {
         stdout: String,
@@ -892,6 +918,13 @@ mod tests {
                 "subject",
                 Back {
                     subject: "Anders".to_string(),
+                    ..Back::new()
+                },
+            ),
+            (
+                "subject with an encoded word",
+                Back {
+                    subject: WORD.to_string(),
                     ..Back::new()
                 },
             ),
@@ -1961,23 +1994,152 @@ mod tests {
     }
 
     #[test]
-    fn hostile_server_text_is_cleaned_before_it_reaches_the_dialog() -> TestResult {
+    fn a_server_subject_that_the_dialog_could_not_show_exactly_is_refused_and_removed() -> TestResult
+    {
+        let cases = [
+            (
+                "line break",
+                format!("Re:\r\nBcc: evil@example.org\u{200b} {}", "s".repeat(10)),
+                "control or invisible characters",
+            ),
+            (
+                "zero width",
+                "RE: pay\u{200b}ment".to_string(),
+                "control or invisible characters",
+            ),
+            (
+                "bidi override",
+                "RE: a\u{202e}b".to_string(),
+                "control or invisible characters",
+            ),
+            (
+                "tag character",
+                "RE: tag\u{e0041}".to_string(),
+                "control or invisible characters",
+            ),
+            (
+                "tab",
+                "RE: a\tb".to_string(),
+                "control or invisible characters",
+            ),
+            (
+                "next line",
+                "RE: a\u{85}b".to_string(),
+                "control or invisible characters",
+            ),
+            (
+                "nul",
+                "RE: a\u{0}b".to_string(),
+                "control or invisible characters",
+            ),
+            (
+                "too long",
+                format!("RE: {}", "s".repeat(MAX_TEXT - 3)),
+                "longer than 300 characters",
+            ),
+            ("encoded word", format!("RE: {WORD}"), "'=?'"),
+            ("bare marker", "=?".to_string(), "'=?'"),
+        ];
+        for (what, subject, problem) in cases {
+            for mode in [Mode::Send, Mode::Draft] {
+                let back = Back {
+                    subject: subject.clone(),
+                    ..Back::reply()
+                };
+                let transport = reply_transport(&back);
+                let host = Dialogs::saying("send");
+                let error = refused(run(&transport, &host, &answer(mode, false)?), problem)?;
+                assert!(matches!(error, ToolError::Msg(_)), "{what} {mode:?}");
+                assert!(error.message().contains(NOT_SENT), "{what} {mode:?}");
+                assert!(error.message().contains("Outlook.com itself"), "{what}");
+                assert_eq!(
+                    calls(&transport),
+                    [ORIGINAL_GET, CREATE_REPLY, PATCH, READ_BACK, DELETE],
+                    "{what} {mode:?}"
+                );
+                assert!(sent_nothing(&transport), "{what} {mode:?}");
+                assert!(host.payloads().is_empty(), "{what} {mode:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_dialog_shows_the_server_subject_exactly_as_it_was_read_back() -> TestResult {
+        let longest = format!("RE: {}", "s".repeat(MAX_TEXT - 4));
+        assert_eq!(longest.chars().count(), MAX_TEXT);
+        for subject in [
+            "RE: Einladung zum Geburtstag".to_string(),
+            "RE:  two  spaces  and a trailing one ".to_string(),
+            "RE: \"quoted\" <angle> & \\ \u{e4}\u{20ac}\u{1f600}".to_string(),
+            "RE: Was? =) ?= = ?".to_string(),
+            longest,
+        ] {
+            let back = Back {
+                subject: subject.clone(),
+                ..Back::reply()
+            };
+            let transport = reply_transport(&back);
+            let host = Dialogs::saying("send");
+            let preview = run(&transport, &host, &answer(Mode::Send, false)?)?;
+            assert_eq!(preview.subject, subject);
+            assert_eq!(preview.status, "sent");
+            assert_eq!(
+                dialog(&host)?.get("subject").and_then(Json::as_str),
+                Some(subject.as_str())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_subject_that_could_be_read_as_an_encoded_word_is_refused_before_anything_is_created(
+    ) -> TestResult {
+        for subject in [WORD, "Re: =?UTF-8?B?QQ==?=", "=?", "a =? b", "x=?"] {
+            for mode in [Mode::Send, Mode::Draft] {
+                let transport = Scripted::new();
+                let host = Dialogs::saying("send");
+                let request = ComposeRequest {
+                    subject: subject.to_string(),
+                    ..new_mail(mode)
+                };
+                let error = refused(run(&transport, &host, &request), "'=?'")?;
+                assert!(matches!(error, ToolError::Msg(_)), "{subject} {mode:?}");
+                assert!(error.message().contains(NOT_SENT), "{subject} {mode:?}");
+                assert!(transport.seen().is_empty(), "{subject} {mode:?}");
+                assert!(host.payloads().is_empty(), "{subject} {mode:?}");
+            }
+        }
         let back = Back {
-            subject: format!("Re:\r\nBcc: evil@example.org\u{200b} {}", "s".repeat(400)),
-            to: strings(&["anna@example.org"]),
-            ..Back::reply()
+            subject: "Was? =) ?= = ?".to_string(),
+            ..Back::new()
         };
-        let transport = reply_transport(&back);
-        let host = Dialogs::saying("send");
-        let preview = run(&transport, &host, &answer(Mode::Send, false)?)?;
-        assert!(preview.subject.starts_with("Re: Bcc: evil@example.org sss"));
-        assert!(preview.subject.ends_with(" [...]"));
-        assert!(!preview.subject.contains('\n'));
-        let fields = dialog(&host)?;
-        assert_eq!(
-            fields.get("subject").and_then(Json::as_str),
-            Some(preview.subject.as_str())
-        );
+        let request = ComposeRequest {
+            subject: back.subject.clone(),
+            ..new_mail(Mode::Send)
+        };
+        let preview = run(&mail_transport(&back), &Dialogs::saying("send"), &request)?;
+        assert_eq!(preview.status, "sent");
+        assert_eq!(preview.subject, "Was? =) ?= = ?");
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_subject_that_the_dialog_could_not_show_is_refused_before_anything_is_created(
+    ) -> TestResult {
+        let long = "s".repeat(MAX_TEXT + 1);
+        for subject in ["a\u{200b}b", "a\u{202e}b", "a\nb", "a\tb", long.as_str()] {
+            let transport = Scripted::new();
+            let host = Dialogs::saying("send");
+            let request = ComposeRequest {
+                subject: subject.to_string(),
+                ..new_mail(Mode::Send)
+            };
+            let error = refused(run(&transport, &host, &request), NOT_SENT)?;
+            assert!(matches!(error, ToolError::Msg(_)), "{subject:?}");
+            assert!(transport.seen().is_empty(), "{subject:?}");
+            assert!(host.payloads().is_empty(), "{subject:?}");
+        }
         Ok(())
     }
 
@@ -2241,7 +2403,7 @@ mod tests {
         assert_eq!(draft.cc.len(), MAX_READ_RECIPIENTS);
         assert_eq!(draft.subject.chars().count(), MAX_RAW_SUBJECT);
         let preview = preview_of(&draft, None);
-        assert_eq!(preview.subject.chars().count(), MAX_TEXT + 6);
+        assert_eq!(preview.subject, draft.subject);
         assert_eq!(preview.to.len(), MAX_READ_RECIPIENTS);
         let many_bcc = Back {
             bcc: plain(150),

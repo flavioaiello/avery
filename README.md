@@ -177,7 +177,9 @@ doing something.
 - **Replies** use the account's reply: the recipients and the subject are taken from the original message.
 - **Direct accounts** (Gmail, Outlook.com) use the same dialog, built from the exact message the server is about to
   send. A request that fails after the click is reported as an unknown outcome and counts as sent; the server never
-  repeats a send or a change on its own.
+  repeats a send or a change on its own. A subject with `=?` (the start of an encoded header word) is sent as plain
+  text by Gmail and refused by Outlook.com; an Outlook.com answer is also refused when the subject the server built
+  for it cannot be shown exactly (invisible characters, more than 300 characters).
 
 The dialog is the hard gate. Instructions to the model (`top-of-mind.md`) are only a second line of defence.
 The profile disables Goose's shell and file extensions; do not enable them for this profile.
