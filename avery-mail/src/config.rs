@@ -34,6 +34,7 @@ pub(crate) enum UpdateError {
     Lock(io::ErrorKind),
     Unreadable(ToolError),
     Refused(Refusal),
+    Invalid(String),
     Write(io::ErrorKind),
 }
 
@@ -174,7 +175,17 @@ impl Settings {
         let mut rights = stored.clone();
         let value = change(&mut rights).map_err(UpdateError::Refused)?;
         if rights != stored {
-            self.save_config(&rights.to_config())
+            let config = rights.to_config();
+            match Rights::parse(&config) {
+                Ok(read_back) if read_back == rights => {}
+                Ok(_) => {
+                    return Err(UpdateError::Invalid(
+                        "the saved file would be read back differently".to_string(),
+                    ))
+                }
+                Err(what) => return Err(UpdateError::Invalid(what)),
+            }
+            self.save_config(&config)
                 .map_err(|error| UpdateError::Write(error.kind()))?;
         }
         Ok(value)
@@ -477,6 +488,8 @@ pub(crate) fn make_dirs(path: &str, mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::MailAccount;
+    use crate::calendar::CalendarEntry;
     use crate::provider::Provider;
     use crate::rights::RemoteAccount;
     use crate::testutil::{j, settings_at, TempDir, TestResult};
@@ -1173,6 +1186,106 @@ mod tests {
         fs::write(&s.config_path, handwritten)?;
         updated(&s, |_| Ok(()))?;
         assert_eq!(fs::read_to_string(&s.config_path)?, handwritten);
+        Ok(())
+    }
+
+    #[test]
+    fn a_config_with_name_less_entries_that_the_reader_took_is_updated_and_read_again() -> TestResult
+    {
+        let long = "z".repeat(200);
+        let hidden = "a\u{200b} b";
+        for id in [" x", "x ", hidden, long.as_str()] {
+            let dir = TempDir::new()?;
+            let s = write_config(
+                &dir,
+                &format!(
+                    r#"{{"version": 3, "apple": {{
+                        "mail": [{{"id": "{id}", "level": "read"}}],
+                        "calendars": [{{"id": "{id}", "level": "write"}}]}}}}"#
+                ),
+            )?;
+            updated(&s, |rights| {
+                rights.sends_per_hour = 7;
+                Ok(())
+            })
+            .map_err(|what| format!("{id:?}: {what}"))?;
+            let rights = s.stored_rights()?;
+            assert_eq!(rights.sends_per_hour, 7);
+            assert_eq!(
+                rights.apple.mail[0].0.name,
+                crate::text::one_line_str(id, crate::rights::MAX_NAME)
+            );
+            assert_eq!(rights.apple.mail[0].0.id, id);
+            assert_eq!(rights.apple.calendars[0].1, Level::Write);
+            updated(&s, |rights| {
+                rights.sends_per_hour = 8;
+                Ok(())
+            })?;
+            assert_eq!(s.stored_rights()?.sends_per_hour, 8);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_update_never_saves_a_config_that_the_reader_would_refuse() -> TestResult {
+        type Break = fn(&mut Rights) -> Result<(), Refusal>;
+        let breaks: [(&str, Break); 4] = [
+            ("one line", |rights| {
+                rights.apple.mail.push((
+                    MailAccount {
+                        id: "ACC-9".to_string(),
+                        name: "a\u{200b}b".to_string(),
+                        kind: String::new(),
+                        addresses: Vec::new(),
+                    },
+                    Level::Read,
+                ));
+                Ok(())
+            }),
+            ("more than", |rights| {
+                for index in 0..=crate::rights::MAX_ACCOUNTS {
+                    let address = format!("u{index}@gmail.example");
+                    let added = RemoteAccount::new(Provider::Google, &address);
+                    rights.accounts.extend(added);
+                }
+                Ok(())
+            }),
+            ("differently", |rights| {
+                rights.apple.calendars.push((
+                    CalendarEntry {
+                        id: " x".to_string(),
+                        name: String::new(),
+                    },
+                    Level::Read,
+                ));
+                Ok(())
+            }),
+            ("already linked directly", |rights| {
+                rights.apple.mail.push((
+                    MailAccount {
+                        id: "ACC-9".to_string(),
+                        name: "Privat".to_string(),
+                        kind: String::new(),
+                        addresses: vec!["alice@gmail.example".to_string()],
+                    },
+                    Level::Read,
+                ));
+                Ok(())
+            }),
+        ];
+        for (reason, change) in breaks {
+            let dir = TempDir::new()?;
+            let s = write_config(&dir, REMOTE)?;
+            let outcome = s.update_rights(change);
+            assert!(
+                matches!(&outcome, Err(UpdateError::Invalid(what)) if what.contains(reason)),
+                "{reason}: {outcome:?}"
+            );
+            assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE, "{reason}");
+            assert!(!Path::new(&format!("{}.tmp", s.config_path)).exists());
+            drop(hold(&s)?);
+            assert_eq!(s.stored_rights()?.accounts.len(), 2);
+        }
         Ok(())
     }
 

@@ -285,7 +285,10 @@ Set `AVERY_HOME` to use another base folder.
 An account entry is the link: `mail` and `calendars` are optional (no `mail` means no mail access). Each address
 appears once (the same address under Google and under Microsoft, or as a linked account and in the `apple` section, is
 rejected) and there are at most 16 accounts. The
-`apple` section is optional and only present while Apple Mail and Calendar are switched on. Unknown keys are rejected.
+`apple` section is optional and only present while Apple Mail and Calendar are switched on. A calendar or Apple entry
+without a `name` is shown under its `id`, cut to one line of at most 120 characters. Unknown keys are rejected. Every
+change the commands make is read back with the same checks before it is saved; a file that would be refused is never
+written.
 
 ## Known limitations
 

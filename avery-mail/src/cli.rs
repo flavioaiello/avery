@@ -18,7 +18,8 @@ use crate::localtime;
 use crate::provider::{calendar_origin, Client, Provider};
 use crate::recurrence;
 use crate::rights::{
-    Apple, CalendarGrant, Level, Refusal, RemoteAccount, Rights, MAX_ACCOUNTS, MAX_APPLE, MAX_NAME,
+    name_or_id, Apple, CalendarGrant, Level, Refusal, RemoteAccount, Rights, MAX_ACCOUNTS,
+    MAX_APPLE, MAX_NAME,
 };
 use crate::sendlog::{self, Outcome};
 use crate::server;
@@ -87,10 +88,17 @@ fn describe(account: &MailAccount) -> String {
     )
 }
 
+fn sanitized_calendar(info: CalendarInfo) -> CalendarInfo {
+    CalendarInfo {
+        name: name_or_id(one_line_str(&info.name, MAX_NAME), &info.id),
+        ..info
+    }
+}
+
 fn sanitized(account: MailAccount) -> MailAccount {
     MailAccount {
+        name: name_or_id(one_line_str(&account.name, MAX_NAME), &account.id),
         id: account.id,
-        name: one_line_str(&account.name, MAX_NAME),
         kind: one_line_str(&account.kind, 30),
         addresses: account
             .addresses
@@ -118,6 +126,10 @@ fn update_failed(ctx: &Context, console: &mut Console, error: &UpdateError) -> u
         UpdateError::Lock(kind) => console.say(&format!(
             "Fehler: {} nicht sperrbar ({kind:?}). Nichts gespeichert.",
             ctx.settings.lock_path()
+        )),
+        UpdateError::Invalid(what) => console.say(&format!(
+            "Interner Fehler: Die neue Konfiguration waere ungueltig ({}). Nichts gespeichert.",
+            one_line_str(what, 300)
         )),
         UpdateError::Write(kind) => console.say(&format!(
             "Fehler: config.json nicht schreibbar ({kind:?})"
@@ -582,13 +594,7 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
     };
     let calendars = match ctx.calendar.calendars(Provider::Apple, "") {
         Ok(found) => unique(
-            found
-                .into_iter()
-                .map(|info| CalendarInfo {
-                    name: one_line_str(&info.name, MAX_NAME),
-                    ..info
-                })
-                .collect(),
+            found.into_iter().map(sanitized_calendar).collect(),
             |info| info.id.as_str(),
         ),
         Err(error) => {
@@ -5206,9 +5212,14 @@ mod tests {
                 kind: format!("imap {name}"),
                 addresses: vec![name.clone(), format!("me \u{200b} {index}@example.org")],
             });
-            let calendar = CalendarEntry {
+            let info = sanitized_calendar(CalendarInfo {
                 id: format!("CAL-{index}"),
-                name: one_line_str(&name, MAX_NAME),
+                name: name.clone(),
+                writable: true,
+            });
+            let calendar = CalendarEntry {
+                id: info.id,
+                name: info.name,
             };
             let remote = calendar_name(&name, &gm("alice@{gmail}"));
             let mut rights = Rights::empty();
@@ -5232,34 +5243,59 @@ mod tests {
                 "{name:?}"
             );
             assert_eq!(one_line_str(&remote, MAX_NAME), remote, "{name:?}");
-            if account.name.is_empty() {
-                assert_eq!(parsed.apple.mail[0].0.name, account.id);
-            } else {
-                assert_eq!(parsed.apple.mail[0].0.name, account.name);
-            }
+            assert_eq!(parsed, rights, "{name:?}");
         }
         Ok(())
     }
 
     #[test]
+    fn an_internal_error_of_the_config_writer_is_reported_with_the_reason() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = second_terminal(&dir);
+        let mut out = Vec::new();
+        let mut input = Cursor::new(Vec::new());
+        let code = update_failed(
+            &ctx,
+            &mut Console {
+                input: &mut input,
+                out: &mut out,
+            },
+            &UpdateError::Invalid("apple.mail[0].name must be one line".to_string()),
+        );
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert_eq!(code, 1);
+        assert!(
+            text.contains("Interner Fehler: Die neue Konfiguration waere ungueltig (apple.mail[0].name must be one line). Nichts gespeichert."),
+            "{text}"
+        );
+        assert!(!std::path::Path::new(&ctx.settings.config_path).exists());
+        Ok(())
+    }
+
+    #[test]
     fn nasty_apple_names_never_lock_the_config() -> TestResult {
-        let names = nasty_names();
+        let mut named: Vec<(String, String)> = nasty_names()
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| (format!("ACC-{index}"), name))
+            .collect();
+        named.push((" padded id ".to_string(), String::new()));
+        named.push(("W".repeat(300), "\u{200b}".to_string()));
         let listing = crate::testutil::Listing {
-            accounts: names
+            accounts: named
                 .iter()
                 .enumerate()
-                .map(|(index, name)| MailAccount {
-                    id: format!("ACC-{index}"),
+                .map(|(index, (id, name))| MailAccount {
+                    id: id.clone(),
                     name: name.clone(),
                     kind: "imap".to_string(),
                     addresses: vec![format!("me{index}@example.org")],
                 })
                 .collect(),
-            calendars: names
+            calendars: named
                 .iter()
-                .enumerate()
-                .map(|(index, name)| CalendarInfo {
-                    id: format!("CAL-{index}"),
+                .map(|(id, name)| CalendarInfo {
+                    id: id.replace("ACC-", "CAL-"),
                     name: name.clone(),
                     writable: true,
                 })
@@ -5272,7 +5308,7 @@ mod tests {
             Box::new(listing),
             Linker::inert(),
         );
-        let count = names.len();
+        let count = named.len();
         let (code, out) = run(
             &ctx,
             &["setup", "apple"],

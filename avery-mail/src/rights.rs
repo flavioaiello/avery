@@ -200,11 +200,16 @@ fn list_of<'a>(
     }
 }
 
+pub(crate) fn name_or_id(name: String, id: &str) -> String {
+    if name.is_empty() {
+        one_line_str(id, MAX_NAME)
+    } else {
+        name
+    }
+}
+
 fn parse_name(entry: &Object, id: &str, place: &str) -> Result<String, String> {
-    Ok(match optional_text(entry, "name", place)? {
-        name if name.is_empty() => id.to_string(),
-        name => name,
-    })
+    Ok(name_or_id(optional_text(entry, "name", place)?, id))
 }
 
 fn parse_remote_calendars(
@@ -1423,6 +1428,100 @@ mod tests {
         let mut read = bob.clone();
         read.lower(false, false);
         assert_eq!(&read, bob);
+        Ok(())
+    }
+
+    fn names_of(rights: &Rights) -> Vec<String> {
+        let mail = rights.apple.mail.iter().map(|(account, _)| &account.name);
+        let calendars = rights.apple.calendars.iter().map(|(entry, _)| &entry.name);
+        let remote = rights
+            .accounts
+            .iter()
+            .flat_map(|account| account.calendars.iter().map(|grant| &grant.name));
+        mail.chain(calendars).chain(remote).cloned().collect()
+    }
+
+    #[test]
+    fn a_name_less_entry_takes_its_id_as_a_one_line_name() -> TestResult {
+        let rights = parsed(
+            r#"{"version": 3, "apple": {
+                "mail": [{"id": " ACC-1 ", "level": "read"}],
+                "calendars": [{"id": "CAL\u200b 1", "level": "read"}]}}"#,
+        )?;
+        assert_eq!(rights.apple.mail[0].0.id, " ACC-1 ");
+        assert_eq!(rights.apple.mail[0].0.name, "ACC-1");
+        assert_eq!(rights.apple.calendars[0].0.id, "CAL\u{200b} 1");
+        assert_eq!(rights.apple.calendars[0].0.name, "CAL 1");
+        let long = "L".repeat(300);
+        let clipped = one_line_str(&long, MAX_NAME);
+        assert!(clipped.len() < long.len());
+        assert_eq!(one_line_str(&clipped, MAX_NAME), clipped);
+        let rights = parsed(&format!(
+            r#"{{"version": 3, "apple": {{"mail": [{{"id": "{long}", "level": "read"}}]}}}}"#
+        ))?;
+        assert_eq!(rights.apple.mail[0].0.id, long);
+        assert_eq!(rights.apple.mail[0].0.name, clipped);
+        Ok(())
+    }
+
+    #[test]
+    fn a_name_less_remote_calendar_with_a_long_id_takes_a_clipped_name() -> TestResult {
+        let long = "c".repeat(300);
+        let rights = parsed(&format!(
+            r#"{{"version": 3, "accounts": [{{"provider": "google", "address": "alice@gmail.example",
+                "calendars": [{{"id": "{long}", "level": "read"}}]}}]}}"#
+        ))?;
+        let grant = &rights.accounts[0].calendars[0];
+        assert_eq!(grant.id, long);
+        assert_eq!(grant.name, one_line_str(&long, MAX_NAME));
+        assert_ne!(grant.name, grant.id);
+        assert_eq!(Rights::parse(&rights.to_config())?, rights);
+        Ok(())
+    }
+
+    #[test]
+    fn what_the_reader_accepts_is_always_read_back_equal_from_what_the_writer_writes() -> TestResult
+    {
+        let long = "x".repeat(300);
+        let ids = [
+            " x",
+            "x ",
+            "a\\u200b b",
+            "a \\u200b b",
+            "\\u202eevil\\u202c",
+            "tab\\there",
+            "line\\nbreak",
+            "\\u200b",
+            "\\u0000",
+            "  \\u00a0  ",
+            "AB\\u200d\\u200dCD",
+            long.as_str(),
+        ];
+        for id in ids {
+            for section in ["mail", "calendars"] {
+                let text = format!(
+                    r#"{{"version": 3, "apple": {{"{section}": [{{"id": "{id}", "level": "read"}}]}}}}"#
+                );
+                let rights = parsed(&text)?;
+                let again = Rights::parse(&rights.to_config())
+                    .map_err(|what| format!("{id:?} in {section}: {what}"))?;
+                assert_eq!(again, rights, "{id:?} in {section}");
+                for name in names_of(&rights) {
+                    assert_eq!(one_line_str(&name, MAX_NAME), name, "{id:?} in {section}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_id_that_is_nothing_but_hidden_text_keeps_an_empty_name_that_reads_back_equal(
+    ) -> TestResult {
+        let rights = parsed(
+            r#"{"version": 3, "apple": {"calendars": [{"id": "\u200b", "level": "read"}]}}"#,
+        )?;
+        assert_eq!(rights.apple.calendars[0].0.name, "");
+        assert_eq!(Rights::parse(&rights.to_config())?, rights);
         Ok(())
     }
 }
