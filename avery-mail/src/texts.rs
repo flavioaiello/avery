@@ -40,6 +40,45 @@ pub(crate) const READ_INSTRUCTIONS: &str = concat!(
     "to the user instead."
 );
 
+pub(crate) const COMMANDS: [&str; 9] = [
+    "accounts",
+    "setup",
+    "revoke",
+    "selftest",
+    "write-enable",
+    "write-disable",
+    "sendlog",
+    "selftest-write",
+    "status",
+];
+
+pub(crate) const HELP: &str = concat!(
+    "avery-mail: MCP server (stdio) for Apple Mail: reading, drafts and sending with approval.\n",
+    "\n",
+    "- Rust, standard library only; Mail.app is driven through osascript (JXA).\n",
+    "- No code path deletes, moves, flags or marks mail.\n",
+    "- Writing is opt-in per account (`write-enable`, done by the human in a terminal).\n",
+    "  Every send needs a click in a native macOS dialog that the model cannot operate;\n",
+    "  the dialog is shown by the JXA script from what Mail is about to send.\n",
+    "- Limits: plain text, no Bcc, no attachments, few recipients, rate limit, audit log.\n",
+    "- Fail closed: only accounts on the allowlist (config.json) are ever touched.\n",
+    "- Mail text is untrusted: invisible and control characters are stripped and\n",
+    "  every result carries a warning that it is data, not instructions.\n",
+    "\n",
+    "Usage\n",
+    "  avery mail [serve]         MCP server on stdin/stdout (what goose starts)\n",
+    "  avery mail accounts        list all Mail accounts, mark the enabled ones\n",
+    "  avery mail setup           choose the private accounts interactively\n",
+    "  avery mail revoke          disable all accounts (also switches writing off)\n",
+    "  avery mail write-enable    allow drafts and sending (with approval) per account\n",
+    "  avery mail write-disable   switch writing off again\n",
+    "  avery mail sendlog         show the latest send attempts\n",
+    "  avery mail status          show configuration and enabled accounts (no Mail access)\n",
+    "  avery mail selftest        check read access without printing any mail content\n",
+    "  avery mail selftest-write  check the approval dialog and drafts\n",
+    "Set MAIL_MCP_FAKE=1 to run against synthetic demo data (no Mail access).\n"
+);
+
 pub(crate) fn write_instructions() -> String {
     format!(
         concat!(

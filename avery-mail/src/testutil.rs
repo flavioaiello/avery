@@ -1,5 +1,7 @@
+use crate::backend::Mode;
 use crate::config::Settings;
-use crate::json::{self, Json, ParseError};
+use crate::json::{self, Json, Object, ParseError};
+use crate::sendlog::{LogEntry, Outcome};
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -56,5 +58,30 @@ pub(crate) fn settings_at(path: &str) -> Settings {
         config_path: path.to_string(),
         fake: false,
         fake_write: String::new(),
+    }
+}
+
+pub(crate) fn args(text: &str) -> Result<Object, String> {
+    match json::parse(text) {
+        Ok(Json::Obj(object)) => Ok(object),
+        Ok(other) => Err(format!("invalid test input: {other:?}")),
+        Err(error) => Err(format!("invalid test input: {error}")),
+    }
+}
+
+pub(crate) fn log_entry(ts: i64, outcome: Outcome, id: Option<&str>) -> LogEntry {
+    LogEntry {
+        ts,
+        mode: Mode::Send,
+        outcome,
+        account: "A".into(),
+        from: String::new(),
+        to: vec![],
+        cc: vec![],
+        subject: String::new(),
+        reply_to_id: None,
+        chars: 0,
+        sha256: String::new(),
+        id: id.map(str::to_string),
     }
 }

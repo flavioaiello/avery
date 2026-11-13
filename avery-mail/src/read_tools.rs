@@ -297,21 +297,12 @@ pub(crate) fn read_message(ctx: &Context, args: &Object) -> ToolResult<String> {
 mod tests {
     use super::*;
     use crate::fake::{FakeBackend, FakeOptions};
-    use crate::json::{parse, Json};
-    use crate::testutil::{settings_at, TestResult};
+    use crate::testutil::{args, settings_at, TestResult};
 
     fn demo() -> Context {
         let mut settings = settings_at("/nonexistent/avery-test/config.json");
         settings.fake = true;
         Context::new(settings, Box::new(FakeBackend::new(FakeOptions::default())))
-    }
-
-    fn args(text: &str) -> Result<Object, String> {
-        match parse(text) {
-            Ok(Json::Obj(object)) => Ok(object),
-            Ok(other) => Err(format!("invalid test input: {other:?}")),
-            Err(error) => Err(format!("invalid test input: {error}")),
-        }
     }
 
     fn call(f: fn(&Context, &Object) -> ToolResult<String>, text: &str) -> Result<String, String> {

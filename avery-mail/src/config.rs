@@ -10,6 +10,8 @@ use crate::json::{self, Json, Object};
 use crate::text::{self, clean, text_of};
 use crate::texts::{DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS, WRITE_OFF};
 
+pub(crate) const CONFIG_VERSION: i64 = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     pub(crate) config_path: String,
@@ -55,15 +57,21 @@ impl Settings {
     }
 
     pub(crate) fn load_config(&self) -> ToolResult<Object> {
+        let unexpected = || {
+            ToolError::msg(
+                "config.json has an unexpected format. Ask the user to move the file away and run `avery mail setup` again.",
+            )
+        };
         let unreadable = || {
             ToolError::msg(
-                "config.json is unreadable. Ask the user to run `avery mail setup` again.",
+                "config.json is unreadable. Ask the user to move the file away and run `avery mail setup` again.",
             )
         };
         let bytes = match fs::read(&self.config_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut empty = Object::new();
+                empty.insert("version", Json::Int(CONFIG_VERSION));
                 empty.insert("allowed_accounts", Json::Arr(Vec::new()));
                 return Ok(empty);
             }
@@ -71,17 +79,17 @@ impl Settings {
         };
         let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
         let data = json::parse(&text).map_err(|_| unreadable())?;
-        match data {
-            Json::Obj(object)
-                if object
-                    .get("allowed_accounts")
-                    .is_none_or(|value| matches!(value, Json::Arr(_))) =>
-            {
-                Ok(object)
-            }
-            _ => Err(ToolError::msg(
-                "config.json has an unexpected format. Ask the user to run `avery mail setup` again.",
-            )),
+        let Json::Obj(object) = data else {
+            return Err(unexpected());
+        };
+        if object.get("version") != Some(&Json::Int(CONFIG_VERSION)) {
+            return Err(ToolError::msg(format!(
+                "config.json has an unsupported format version (expected {CONFIG_VERSION}). Ask the user to move the file away and run `avery mail setup` again."
+            )));
+        }
+        match object.get("allowed_accounts") {
+            None | Some(Json::Arr(_)) => Ok(object),
+            Some(_) => Err(unexpected()),
         }
     }
 
@@ -427,15 +435,32 @@ mod tests {
             "[]",
             "\"x\"",
             "5",
-            "{\"allowed_accounts\": 5}",
-            "{\"allowed_accounts\": null}",
-            "{\"allowed_accounts\": {}}",
+            "{\"version\": 2, \"allowed_accounts\": 5}",
+            "{\"version\": 2, \"allowed_accounts\": null}",
+            "{\"version\": 2, \"allowed_accounts\": {}}",
         ] {
             let s = write_config(&dir, text)?;
             assert!(
                 matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unexpected format")),
                 "{text:?}"
             );
+        }
+        for text in [
+            "{}",
+            "{\"allowed_accounts\": []}",
+            "{\"version\": 1, \"allowed_accounts\": []}",
+            "{\"version\": 3, \"allowed_accounts\": []}",
+            "{\"version\": \"2\", \"allowed_accounts\": []}",
+            "{\"version\": 2.0, \"allowed_accounts\": []}",
+            "{\"version\": null}",
+        ] {
+            let s = write_config(&dir, text)?;
+            assert!(
+                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unsupported format version (expected 2)")),
+                "{text:?}"
+            );
+            assert!(s.allowed_accounts().is_err(), "{text:?}");
+            assert_eq!(fs::read_to_string(&s.config_path)?, text);
         }
         fs::write(dir.path("bytes.json"), [0xff, 0xfe, 0x7b, 0x7d])?;
         let s = settings_at(&dir.path("bytes.json"));
@@ -473,7 +498,7 @@ mod tests {
         let dir = TempDir::new()?;
         let s = write_config(
             &dir,
-            r#"{"allowed_accounts": [5, "x", {"name": "no id"}, {"id": ""}, {"id": 7},
+            r#"{"version": 2, "allowed_accounts": [5, "x", {"name": "no id"}, {"id": ""}, {"id": 7},
                 {"id": "A", "name": null, "type": null, "addresses": "abc"}]}"#,
         )?;
         let accounts = s.allowed_accounts()?;
@@ -541,11 +566,11 @@ mod tests {
         assert_eq!(off.resolve_writable(None), Err(ToolError::msg(WRITE_OFF)));
 
         for text in [
-            r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": ["ACC-OTHER"]}}"#,
-            r#"{"allowed_accounts": [], "write": {"accounts": ["ACC-1"]}}"#,
-            r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": "kaputt"}"#,
-            r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": "ACC-1"}}"#,
-            r#"{"allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": [1, null]}}"#,
+            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": ["ACC-OTHER"]}}"#,
+            r#"{"version": 2, "allowed_accounts": [], "write": {"accounts": ["ACC-1"]}}"#,
+            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": "kaputt"}"#,
+            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": "ACC-1"}}"#,
+            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": [1, null]}}"#,
         ] {
             let s = write_config(&dir, text)?;
             assert_eq!(s.write_settings()?.accounts, vec![], "{text}");
@@ -558,7 +583,7 @@ mod tests {
         let dir = TempDir::new()?;
         let s = write_config(
             &dir,
-            r#"{"allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": 3}}"#,
+            r#"{"version": 2, "allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": 3}}"#,
         )?;
         let settings = s.write_settings()?;
         assert_eq!(settings.accounts.len(), 1);
@@ -567,14 +592,14 @@ mod tests {
             let s = write_config(
                 &dir,
                 &format!(
-                    r#"{{"allowed_accounts": [{{"id": "A", "name": "A"}}], "write": {{"accounts": ["A"], "max_per_hour": {value}}}}}"#
+                    r#"{{"version": 2, "allowed_accounts": [{{"id": "A", "name": "A"}}], "write": {{"accounts": ["A"], "max_per_hour": {value}}}}}"#
                 ),
             )?;
             assert_eq!(s.write_settings()?.max_per_hour, expected, "{value}");
         }
         let s = write_config(
             &dir,
-            r#"{"allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": true}}"#,
+            r#"{"version": 2, "allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": true}}"#,
         )?;
         assert_eq!(
             s.write_settings(),

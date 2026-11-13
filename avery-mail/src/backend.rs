@@ -76,6 +76,14 @@ impl Mode {
             Mode::Send => "send",
         }
     }
+
+    pub(crate) fn parse(text: &str) -> Option<Mode> {
+        match text {
+            "draft" => Some(Mode::Draft),
+            "send" => Some(Mode::Send),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

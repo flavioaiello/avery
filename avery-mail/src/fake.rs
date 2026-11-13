@@ -295,7 +295,7 @@ impl Backend for FakeBackend {
                 ts: message.ts,
                 date: localtime::minute(message.ts),
                 read: message.read,
-                flagged: false,
+                flagged: message.flagged,
             })
             .collect();
         Ok(MessageList {
@@ -450,7 +450,13 @@ mod tests {
         assert_eq!(ids, ["101", "102", "103"]);
         assert_eq!(list.total, 3);
         assert_eq!(list.mailbox.as_deref(), Some("INBOX"));
-        assert!(list.items.iter().all(|i| !i.flagged));
+        let flagged: Vec<&str> = list
+            .items
+            .iter()
+            .filter(|i| i.flagged)
+            .map(|i| i.id.as_str())
+            .collect();
+        assert_eq!(flagged, ["102"]);
         Ok(())
     }
 

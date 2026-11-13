@@ -42,10 +42,6 @@ impl Object {
             .map(|(_, value)| value)
     }
 
-    pub(crate) fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
-    }
-
     pub(crate) fn insert(&mut self, key: impl Into<String>, value: impl Into<Json>) {
         let key = key.into();
         let value = value.into();
