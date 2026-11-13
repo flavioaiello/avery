@@ -253,9 +253,9 @@ doing something.
 - **Undo.** The change log keeps the event as it was before and after every change. `avery mail undo` restores it
   (a deleted event is created again; attendees and alerts do not come back). It asks for the dialog again and is not
   held back by the hourly limits, which exist for the model.
-- **Hidden text.** Control, format and invisible characters (zero-width characters, Unicode tag characters, variation
-  selectors, fillers) are stripped from mail and event text the model reads and from text it writes, so what the dialog
-  shows is what is stored or sent.
+- **Hidden text.** Control, format and invisible characters (zero-width characters, line and paragraph separators,
+  Unicode tag characters, variation selectors, fillers) are stripped from mail and event text the model reads and from
+  text it writes, so what the dialog shows is what is stored or sent.
 - **No other destructive tools.** There is no code that deletes, moves or flags mail.
 - **Replies** use the account's reply: the recipients and the subject are taken from the original message.
 - **No retries.** A request that fails after the click is reported as an unknown outcome and counts as sent; the server

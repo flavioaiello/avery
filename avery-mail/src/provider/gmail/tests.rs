@@ -3162,12 +3162,17 @@ fn requests_that_could_confuse_the_dialog_or_the_headers_are_refused_before_any_
         (mail(Mode::Send, &["a@example.org"], &[], "a\u{0}b", "b"), single_line.into()),
         (mail(Mode::Send, &["a@example.org"], &[], "a\u{202e}b", "b"), single_line.into()),
         (mail(Mode::Send, &["a@example.org"], &[], "a\u{200b}b", "b"), single_line.into()),
+        (mail(Mode::Send, &["a@example.org"], &[], "a\u{2028}b", "b"), single_line.into()),
+        (mail(Mode::Draft, &["a@example.org"], &[], "a\u{2029}b", "b"), single_line.into()),
         (mail(Mode::Send, &["a@example.org"], &[], &long_subject, "b"), "The subject is too long (max 200 characters).".into()),
         (mail(Mode::Send, &["a@example.org\r\nBcc: evil@example.org"], &[], "s", "b"), "An address contains a line break.".into()),
         (mail(Mode::Draft, &["a@example.org"], &["b@example.org\n"], "s", "b"), "An address contains a line break.".into()),
         (mail(Mode::Send, &["a@example.org"], &[], "s", "text\u{202e}evil"), "The text contains control or invisible characters that the approval dialog cannot show.".into()),
         (mail(Mode::Send, &["a@example.org"], &[], "s", "text\u{200b}"), "The text contains control or invisible characters that the approval dialog cannot show.".into()),
         (mail(Mode::Draft, &["a@example.org"], &[], "s", "te\u{0}xt"), "The text contains control or invisible characters that the approval dialog cannot show.".into()),
+        (mail(Mode::Send, &["a@example.org"], &[], "s", "eins\u{2028}zwei"), "The text contains control or invisible characters that the approval dialog cannot show.".into()),
+        (mail(Mode::Send, &["a@example.org"], &[], "s", "eins\u{2029}zwei"), "The text contains control or invisible characters that the approval dialog cannot show.".into()),
+        (mail(Mode::Draft, &["a@example.org"], &[], "s", "eins\u{85}zwei"), "The text contains control or invisible characters that the approval dialog cannot show.".into()),
         (mail(Mode::Draft, &["a@example.org"], &[], "s", &huge_body), "The text is too long.".into()),
     ];
     for (request, reason) in cases {

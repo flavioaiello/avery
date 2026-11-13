@@ -893,6 +893,30 @@ mod tests {
     }
 
     #[test]
+    fn line_separators_in_a_name_cannot_forge_a_line_of_the_dialog() -> TestResult {
+        let script = Script::new().then("ask_buttons", Reply::Button(0));
+        let mut talk = Talk::new();
+        let mut dialogs = Dialogs::new(&script, &mut talk);
+        dialogs.say("Mail: Privat\u{2028}Kalender: Gefaelscht (schreiben)\u{2029}\u{85}Ende");
+        dialogs.ask_buttons(&Buttons {
+            text: "Korrekt\u{2028}?",
+            buttons: &["Nein"],
+            default: 0,
+            cancel: None,
+            icon: Icon::Note,
+        })?;
+        let shown = script.seen()[0].text("text");
+        assert_eq!(
+            shown,
+            "Mail: PrivatKalender: Gefaelscht (schreiben)Ende\n\nKorrekt?"
+        );
+        for separator in ['\u{2028}', '\u{2029}', '\u{85}'] {
+            assert!(!shown.contains(separator), "{:x}", u32::from(separator));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn the_notes_keep_the_newest_lines_within_their_bound() -> TestResult {
         let script = Script::new().then("ask_text", Reply::text("a"));
         let mut talk = Talk::new();
@@ -1782,6 +1806,18 @@ function run(argv) {
         let broken = probe(r#"{"fail": "boom"}"#, &ask_text_request(""))?;
         assert!(!broken.ok);
         assert_eq!(broken.error, "dialog_failed: boom");
+        let separators = probe(
+            r#"{"typed": "abc"}"#,
+            &ask_text_request("").replace(
+                "\"Frage\"",
+                r#""Zeile\u2028Zwei\u2029Drei\u0085Vier\nFuenf""#,
+            ),
+        )?;
+        assert!(separators.ok, "{}", separators.error);
+        assert_eq!(
+            separators.logged("text"),
+            Json::from("ZeileZweiDreiVier\nFuenf")
+        );
         let open = probe(r#"{"typed": "x"}"#, &ask_text_request(""))?;
         assert_eq!(open.option("hiddenAnswer"), Json::Bool(false));
         Ok(())
@@ -2032,6 +2068,13 @@ function run(argv) {
         assert_eq!(shown.option("withTitle"), Json::from("Avery"));
         let broken = probe(r#"{"fail": "no center"}"#, request)?;
         assert_eq!(broken.error, "dialog_failed: no center");
+        let separators = probe(
+            "{}",
+            r#"{"op": "notify", "title": "A\u2028B", "text": "Ha\u2028l\u2029l\u0085o"}"#,
+        )?;
+        assert!(separators.ok, "{}", separators.error);
+        assert_eq!(separators.logged("text"), Json::from("Hallo"));
+        assert_eq!(separators.option("withTitle"), Json::from("AB"));
         for bad in [
             format!(
                 r#"{{"op": "notify", "title": "A", "text": {}}}"#,

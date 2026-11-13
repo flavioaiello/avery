@@ -1,12 +1,11 @@
 use crate::error::{ToolError, ToolResult};
 use crate::json::{self, Json};
 
-const HIDDEN: [(u32, u32); 26] = [
+const HIDDEN: [(u32, u32); 25] = [
     (0x0000, 0x0008),
     (0x000B, 0x000C),
     (0x000E, 0x001F),
-    (0x007F, 0x0084),
-    (0x0086, 0x009F),
+    (0x007F, 0x009F),
     (0x00AD, 0x00AD),
     (0x034F, 0x034F),
     (0x061C, 0x061C),
@@ -14,7 +13,7 @@ const HIDDEN: [(u32, u32); 26] = [
     (0x17B4, 0x17B5),
     (0x180B, 0x180F),
     (0x200B, 0x200F),
-    (0x202A, 0x202E),
+    (0x2028, 0x202E),
     (0x2060, 0x206F),
     (0x2800, 0x2800),
     (0x3164, 0x3164),
@@ -297,8 +296,11 @@ mod tests {
             '\u{80}',
             '\u{84}',
             '\u{86}',
+            '\u{85}',
             '\u{9b}',
             '\u{9f}',
+            '\u{2028}',
+            '\u{2029}',
             '\u{2800}',
             '\u{b}',
             '\u{c}',
@@ -316,10 +318,8 @@ mod tests {
             assert!(is_hidden(hidden));
         }
         for shown in [
-            '\u{85}',
             '\u{a0}',
-            '\u{2028}',
-            '\u{2029}',
+            '\u{3000}',
             '\u{e1000}',
             '\u{fe10}',
             'a',
@@ -341,7 +341,137 @@ mod tests {
     #[test]
     fn clean_keeps_tabs_newlines_and_other_whitespace_characters() {
         assert_eq!(clean_str("a\tb\nc", None), "a\tb\nc");
-        assert_eq!(clean_str("a\u{85}b\u{2028}c", None), "a\u{85}b\u{2028}c");
+        assert_eq!(
+            clean_str("a\u{a0}b\u{3000}c\u{2003}d", None),
+            "a\u{a0}b\u{3000}c\u{2003}d"
+        );
+    }
+
+    #[test]
+    fn line_and_paragraph_separators_and_the_next_line_character_are_hidden_like_controls() {
+        for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
+            assert!(is_hidden(separator), "{:x}", u32::from(separator));
+            assert_eq!(
+                clean_str(
+                    &format!("Privat{separator}Familie\n{separator}x{separator}"),
+                    None
+                ),
+                "PrivatFamilie\nx"
+            );
+            assert_eq!(
+                one_line_str(&format!("Privat{separator}Familie"), 50),
+                "Privat Familie"
+            );
+        }
+        assert_eq!(clean_str("a\u{85}b\u{2028}c\u{2029}d", None), "abcd");
+        assert_eq!(clean_str("\u{2028}\u{2029}\u{85}", None), "");
+    }
+
+    #[test]
+    fn the_table_is_sorted_apart_and_covers_the_c1_controls_and_the_separators_whole() {
+        for pair in HIDDEN.windows(2) {
+            assert!(pair[0].1 + 1 < pair[1].0, "{pair:?}");
+        }
+        for (low, high) in HIDDEN {
+            assert!(low <= high, "{low:x}");
+        }
+        assert!(HIDDEN.contains(&(0x007F, 0x009F)));
+        assert!(HIDDEN.contains(&(0x2028, 0x202E)));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hidden_in_the_script() -> Result<Vec<(u32, u32)>, Box<dyn std::error::Error>> {
+        let body = r#"
+function run(argv) {
+  var ranges = [], start = -1, cp;
+  for (cp = 0; cp <= 0x10ffff; cp++) {
+    if (hidden(cp)) {
+      if (start < 0) { start = cp; }
+    } else if (start >= 0) {
+      ranges.push([start, cp - 1]);
+      start = -1;
+    }
+  }
+  if (start >= 0) { ranges.push([start, 0x10ffff]); }
+  return JSON.stringify({ranges: ranges, shown: shown(argv[0])});
+}
+"#;
+        let script = format!(
+            "var INVISIBLE_RANGES = {};\n{}\n{body}",
+            hidden_ranges_js(),
+            crate::osascript::COMMON_SCRIPT
+        );
+        let output = std::process::Command::new(crate::osascript::OSASCRIPT)
+            .args([
+                "-l",
+                "JavaScript",
+                "-e",
+                &script,
+                "a\u{85}b\u{2028}c\u{2029}d\u{200b}e\u{a0}f",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        let answer = json::parse(String::from_utf8_lossy(&output.stdout).trim())?;
+        let object = answer.as_object().ok_or("object")?;
+        assert_eq!(
+            object.get("shown").and_then(Json::as_str),
+            Some("abcde\u{a0}f")
+        );
+        let pairs = object
+            .get("ranges")
+            .and_then(Json::as_array)
+            .ok_or("ranges")?;
+        let mut found = Vec::new();
+        for pair in pairs {
+            let bounds = pair.as_array().ok_or("pair")?;
+            let number = |at: usize| -> Result<u32, Box<dyn std::error::Error>> {
+                match bounds.get(at) {
+                    Some(Json::Int(value)) => Ok(u32::try_from(*value)?),
+                    _ => Err("bound".into()),
+                }
+            };
+            found.push((number(0)?, number(1)?));
+        }
+        Ok(found)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hidden_in_rust() -> Vec<(u32, u32)> {
+        let mut ranges = Vec::new();
+        let mut start: Option<u32> = None;
+        for code in 0..=0x10_FFFFu32 {
+            let hidden = char::from_u32(code).is_some_and(is_hidden);
+            match (hidden, start) {
+                (true, None) => start = Some(code),
+                (false, Some(first)) => {
+                    ranges.push((first, code - 1));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(first) = start {
+            ranges.push((first, 0x10_FFFF));
+        }
+        ranges
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_script_hides_exactly_the_code_points_that_rust_hides() -> TestResult {
+        let rust = hidden_in_rust();
+        assert_eq!(rust, HIDDEN.to_vec());
+        assert_eq!(hidden_in_the_script()?, rust);
+        for code in [0x85u32, 0x2028, 0x2029] {
+            assert!(
+                rust.iter()
+                    .any(|(low, high)| (*low..=*high).contains(&code)),
+                "{code:x}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
