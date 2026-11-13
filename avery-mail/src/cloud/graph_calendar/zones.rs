@@ -646,6 +646,13 @@ mod tests {
     }
 
     #[test]
+    fn the_utc_zones_map_to_the_name_of_the_utc_view() {
+        for zone in ["UTC", "Etc/UTC", "Etc/GMT", "GMT", "Zulu"] {
+            assert_eq!(windows_name(zone), Some(super::super::times::UTC), "{zone}");
+        }
+    }
+
+    #[test]
     fn unknown_or_malformed_zones_are_not_mapped() {
         for zone in [
             "",

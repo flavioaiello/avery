@@ -3,7 +3,7 @@ use crate::json::Json;
 
 const MAX_STAMP: usize = 40;
 const SAME_DAY_UNTIL: i64 = 10 * 60;
-const UTC: &str = "UTC";
+pub(super) const UTC: &str = "UTC";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Stamp {

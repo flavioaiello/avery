@@ -439,10 +439,10 @@ fn utc_days(
             .and_then(Json::as_str)
             .filter(|id| id_ok(id))
             .ok_or_else(unreadable)?;
-        let first = times::stamp(object.get("start"), "UTC")
+        let first = times::stamp(object.get("start"), times::UTC)
             .and_then(times::Stamp::utc_day)
             .ok_or_else(zone_refused)?;
-        let last = times::stamp(object.get("end"), "UTC")
+        let last = times::stamp(object.get("end"), times::UTC)
             .and_then(times::Stamp::utc_day)
             .ok_or_else(zone_refused)?;
         if found.len() >= MAX_EVENTS {
@@ -479,7 +479,7 @@ pub(crate) fn events(
         Ok(())
     })?;
     if rows.iter().any(|row| row.pending) {
-        let shifted = with_prefer(api, &prefer("UTC", false));
+        let shifted = with_prefer(api, &prefer(times::UTC, false));
         let days = utc_days(&shifted, calendar, window)?;
         for row in rows.iter_mut().filter(|row| row.pending) {
             let (first, last) = days.get(&row.event.uid).ok_or_else(changed_while_reading)?;
@@ -585,12 +585,12 @@ fn people_of(object: &Object) -> Vec<Attendee> {
 }
 
 fn shifted_days(api: &Api, uid: &str) -> ToolResult<(Date, Date)> {
-    let utc = with_prefer(api, &prefer("UTC", false));
+    let utc = with_prefer(api, &prefer(times::UTC, false));
     let url = format!("{}?$select={SHIFT_FIELDS}", event_url(uid));
     let reply = utc.get_optional(&url)?.ok_or_else(not_found)?;
     let object = reply.as_object().ok_or_else(unexpected)?;
     let day = |key: &str| {
-        times::stamp(object.get(key), "UTC")
+        times::stamp(object.get(key), times::UTC)
             .and_then(times::Stamp::utc_day)
             .ok_or_else(zone_refused)
     };
