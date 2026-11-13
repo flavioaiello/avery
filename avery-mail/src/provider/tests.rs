@@ -1099,6 +1099,24 @@ fn userinfo_answers_are_turned_into_lower_case_addresses() -> TestResult {
         assert!((google.identify)(&object(bad)?).is_err(), "{bad}");
     }
     assert_eq!(
+        (google.identify)(&object(r#"{"email": "alice@gmail.example", "hd": null}"#)?),
+        Ok("alice@gmail.example".to_string())
+    );
+    for organisation in [
+        r#"{"email": "alice@firma.example", "email_verified": true, "hd": "firma.example"}"#,
+        r#"{"email": "alice@gmail.example", "hd": ""}"#,
+        r#"{"email": "alice@gmail.example", "hd": false}"#,
+        r#"{"email": "alice@gmail.example", "hd": []}"#,
+    ] {
+        let error = (google.identify)(&object(organisation)?)
+            .err()
+            .unwrap_or_default();
+        assert!(
+            error.contains("nur persoenliche Gmail-Konten, keine Organisationskonten"),
+            "{organisation}: {error}"
+        );
+    }
+    assert_eq!(
         (microsoft.identify)(&object(
             r#"{"mail": "Bob@Outlook.example", "userPrincipalName": "x"}"#
         )?),

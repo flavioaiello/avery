@@ -76,6 +76,7 @@ static GOOGLE: OAuth = OAuth {
     registration: &[
         "Gmail und Google Kalender direkt verbinden. Du brauchst eine eigene OAuth-Client-ID",
         "(Google Cloud Console, Typ 'Desktop-App', Gmail API und Google Calendar API aktiviert).",
+        "Nur persoenliche Gmail-Konten, keine Google-Workspace- oder Organisationskonten.",
     ],
     identify: google_address,
 };
@@ -111,6 +112,12 @@ fn first_address(candidates: &[Option<&Json>]) -> Result<String, String> {
 }
 
 fn google_address(userinfo: &Object) -> Result<String, String> {
+    if !matches!(userinfo.get("hd"), None | Some(Json::Null)) {
+        return Err(
+            "Avery verbindet nur persoenliche Gmail-Konten, keine Organisationskonten (Google Workspace)."
+                .to_string(),
+        );
+    }
     if userinfo.get("email_verified") == Some(&Json::Bool(false)) {
         return Err("Google says that this address is not verified.".to_string());
     }
