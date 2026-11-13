@@ -2,7 +2,7 @@
 name = "avery-mail"
 version = "0.4.0"
 edition = "2021"
-description = "MCP server (stdio) for Apple Mail: reading, drafts and sending with approval."
+description = "MCP server (stdio) for private Gmail and Outlook.com mail and calendars, optionally Apple Mail and Calendar: reading, drafts, sending and calendar changes with approval."
 license = "MIT"
 publish = false
 

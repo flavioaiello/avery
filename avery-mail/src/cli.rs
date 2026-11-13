@@ -2678,6 +2678,8 @@ mod tests {
             assert_eq!(code, 0);
             assert!(out.contains("Usage") && out.contains("selftest-write"));
             assert!(!out.contains("write-enable"));
+            assert!(out.contains("avery mail setup apple"));
+            assert!(out.contains("avery mail link google|microsoft"));
         }
         for flag in ["version", "-V", "--version"] {
             assert_eq!(run(&ctx, &[flag], ""), (0, format!("{VERSION}\n")));

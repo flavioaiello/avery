@@ -651,7 +651,7 @@ EOF
     has "$OUT" "YAML gueltig: config.yaml" && lacks "$OUT" "UNGUELTIG"
     check "N6 doctor: gueltiges YAML wird bestaetigt" $? "$OUT"
     broken_path="$home_y/.avery/goose/config/config.yaml"
-    sed 's/description: Private Mail (Apple Mail; lesen/description: Private Mail (Apple Mail: lesen/' "$broken_path" > "$broken_path.new"
+    sed 's/description: Private Mail und Kalender (Gmail, Outlook.com; lesen/description: Private Mail und Kalender (Gmail, Outlook.com: lesen/' "$broken_path" > "$broken_path.new"
     ! cmp -s "$broken_path" "$broken_path.new"
     check "N7 (Testaufbau) der Fehler vom 12.11. laesst sich nachstellen" $?
     mv "$broken_path.new" "$broken_path"

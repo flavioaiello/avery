@@ -1,5 +1,5 @@
 #!/bin/bash
-# avery - private AI agent on macOS: Goose Desktop + local model (Splash) + Apple Mail and Calendar bridge.
+# avery - private AI agent on macOS: Goose Desktop + local model (Splash) + Gmail and Outlook.com bridge (Apple Mail and Calendar optional).
 # Layout (same in the git checkout and in the Homebrew prefix):
 #   bin/avery  bin/avery-mail  libexec/avery-make-app  share/avery/...
 set -euo pipefail
@@ -169,11 +169,11 @@ install_file() {
 
 usage() {
   cat <<EOF
-avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Mail- und Kalender-Anbindung)
+avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Gmail und Outlook.com, Apple Mail optional)
 
 Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
-  avery mail <befehl>    Mail- und Kalender-Anbindung verwalten: setup, link, unlink, accounts, calendars,
+  avery mail <befehl>    Konten und Kalender verwalten: link, unlink, setup [apple], accounts, calendars,
                          selftest, selftest-write, sendlog, changes, undo, revoke, status, help
   avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen;
                          das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist
@@ -186,7 +186,7 @@ Befehle:
   avery doctor           Voraussetzungen und Einrichtung pruefen
   avery version          Version anzeigen
 
-Erster Start: avery init, avery pull, avery mail setup, avery mail selftest
+Erster Start: avery init, avery pull, avery mail link google|microsoft, avery mail setup, avery mail selftest
 Taeglich:     avery up   (und am Ende avery down)
 Einstellungen: $AVERY_HOME/avery.env (siehe README)
 EOF
@@ -215,8 +215,10 @@ cmd_init() {
   command -v splash >/dev/null 2>&1 || say "Hinweis: Splash fehlt. Installieren mit: brew install incoai/tap/splash"
   say ""
   say "Weiter mit:"
-  say "  avery mail setup       (private Mail-Konten und Kalender waehlen, je Stufe aus/lesen/schreiben)"
+  say "  avery mail link google (oder: microsoft; privates Gmail- oder Outlook.com-Konto verbinden)"
+  say "  avery mail setup       (je Konto und Kalender die Stufe waehlen: aus/lesen/schreiben)"
   say "  avery mail selftest    (Lesezugriff pruefen)"
+  say "  Apple Mail und Kalender sind optional: avery mail setup apple"
   say "  avery up               (Modell als Dienst starten und Goose oeffnen)"
 }
 

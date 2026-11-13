@@ -1,5 +1,5 @@
 class Avery < Formula
-  desc "Private AI agent for macOS: Goose, a local model and a mail and calendar bridge"
+  desc "Private AI agent for macOS: Goose, a local model and a Gmail and Outlook.com bridge"
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,
@@ -39,8 +39,11 @@ class Avery < Formula
       First run:
         avery init
         avery pull     # downloads the model once (about 17 GB); Ctrl+C when it says Ready
-        avery mail setup
+        avery mail link google     # or: microsoft (personal accounts; you register your own OAuth app, see the README)
+        avery mail setup           # per account and calendar: off, read or write
         avery mail selftest
+
+      Apple Mail and Calendar are optional and off until you run: avery mail setup apple
 
       Daily use: open "Avery" with Spotlight or the Dock.
         It starts the model, opens Goose, and stops the model by itself a few minutes after Goose is closed.
