@@ -360,6 +360,26 @@ fn parse_apple(section: &Object) -> Result<Apple, String> {
     })
 }
 
+fn linked_directly(accounts: &[RemoteAccount], address: &str) -> Option<usize> {
+    let wanted = address.to_lowercase();
+    accounts
+        .iter()
+        .position(|account| account.address == wanted)
+}
+
+fn check_shared_addresses(accounts: &[RemoteAccount], apple: &Apple) -> Result<(), String> {
+    for (index, (account, _)) in apple.mail.iter().enumerate() {
+        for (position, address) in account.addresses.iter().enumerate() {
+            if let Some(number) = linked_directly(accounts, address) {
+                return Err(format!(
+                    "{APPLE}.mail[{index}].addresses[{position}] is already linked directly as accounts[{number}]: an address can be used only once"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn account_json(account: &RemoteAccount) -> Json {
     let mut entry = Object::new();
     entry.insert("provider", account.provider.as_str());
@@ -449,11 +469,29 @@ impl Rights {
             Some(value) => parse_apple(object_of(value, APPLE)?)?,
             None => Apple::default(),
         };
+        let accounts = parse_accounts(config)?;
+        check_shared_addresses(&accounts, &apple)?;
         Ok(Rights {
-            accounts: parse_accounts(config)?,
+            accounts,
             apple,
             sends_per_hour: limit_of(config, "sends_per_hour", DEFAULT_SENDS_PER_HOUR)?,
             changes_per_hour: limit_of(config, "changes_per_hour", DEFAULT_CHANGES_PER_HOUR)?,
+        })
+    }
+
+    pub(crate) fn shared_address(&self, addresses: &[String]) -> Option<String> {
+        addresses
+            .iter()
+            .map(|address| address.to_lowercase())
+            .find(|address| linked_directly(&self.accounts, address).is_some())
+    }
+
+    fn apple_holds(&self, address: &str) -> bool {
+        self.apple.mail.iter().any(|(account, _)| {
+            account
+                .addresses
+                .iter()
+                .any(|known| known.to_lowercase() == address)
         })
     }
 
@@ -489,14 +527,19 @@ impl Rights {
     }
 
     pub(crate) fn add_account(&mut self, account: RemoteAccount) -> Result<(), Refusal> {
-        if let Some(known) = self
+        let holder = self
             .accounts
             .iter()
             .find(|known| known.address == account.address)
-        {
+            .map(|known| known.provider)
+            .or_else(|| {
+                self.apple_holds(&account.address)
+                    .then_some(Provider::Apple)
+            });
+        if let Some(provider) = holder {
             return Err(Refusal::Taken {
                 address: account.address,
-                provider: known.provider,
+                provider,
             });
         }
         if self.accounts.len() >= MAX_ACCOUNTS {
@@ -531,6 +574,9 @@ impl Rights {
                 return Err(Refusal::Changed);
             }
             self.apple = after.apple.clone();
+            if check_shared_addresses(&self.accounts, &self.apple).is_err() {
+                return Err(Refusal::Changed);
+            }
         }
         Ok(())
     }
@@ -933,6 +979,117 @@ mod tests {
             rights.add_account(both),
             Err(Refusal::Taken { .. })
         ));
+        Ok(())
+    }
+
+    fn apple_mail_entry(name: &str, addresses: &str) -> String {
+        format!(
+            r#"{{"id": "ACC-1", "name": "{name}", "type": "imap", "addresses": {addresses}, "level": "write"}}"#
+        )
+    }
+
+    #[test]
+    fn an_address_that_is_linked_directly_cannot_also_be_enabled_through_apple() -> TestResult {
+        let accounts = r#"[{"provider": "google", "address": "alice@gmail.example", "mail": "write"}, {"provider": "microsoft", "address": "bob@outlook.example"}]"#;
+        for (entry, place) in [
+            (
+                apple_mail_entry("Privat", r#"["alice@gmail.example"]"#),
+                "apple.mail[0].addresses[0] is already linked directly as accounts[0]: an address can be used only once",
+            ),
+            (
+                apple_mail_entry("alice@gmail.example", r#"["alice@gmail.example"]"#),
+                "apple.mail[0].addresses[0] is already linked directly as accounts[0]",
+            ),
+            (
+                apple_mail_entry("Privat", r#"["Alice@Gmail.Example"]"#),
+                "apple.mail[0].addresses[0] is already linked directly as accounts[0]",
+            ),
+            (
+                apple_mail_entry("Arbeit", r#"["x@example.org", "BOB@outlook.example"]"#),
+                "apple.mail[0].addresses[1] is already linked directly as accounts[1]",
+            ),
+        ] {
+            for text in [
+                format!(
+                    r#"{{"version": 3, "accounts": {accounts}, "apple": {{"mail": [{entry}]}}}}"#
+                ),
+                format!(
+                    r#"{{"version": 3, "apple": {{"mail": [{entry}]}}, "accounts": {accounts}}}"#
+                ),
+            ] {
+                rejected(&text, place);
+            }
+        }
+        let second = format!(
+            r#"{{"version": 3, "accounts": {accounts}, "apple": {{"mail": [{}, {}]}}}}"#,
+            r#"{"id": "A", "addresses": ["me@example.org"], "level": "read"}"#,
+            r#"{"id": "B", "addresses": ["alice@gmail.example"], "level": "read"}"#
+        );
+        rejected(
+            &second,
+            "apple.mail[1].addresses[0] is already linked directly",
+        );
+        for fine in [
+            apple_mail_entry("Privat", r#"["me@example.org"]"#),
+            apple_mail_entry("Privat", "[]"),
+            apple_mail_entry("alice", r#"["alice@gmail.example.org"]"#),
+            apple_mail_entry("Privat", r#"["xalice@gmail.example"]"#),
+        ] {
+            let text = format!(
+                r#"{{"version": 3, "accounts": {accounts}, "apple": {{"mail": [{fine}]}}}}"#
+            );
+            assert!(parsed(&text).is_ok(), "{text}");
+        }
+        let calendars_only = format!(
+            r#"{{"version": 3, "accounts": {accounts}, "apple": {{"calendars": [{{"id": "alice@gmail.example", "level": "read"}}]}}}}"#
+        );
+        assert!(parsed(&calendars_only).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_linked_account_is_refused_when_apple_already_serves_its_address() -> TestResult {
+        let entry = apple_mail_entry("Privat", r#"["Alice@Gmail.Example"]"#);
+        let text = format!(r#"{{"version": 3, "apple": {{"mail": [{entry}]}}}}"#);
+        let mut rights = parsed(&text)?;
+        let taken = RemoteAccount::new(Provider::Google, "alice@gmail.example").ok_or("account")?;
+        assert_eq!(
+            rights.add_account(taken),
+            Err(Refusal::Taken {
+                address: "alice@gmail.example".to_string(),
+                provider: Provider::Apple
+            })
+        );
+        assert!(rights.accounts.is_empty());
+        let other = RemoteAccount::new(Provider::Google, "bob@gmail.example").ok_or("account")?;
+        assert_eq!(rights.add_account(other), Ok(()));
+        assert_eq!(
+            rights.shared_address(&["x@example.org".to_string(), "BOB@gmail.example".to_string()]),
+            Some("bob@gmail.example".to_string())
+        );
+        assert_eq!(rights.shared_address(&["x@example.org".to_string()]), None);
+        assert_eq!(rights.shared_address(&[]), None);
+        assert_eq!(Rights::parse(&rights.to_config()), Ok(rights));
+        Ok(())
+    }
+
+    #[test]
+    fn a_setup_is_refused_when_the_address_was_linked_directly_meanwhile() -> TestResult {
+        let before = Rights::empty();
+        let entry = apple_mail_entry("Privat", r#"["alice@gmail.example"]"#);
+        let after = parsed(&format!(
+            r#"{{"version": 3, "apple": {{"mail": [{entry}]}}}}"#
+        ))?;
+        let mut fresh = before.clone();
+        assert_eq!(fresh.apply(&before, &after), Ok(()));
+        let mut linked_meanwhile = before.clone();
+        let account =
+            RemoteAccount::new(Provider::Google, "alice@gmail.example").ok_or("account")?;
+        assert_eq!(linked_meanwhile.add_account(account), Ok(()));
+        assert_eq!(
+            linked_meanwhile.apply(&before, &after),
+            Err(Refusal::Changed)
+        );
         Ok(())
     }
 

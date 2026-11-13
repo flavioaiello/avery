@@ -120,7 +120,8 @@ avery mail unlink alice@gmail.example   # remove the account, its grants and the
 account again (for example to renew the sign-in) never raises the rights you set: it only lowers them where the new
 sign-in grants less. In `setup` level 0 only takes a grant away, the account stays linked (`unlink` ends it). `revoke`
 removes all grants and keeps the accounts. An address can be linked only once, under one provider, and at most 16 accounts
-can be linked; linking one of them again still works at that limit.
+can be linked; linking one of them again still works at that limit. An address that Apple Mail already serves cannot be
+linked directly (set that Mail account to 0 in `avery mail setup apple` first).
 
 Differences you will notice: the provider expands recurring events itself and Avery times are read and written in this
 Mac's time zone (for Outlook.com it is sent as a Windows zone name from a built-in table; a zone the table does not
@@ -140,7 +141,9 @@ This is the one command that starts Mail and Calendar. macOS asks once to let th
 (Terminal for the command line, Goose for the agent). Your choices go into the `apple` section of `config.json`; Apple is
 enabled exactly when that section has entries. Later `avery mail setup` asks again only for those entries and does not
 list Mail again; an account or calendar that vanished from Mail is noticed by `setup apple`, by `selftest` and by tool
-errors. Setting every item to 0, or `avery mail revoke`, switches Apple off again.
+errors. Setting every item to 0, or `avery mail revoke`, switches Apple off again. A Mail account whose address is
+already linked directly is listed as such and stays off, because the same mailbox twice would make every account name
+ambiguous.
 
 There are no tokens: macOS holds the credentials, Avery never sees them, and Apple accounts also work offline. The
 levels, dialogs, limits, logs and undo are the same as for Gmail and Outlook.com.
@@ -280,7 +283,8 @@ Set `AVERY_HOME` to use another base folder.
 ```
 
 An account entry is the link: `mail` and `calendars` are optional (no `mail` means no mail access). Each address
-appears once (the same address under Google and under Microsoft is rejected) and there are at most 16 accounts. The
+appears once (the same address under Google and under Microsoft, or as a linked account and in the `apple` section, is
+rejected) and there are at most 16 accounts. The
 `apple` section is optional and only present while Apple Mail and Calendar are switched on. Unknown keys are rejected.
 
 ## Known limitations

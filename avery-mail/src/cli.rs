@@ -128,6 +128,13 @@ fn update_failed(ctx: &Context, console: &mut Console, error: &UpdateError) -> u
         UpdateError::Refused(Refusal::Full) => console.say(&format!(
             "Es sind schon {MAX_ACCOUNTS} Konten verbunden. Zuerst eines trennen: avery mail unlink <adresse>"
         )),
+        UpdateError::Refused(Refusal::Taken { address, provider }) if *provider == Provider::Apple => {
+            console.say(&format!(
+                "Die Adresse {address} ist schon ueber {} eingebunden. Eine Adresse kann nur einmal verwendet werden. Zuerst dort auf Stufe 0 stellen ({}), dann erneut verbinden.",
+                provider.display(),
+                apple_command()
+            ))
+        }
         UpdateError::Refused(Refusal::Taken { address, provider }) => console.say(&format!(
             "Die Adresse {address} ist schon bei {} verbunden. Eine Adresse kann nur einmal verbunden werden. Zuerst trennen: avery mail unlink {}:{address}",
             provider.display(),
@@ -597,7 +604,18 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
         ));
         return 1;
     }
+    let (mail, shared): (Vec<MailAccount>, Vec<MailAccount>) = mail
+        .into_iter()
+        .partition(|account| rights.shared_address(&account.addresses).is_none());
     explain_levels(ctx, console, &rights);
+    for account in &shared {
+        if let Some(address) = rights.shared_address(&account.addresses) {
+            console.say(&format!(
+                "{} ({address}): schon direkt verbunden, bleibt hier aus (zum Wechseln zuerst: avery mail unlink {address}).",
+                one_line_str(&account.name, MAX_NAME)
+            ));
+        }
+    }
     let choices: Vec<Choice> = mail
         .iter()
         .map(|account| Choice {
@@ -4951,6 +4969,215 @@ mod tests {
         assert!(out.contains("wieder entfernt"), "{out}");
         assert!(second.calls() >= 2, "{}", second.calls());
         assert_eq!(second.violations(), 0);
+        Ok(())
+    }
+
+    fn apple_copy(id: &str, name: &str, address: &str) -> MailAccount {
+        MailAccount {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: "imap".to_string(),
+            addresses: vec![address.to_string()],
+        }
+    }
+
+    fn listing_context(
+        dir: &TempDir,
+        config: &str,
+        accounts: Vec<MailAccount>,
+    ) -> Result<Context, Box<dyn std::error::Error>> {
+        let settings = settings_at(&dir.path("config.json"));
+        fs::write(&settings.config_path, config)?;
+        let listing = crate::testutil::Listing {
+            accounts,
+            calendars: Vec::new(),
+        };
+        Ok(Context::new(
+            settings,
+            Box::new(listing.clone()),
+            Box::new(listing),
+            Linker::inert(),
+        ))
+    }
+
+    #[test]
+    fn setup_apple_keeps_a_directly_linked_address_at_zero_and_still_sets_up_the_rest() -> TestResult
+    {
+        let dir = TempDir::new()?;
+        let alice = gm("alice@{gmail}");
+        let config = gm(
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@{gmail}", "mail": "write"}]}"#,
+        );
+        let ctx = listing_context(
+            &dir,
+            &config,
+            vec![
+                apple_copy("ACC-ALICE", &alice, &alice),
+                apple_copy("ACC-OTHER", "Privat iCloud", "me@icloud.example"),
+            ],
+        )?;
+        let (code, out) = run(&ctx, &["setup", "apple"], "1\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains(&gm(
+                "alice@{gmail} (alice@{gmail}): schon direkt verbunden, bleibt hier aus (zum Wechseln zuerst: avery mail unlink alice@{gmail})."
+            )),
+            "{out}"
+        );
+        assert_eq!(out.matches("Stufe 0=aus").count(), 1, "{out}");
+        assert!(out.contains("Privat iCloud"), "{out}");
+        let rights = ctx.settings.stored_rights().map_err(|e| e.message())?;
+        let ids: Vec<&str> = rights
+            .apple
+            .mail
+            .iter()
+            .map(|(account, _)| account.id.as_str())
+            .collect();
+        assert_eq!(ids, ["ACC-OTHER"]);
+        assert_eq!(rights.accounts.len(), 1);
+        assert_eq!(
+            rights.mail_level(&gm("google:alice@{gmail}")),
+            Some(Level::Write)
+        );
+        let (account, _) = ctx
+            .settings
+            .resolve_writable(Some(&Json::Str(alice.clone())))
+            .map_err(|e| e.message())?;
+        assert_eq!(account.id, gm("google:alice@{gmail}"));
+        Ok(())
+    }
+
+    #[test]
+    fn setup_apple_with_nothing_but_directly_linked_accounts_changes_nothing_and_does_not_fail(
+    ) -> TestResult {
+        let dir = TempDir::new()?;
+        let alice = gm("alice@{gmail}");
+        let config = gm(
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@{gmail}", "mail": "read"}]}"#,
+        );
+        let ctx = listing_context(
+            &dir,
+            &config,
+            vec![apple_copy(
+                "ACC-ALICE",
+                &alice.to_uppercase(),
+                &alice.to_uppercase(),
+            )],
+        )?;
+        let (code, out) = run(&ctx, &["setup", "apple"], "");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("schon direkt verbunden"), "{out}");
+        assert!(out.contains("Unveraendert."), "{out}");
+        assert!(!out.contains("Stufe 0=aus"), "{out}");
+        assert_eq!(fs::read_to_string(&ctx.settings.config_path)?, config);
+        Ok(())
+    }
+
+    #[test]
+    fn linking_an_address_that_apple_already_serves_is_refused_with_the_way_out() -> TestResult {
+        let dir = TempDir::new()?;
+        let config = gm(
+            r#"{"version": 3, "apple": {"mail": [{"id": "ACC-ALICE", "name": "alice@{gmail}", "type": "imap", "addresses": ["alice@{gmail}"], "level": "write"}]}}"#,
+        );
+        let cloud = cloudy(
+            &dir,
+            &config,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains(&gm(
+                "Die Adresse alice@{gmail} ist schon ueber Apple Mail und Kalender eingebunden."
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "Zuerst dort auf Stufe 0 stellen (avery mail setup apple), dann erneut verbinden."
+            ),
+            "{out}"
+        );
+        assert!(out.contains("wieder entfernt"), "{out}");
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, config);
+        let (code, out) = run(&cloud.ctx, &["accounts"], "");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(out.matches("[imap]").count(), 1, "{out}");
+        assert!(!out.contains("[gmail]"), "{out}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_reproduced_double_enablement_is_refused_by_the_config_and_never_reaches_the_tools(
+    ) -> TestResult {
+        let dir = TempDir::new()?;
+        let config = gm(
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@{gmail}", "mail": "write"}],
+               "apple": {"mail": [{"id": "ACC-ALICE", "name": "alice@{gmail}", "type": "imap", "addresses": ["alice@{gmail}"], "level": "write"}]}}"#,
+        );
+        let ctx = real(&dir, Some(&config))?;
+        for args in [
+            vec!["accounts"],
+            vec!["status"],
+            vec!["setup"],
+            vec!["revoke"],
+        ] {
+            let (code, out) = run(&ctx, &args, "j\n");
+            assert_eq!(code, 1, "{args:?}: {out}");
+            assert!(
+                out.contains(
+                    "apple.mail[0].addresses[0] is already linked directly as accounts[0]"
+                ),
+                "{args:?}: {out}"
+            );
+            assert_eq!(fs::read_to_string(&ctx.settings.config_path)?, config);
+        }
+        let alice = Json::Str(gm("alice@{gmail}"));
+        let Err(error) = ctx.settings.resolve_writable(Some(&alice)) else {
+            return Err("a double enablement must never resolve".into());
+        };
+        assert!(
+            error
+                .message()
+                .contains("is already linked directly as accounts[0]"),
+            "{error}"
+        );
+        assert!(ctx.settings.allowed_accounts().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_direct_link_made_while_setup_apple_waits_is_not_doubled_by_the_apple_entry() -> TestResult
+    {
+        let dir = TempDir::new()?;
+        let alice = gm("alice@{gmail}");
+        let ctx = listing_context(
+            &dir,
+            r#"{"version": 3}"#,
+            vec![apple_copy("ACC-ALICE", &alice, &alice)],
+        )?;
+        let other = second_terminal(&dir);
+        let address = alice.clone();
+        let mut input = Typed::new("1\nj\n").after_line(2, move || {
+            let _ = other.settings.update_rights(|rights| {
+                rights.add_account(
+                    RemoteAccount::new(Provider::Google, &address).ok_or(Refusal::Changed)?,
+                )
+            });
+        });
+        let (code, out) = run_typed(&ctx, &["setup", "apple"], &mut input);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("Die Konfiguration wurde inzwischen geaendert"),
+            "{out}"
+        );
+        let rights = ctx.settings.stored_rights().map_err(|e| e.message())?;
+        assert_eq!(rights.accounts.len(), 1);
+        assert!(!rights.apple.enabled());
         Ok(())
     }
 
