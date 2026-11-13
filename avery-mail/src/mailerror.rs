@@ -70,7 +70,7 @@ pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
             .to_string();
     }
     if has("account_not_found") {
-        return "The account no longer exists in Mail. Ask the user to run `avery mail setup` again."
+        return "The account no longer exists in Mail. Ask the user to run `avery mail setup apple` again."
             .to_string();
     }
     if has("mailbox_not_found") {
@@ -188,6 +188,7 @@ mod tests {
     #[test]
     fn script_error_words() {
         assert!(map_error("account_not_found", None).contains("no longer exists"));
+        assert!(map_error("account_not_found", None).contains("`avery mail setup apple`"));
         assert!(map_error("mailbox_not_found", None).starts_with("Mailbox not found."));
         assert_eq!(
             map_error("too_many_hits:2500", None),

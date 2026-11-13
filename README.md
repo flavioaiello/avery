@@ -71,9 +71,10 @@ The server reads only config format 3. A config file in any other format is reje
 it away, run `avery mail unlink <address>` for every account that was linked with it: that deletes the account's token from
 the Keychain, which nothing can find any more once the file is gone. If this version cannot read the file, or the file does
 not list the account, name the provider: `avery mail unlink google:<address>` or `microsoft:<address>` deletes the token
-without a config entry. Then move the file away (`mv ~/.avery/mail/config.json ~/.avery/mail/config.old.json`), then link and
-set up again. If `avery doctor` reports profile files that do not ask before changes, `avery init --force` writes new ones
-(the old ones are kept as backup).
+without a config entry. Then move the file away (`mv ~/.avery/mail/config.json ~/.avery/mail/config.old.json`) and connect
+the accounts again: `avery mail link google` or `avery mail link microsoft` for each one, then `avery mail setup`, and
+`avery mail setup apple` if you use Apple Mail and Calendar. If `avery doctor` reports profile files that do not ask before
+changes, `avery init --force` writes new ones (the old ones are kept as backup).
 
 ## Gmail and Outlook.com
 
@@ -84,8 +85,9 @@ directly. Every account and calendar has its own level, and the model sees the s
 **Personal accounts only.** `avery mail link google` accepts a Google account only if its address ends in `@gmail.com`
 or `@googlemail.com` (and Google reports it as verified): Gmail means those two domains. Google Workspace accounts and
 Google accounts with a custom domain are refused on purpose, and nothing is stored for them. Outlook.com signs in on
-Microsoft's *consumers* tenant, so work or school accounts cannot sign in. Other mail providers (IMAP, iCloud, Exchange)
-are not supported.
+Microsoft's *consumers* tenant, so work or school accounts cannot sign in. Avery itself signs in to nothing else: it never
+signs in to IMAP, iCloud or Exchange accounts. Only the optional [Apple bridge](#apple-mail-and-calendar-optional) can
+reach such accounts, through whatever accounts Mail.app has, and Avery never sees their credentials.
 
 **What it means for trust.** Avery keeps the sign-in itself: a refresh token per account in the macOS Keychain (service
 `avery-mail`, written and read through `/usr/bin/security`, never in a file, never on a command line; requests go
@@ -281,8 +283,8 @@ section is optional and only present while Apple Mail and Calendar are switched 
 - Google lets the unverified app of a personal project expire its refresh token after 7 days while the consent screen is
   in *Testing*; publish it (still unverified) to avoid signing in again every week.
 - Personal accounts only: Google accounts must have a gmail.com or googlemail.com address (Google Workspace and custom
-  domains are refused), work and school Microsoft accounts cannot sign in, and there is no IMAP, iCloud or Exchange
-  access.
+  domains are refused) and work and school Microsoft accounts cannot sign in. Avery itself never signs in to IMAP, iCloud
+  or Exchange; only the optional Apple bridge reaches the accounts that Mail.app has.
 - Mail search covers subject and sender, not the message body.
 - Single events without attendees can be changed; links on events (`url`) are not supported.
 - Apple bridge (optional): macOS asks for permission to control Mail and Calendar for the app that starts the server

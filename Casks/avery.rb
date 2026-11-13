@@ -34,6 +34,7 @@ cask "avery" do
     First run:
       avery init
       avery pull          # downloads the model once (about 17 GB); Ctrl+C when it says Ready
-      avery mail setup
+      avery mail link google     # or: microsoft (personal accounts; you register your own OAuth app, see the README)
+      avery mail setup           # per account and calendar: off, read or write
   EOS
 end

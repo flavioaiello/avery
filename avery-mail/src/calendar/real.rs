@@ -59,7 +59,7 @@ pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
         return "Calendar reported an error while changing the event.".to_string();
     }
     if has("calendar_not_found") {
-        return "The calendar no longer exists in Calendar. Ask the user to run `avery mail setup` again."
+        return "The calendar no longer exists in Calendar. Ask the user to run `avery mail setup apple` again."
             .to_string();
     }
     if has("event_not_found") || (op == Some("event") && (has("can't get") || has("invalid index")))
@@ -383,6 +383,9 @@ mod tests {
             ),
         ] {
             let message = map_error(input, Some("events"));
+            if input == "calendar_not_found" {
+                assert!(message.contains("`avery mail setup apple`"), "{message}");
+            }
             assert!(message.contains(needle), "{input}: {message}");
         }
         assert!(map_error("Can't get event 3. (-1728)", Some("event")).contains("Event not found"));

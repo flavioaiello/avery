@@ -17,6 +17,8 @@ use crate::texts::{
     NO_CALENDARS, WRITE_OFF,
 };
 
+const LINK_AGAIN: &str = "connect the accounts again with `avery mail link google` or `avery mail link microsoft` (Apple Mail and Calendar: `avery mail setup apple`)";
+const UNLINK_FIRST: &str = "Before the file goes, `avery mail unlink google:<address>` or `microsoft:<address>` removes the stored sign-in of each linked account.";
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 const LOCK_POLL: Duration = Duration::from_millis(50);
 
@@ -101,9 +103,9 @@ impl Settings {
 
     pub(crate) fn load_config(&self) -> ToolResult<Object> {
         let unreadable = || {
-            ToolError::msg(
-                "config.json is unreadable. Ask the user to move the file away and run `avery mail setup` again.",
-            )
+            ToolError::msg(format!(
+                "config.json is unreadable. Ask the user to move the file away and {LINK_AGAIN}. {UNLINK_FIRST}"
+            ))
         };
         let bytes = match read_bounded(&self.config_path) {
             Ok(bytes) => bytes,
@@ -117,13 +119,13 @@ impl Settings {
         let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
         let data = json::parse(&text).map_err(|_| unreadable())?;
         let Json::Obj(object) = data else {
-            return Err(ToolError::msg(
-                "config.json has an unexpected format. Ask the user to move the file away and run `avery mail setup` again.",
-            ));
+            return Err(ToolError::msg(format!(
+                "config.json has an unexpected format. Ask the user to move the file away and {LINK_AGAIN}. {UNLINK_FIRST}"
+            )));
         };
         if object.get("version") != Some(&Json::Int(CONFIG_VERSION)) {
             return Err(ToolError::msg(format!(
-                "config.json has an unsupported format version (expected {CONFIG_VERSION}). Ask the user to move the file away and run `avery mail setup` again."
+                "config.json has an unsupported format version (expected {CONFIG_VERSION}). Ask the user to move the file away and {LINK_AGAIN}. {UNLINK_FIRST}"
             )));
         }
         Ok(object)
@@ -159,7 +161,7 @@ impl Settings {
         let config = self.load_config()?;
         Rights::parse(&config).map_err(|what| {
             ToolError::msg(format!(
-                "config.json is invalid ({what}). Ask the user to fix it or to move it away and run `avery mail setup` again."
+                "config.json is invalid ({what}). Ask the user to fix it, or to move it away and {LINK_AGAIN}. {UNLINK_FIRST}"
             ))
         })
     }
@@ -624,6 +626,46 @@ mod tests {
         assert_eq!(s.allowed_calendars(), Ok(vec![]));
         assert_eq!(s.resolve(None), Err(ToolError::msg(NO_ACCOUNTS)));
         assert_eq!(s.resolve_calendars(None), Err(ToolError::msg(NO_CALENDARS)));
+        Ok(())
+    }
+
+    #[test]
+    fn the_four_config_errors_tell_how_to_connect_the_accounts_again() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut messages = Vec::new();
+        for text in [
+            "nope",
+            "[]",
+            "{\"version\": 2}",
+            "{\"version\": 3, \"x\": 1}",
+        ] {
+            let s = write_config(&dir, text)?;
+            let Err(error) = s.stored_rights() else {
+                return Err(format!("{text} was accepted").into());
+            };
+            messages.push(error.message());
+        }
+        let unique: std::collections::HashSet<&String> = messages.iter().collect();
+        assert_eq!(unique.len(), 4);
+        for (index, message) in messages.iter().enumerate() {
+            let away = if index == 3 {
+                "move it away"
+            } else {
+                "move the file away"
+            };
+            for wanted in [
+                away,
+                "`avery mail link google`",
+                "`avery mail link microsoft`",
+                "`avery mail setup apple`",
+                "`avery mail unlink google:<address>`",
+                "microsoft:<address>",
+            ] {
+                assert!(message.contains(wanted), "{wanted}: {message}");
+            }
+            assert!(!message.contains("`avery mail setup` again"), "{message}");
+        }
+        assert!(messages[3].contains("fix it, or to move it away"));
         Ok(())
     }
 
