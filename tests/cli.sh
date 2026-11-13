@@ -999,17 +999,20 @@ STUB
     skip "O22 Avery.app startet 'avery up', den Weg mit der Einrichtung (O1, O2)" "osacompile fehlt"
   fi
   has "$(cat "$ROOT/Casks/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Casks/avery.rb")" "AVERY_NO_ONBOARD=1" \
-    && has "$(cat "$ROOT/Casks/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Casks/avery.rb")" "no dialog and no notification appears" \
+    && has "$(cat "$ROOT/Casks/avery.rb")" "macOS may ask for permission to show notifications" && has "$(cat "$ROOT/Casks/avery.rb")" "no dialog and no notification appears" \
+    && has "$(cat "$ROOT/Casks/avery.rb")" "only the optional Apple bridge" && lacks "$(cat "$ROOT/Casks/avery.rb")" "Automation later" \
     && lacks "$(cat "$ROOT/Casks/avery.rb")" "System Events" && has "$(cat "$ROOT/Casks/avery.rb")" "Nicht mehr fragen"
   check "O23 Cask: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$ROOT/Formula/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Formula/avery.rb")" "AVERY_NO_ONBOARD=1" \
-    && has "$(cat "$ROOT/Formula/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Formula/avery.rb")" "no dialog and no notification appears" \
+    && has "$(cat "$ROOT/Formula/avery.rb")" "macOS may ask for permission to show notifications" && has "$(cat "$ROOT/Formula/avery.rb")" "no dialog and no notification appears" \
+    && has "$(cat "$ROOT/Formula/avery.rb")" "only the optional Apple bridge" && lacks "$(cat "$ROOT/Formula/avery.rb")" "Automation later" \
     && lacks "$(cat "$ROOT/Formula/avery.rb")" "System Events"
   check "O24 Formel: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$SHARE/avery.env")" "AVERY_NO_ONBOARD"
   check "O25 die Vorlage avery.env nennt AVERY_NO_ONBOARD" $?
   has "$(cat "$ROOT/README.md")" "avery mail onboard --if-needed" && has "$(cat "$ROOT/README.md")" "onboard.dismissed" \
-    && has "$(cat "$ROOT/README.md")" "macOS may still ask for a permission" && has "$(cat "$ROOT/README.md")" "no dialog and no notification appears" \
+    && has "$(cat "$ROOT/README.md")" "macOS may ask for permission to show notifications" && has "$(cat "$ROOT/README.md")" "no dialog and no notification appears" \
+    && has "$(cat "$ROOT/README.md")" "Only the optional Apple bridge makes macOS ask once for Automation" && lacks "$(cat "$ROOT/README.md")" "Automation later" \
     && lacks "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
   check "O26 README: die Dialoge, der Schalter, die Markierung und die moegliche Berechtigung sind beschrieben, ohne System Events" $?
 
