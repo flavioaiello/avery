@@ -10,6 +10,7 @@ mod console;
 mod context;
 mod error;
 mod fake;
+mod html;
 mod http;
 mod journal;
 mod json;
