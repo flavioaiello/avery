@@ -1,66 +1,43 @@
-use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::account::{Account, MailAccount};
+use crate::account::MailAccount;
 use crate::backend::{ComposeRequest, MessageQuery, Mode, ReplySpec};
-use crate::config::CONFIG_VERSION;
+use crate::calendar::{
+    local_today, perform, Action, Calendar, CalendarEntry, Change, ChangeResult, Decision,
+    EventFields, Origin, Window,
+};
+use crate::changelog::{self, ChangeEntry};
+use crate::civil::DateTime;
+use crate::config::WriteSettings;
+use crate::console::{ask_levels, failed, level_word, Choice, Console};
 use crate::context::Context;
-use crate::error::ToolError;
-use crate::json::{Json, Object};
+use crate::error::{ToolError, ToolResult};
 use crate::localtime;
+use crate::recurrence;
+use crate::rights::{Level, Rights};
 use crate::sendlog::{self, Outcome};
-use crate::server::{self, Line};
-use crate::text::{one_line_str, to_int};
+use crate::server;
+use crate::text::{clean_str, one_line_str};
 use crate::texts::{
-    COMMANDS, DEFAULT_SENDS_PER_HOUR, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
-    MAX_SEND_LINES, NO_ACCOUNTS, VERSION, WRITE_OFF,
+    CALENDAR_WRITE_OFF, COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
+    MAX_SEND_LINES, NO_ACCOUNTS, NO_CALENDARS, VERSION, WRITE_OFF,
 };
 use crate::write_tools;
 
-const MAX_ANSWER_BYTES: usize = 8192;
 const SENDLOG_LINES: usize = 200;
 const SENDLOG_SHOWN: usize = 20;
+const CHANGES_LINES: usize = 300;
+const CHANGES_SHOWN: usize = 20;
 const SUGGESTION_CUTOFF: f64 = 0.6;
 const MAX_COMMAND_CHARS: usize = 100;
 
-struct Console<'a> {
-    input: &'a mut dyn BufRead,
-    out: &'a mut dyn Write,
-}
-
-impl Console<'_> {
-    fn say(&mut self, text: &str) {
-        let _ = writeln!(self.out, "{text}");
-    }
-
-    fn ask(&mut self, prompt: &str) -> Option<String> {
-        let _ = write!(self.out, "{prompt}");
-        let _ = self.out.flush();
-        match server::next_line(self.input, MAX_ANSWER_BYTES) {
-            Ok(Line::Text(bytes)) => String::from_utf8(bytes).ok(),
-            _ => None,
-        }
-    }
-
-    fn confirm(&mut self, prompt: &str) -> bool {
-        self.ask(prompt).is_some_and(|answer| {
-            matches!(
-                answer.trim().to_lowercase().as_str(),
-                "j" | "ja" | "y" | "yes"
-            )
-        })
-    }
-}
-
-fn plain(account: &Account) -> MailAccount {
-    MailAccount {
-        id: account.id.clone(),
-        name: account.name.clone(),
-        kind: account.kind.clone(),
-        addresses: account.addresses.clone(),
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Area {
+    All,
+    Mail,
+    Calendar,
 }
 
 fn describe(account: &MailAccount) -> String {
@@ -77,96 +54,8 @@ fn describe(account: &MailAccount) -> String {
     format!("{}  [{kind}]  {addresses}", account.name)
 }
 
-fn print_accounts(
-    console: &mut Console,
-    accounts: &[MailAccount],
-    enabled: &HashSet<String>,
-    writable: &HashSet<String>,
-) {
-    for (index, account) in accounts.iter().enumerate() {
-        let mark = if enabled.contains(&account.id) {
-            '*'
-        } else {
-            ' '
-        };
-        let extra = if writable.contains(&account.id) {
-            "  [Entwuerfe/Senden]"
-        } else {
-            ""
-        };
-        console.say(&format!(
-            "{mark} {}) {}{extra}",
-            index + 1,
-            describe(account)
-        ));
-    }
-}
-
-fn ids(accounts: &[Account]) -> HashSet<String> {
-    accounts.iter().map(|account| account.id.clone()).collect()
-}
-
-fn failed(console: &mut Console, error: &ToolError) -> u8 {
-    console.say(&format!("Fehler: {error}"));
-    1
-}
-
-fn parse_picks(answer: &str, count: usize) -> Result<Vec<usize>, &'static str> {
-    let mut picks: Vec<i64> = Vec::new();
-    for piece in answer
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|piece| !piece.is_empty())
-    {
-        picks.push(piece.parse::<i64>().map_err(|_| "Ungueltige Eingabe.")?);
-    }
-    picks.sort_unstable();
-    picks.dedup();
-    let mut chosen = Vec::new();
-    for pick in picks {
-        match usize::try_from(pick) {
-            Ok(number) if (1..=count).contains(&number) => chosen.push(number - 1),
-            _ => return Err("Nummer ausserhalb der Liste."),
-        }
-    }
-    Ok(chosen)
-}
-
-fn choose<'a, T>(
-    console: &mut Console,
-    prompt: &str,
-    items: &'a [T],
-) -> Result<Option<Vec<&'a T>>, u8> {
-    let Some(answer) = console.ask(prompt) else {
-        console.say("Ungueltige Eingabe.");
-        return Err(1);
-    };
-    let answer = answer.trim();
-    if answer.is_empty() {
-        console.say("Unveraendert.");
-        return Ok(None);
-    }
-    match parse_picks(answer, items.len()) {
-        Ok(indexes) => Ok(Some(
-            indexes
-                .into_iter()
-                .filter_map(|index| items.get(index))
-                .collect(),
-        )),
-        Err(message) => {
-            console.say(message);
-            Err(1)
-        }
-    }
-}
-
-fn load_config(ctx: &Context, console: &mut Console) -> Result<Object, u8> {
-    ctx.settings
-        .load_config()
-        .map_err(|error| failed(console, &error))
-}
-
-fn save_config(ctx: &Context, console: &mut Console, config: &Object) -> u8 {
-    match ctx.settings.save_config(config) {
+fn save_rights(ctx: &Context, console: &mut Console, rights: &Rights) -> u8 {
+    match ctx.settings.save_rights(rights) {
         Ok(()) => 0,
         Err(error) => {
             console.say(&format!(
@@ -178,14 +67,40 @@ fn save_config(ctx: &Context, console: &mut Console, config: &Object) -> u8 {
     }
 }
 
+fn granted(entries: &[(String, Level)]) -> String {
+    if entries.is_empty() {
+        return "keine".to_string();
+    }
+    entries
+        .iter()
+        .map(|(name, level)| format!("{} ({})", one_line_str(name, 60), level_word(Some(*level))))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn mail_grants(rights: &Rights) -> Vec<(String, Level)> {
+    rights
+        .mail
+        .iter()
+        .map(|(account, level)| (account.name.clone(), *level))
+        .collect()
+}
+
+fn calendar_grants(rights: &Rights) -> Vec<(String, Level)> {
+    rights
+        .calendars
+        .iter()
+        .map(|(calendar, level)| (calendar.name.clone(), *level))
+        .collect()
+}
+
 fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
     let listing = (|| {
-        let enabled = ids(&ctx.settings.allowed_accounts()?);
-        let writable = ids(&ctx.settings.write_settings()?.accounts);
+        let rights = ctx.settings.rights()?;
         let accounts = ctx.backend.all_accounts()?;
-        Ok::<_, ToolError>((accounts, enabled, writable))
+        Ok::<_, ToolError>((rights, accounts))
     })();
-    let (accounts, enabled, writable) = match listing {
+    let (rights, accounts) = match listing {
         Ok(listing) => listing,
         Err(error) => return failed(console, &error),
     };
@@ -193,188 +108,241 @@ fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
         console.say("Mail kennt noch keine Konten (Systemeinstellungen > Internetaccounts).");
         return 0;
     }
-    print_accounts(console, &accounts, &enabled, &writable);
-    console.say("\n* = zum Lesen fuer den Agenten freigegeben");
-    console.say("[Entwuerfe/Senden] = darf Entwuerfe anlegen und Mails senden (jede Mail nur nach deinem Klick)");
+    for (index, account) in accounts.iter().enumerate() {
+        let level = rights.mail_level(&account.id);
+        let mark = if level.is_some() { '*' } else { ' ' };
+        console.say(&format!(
+            "{mark} {}) {}  [{}]",
+            index + 1,
+            describe(account),
+            level_word(level)
+        ));
+    }
+    console.say("\n* = fuer den Agenten freigegeben, Stufe in Klammern: lesen oder schreiben");
+    console.say("(schreiben = Entwuerfe und Senden, jede Mail nur nach deinem Klick)");
     0
 }
 
-fn cmd_setup(ctx: &Context, console: &mut Console) -> u8 {
+fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
     let listing = (|| {
-        let enabled = ids(&ctx.settings.allowed_accounts()?);
-        let accounts = ctx.backend.all_accounts()?;
-        Ok::<_, ToolError>((accounts, enabled))
+        let rights = ctx.settings.rights()?;
+        let calendars = ctx.calendar.calendars()?;
+        Ok::<_, ToolError>((rights, calendars))
     })();
-    let (accounts, enabled) = match listing {
+    let (rights, calendars) = match listing {
         Ok(listing) => listing,
         Err(error) => return failed(console, &error),
     };
+    if calendars.is_empty() {
+        console.say("Kalender kennt noch keine Kalender.");
+        return 0;
+    }
+    for (index, calendar) in calendars.iter().enumerate() {
+        let level = rights.calendar_level(&calendar.id);
+        let mark = if level.is_some() { '*' } else { ' ' };
+        console.say(&format!(
+            "{mark} {}) {}{}  [{}]",
+            index + 1,
+            one_line_str(&calendar.name, 80),
+            if calendar.writable {
+                ""
+            } else {
+                " [schreibgeschuetzt]"
+            },
+            level_word(level)
+        ));
+    }
+    console.say("\n* = fuer den Agenten freigegeben, Stufe in Klammern: lesen oder schreiben");
+    console.say(
+        "(schreiben = Termine anlegen, aendern, loeschen, jede Aenderung nur nach deinem Klick)",
+    );
+    0
+}
+
+fn setup_mail(
+    ctx: &Context,
+    console: &mut Console,
+    rights: &mut Rights,
+    required: bool,
+) -> Result<(), u8> {
+    let accounts = ctx
+        .backend
+        .all_accounts()
+        .map_err(|error| failed(console, &error))?;
     if accounts.is_empty() {
         console.say("Mail kennt noch keine Konten. Zuerst in den Systemeinstellungen unter Internetaccounts anmelden.");
-        return 1;
+        return if required { Err(1) } else { Ok(()) };
     }
-    print_accounts(console, &accounts, &enabled, &HashSet::new());
-    console.say("\nNur PRIVATE Konten freigeben, niemals geschaeftliche.");
-    let chosen = match choose(
-        console,
-        "Nummern der freizugebenden Konten (z. B. 2 3), leer = nichts aendern: ",
-        &accounts,
-    ) {
-        Ok(Some(chosen)) => chosen,
-        Ok(None) => return 0,
-        Err(code) => return code,
+    console.say("Mail-Konten. Nur PRIVATE Konten freigeben, niemals geschaeftliche.");
+    console.say("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Entwuerfe anlegen und Mails senden,");
+    console.say("jede Mail erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
+    console.say(&format!(
+        "Grenzen: Klartext, kein Bcc, keine Anhaenge, max. {MAX_RECIPIENTS} Empfaenger, max. {MAX_SEND_CHARS} Zeichen pro gesendeter Mail,"
+    ));
+    console.say(&format!(
+        "         max. {MAX_SEND_LINES} Zeilen, max. {} gesendete Mails und max. {MAX_DRAFTS_PER_HOUR} Entwuerfe pro Stunde. Jeder Versuch steht in {}",
+        rights.sends_per_hour,
+        ctx.settings.sendlog_path()
+    ));
+    let choices: Vec<Choice> = accounts
+        .iter()
+        .map(|account| Choice {
+            title: describe(account),
+            current: rights.mail_level(&account.id),
+            highest: Level::Write,
+        })
+        .collect();
+    let levels = ask_levels(console, &choices)?;
+    let gone: Vec<String> = rights
+        .mail
+        .iter()
+        .filter(|(known, _)| !accounts.iter().any(|account| account.id == known.id))
+        .map(|(known, _)| known.name.clone())
+        .collect();
+    if !gone.is_empty() {
+        console.say(&format!(
+            "Nicht mehr in Mail vorhanden, wird entfernt: {}",
+            gone.join(", ")
+        ));
+    }
+    rights.mail = accounts
+        .into_iter()
+        .zip(levels)
+        .filter_map(|(account, level)| level.map(|level| (account, level)))
+        .collect();
+    Ok(())
+}
+
+fn setup_calendars(
+    ctx: &Context,
+    console: &mut Console,
+    rights: &mut Rights,
+    required: bool,
+) -> Result<(), u8> {
+    let calendars = ctx
+        .calendar
+        .calendars()
+        .map_err(|error| failed(console, &error))?;
+    if calendars.is_empty() {
+        console.say("Kalender kennt noch keine Kalender.");
+        return if required { Err(1) } else { Ok(()) };
+    }
+    console.say("\nKalender. Nur PRIVATE Kalender freigeben, niemals geschaeftliche.");
+    console
+        .say("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Termine anlegen, aendern und loeschen,");
+    console.say("jede Aenderung erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
+    console.say(&format!(
+        "Grenzen: nur einzelne Termine ohne Teilnehmer und ohne Wiederholung, max. {} Aenderungen pro Stunde. Jeder Versuch steht in {}",
+        rights.changes_per_hour,
+        ctx.settings.changes_path()
+    ));
+    let choices: Vec<Choice> = calendars
+        .iter()
+        .map(|calendar| Choice {
+            title: if calendar.writable {
+                one_line_str(&calendar.name, 80)
+            } else {
+                format!("{} [schreibgeschuetzt]", one_line_str(&calendar.name, 80))
+            },
+            current: rights.calendar_level(&calendar.id),
+            highest: if calendar.writable {
+                Level::Write
+            } else {
+                Level::Read
+            },
+        })
+        .collect();
+    let levels = ask_levels(console, &choices)?;
+    let gone: Vec<String> = rights
+        .calendars
+        .iter()
+        .filter(|(known, _)| !calendars.iter().any(|calendar| calendar.id == known.id))
+        .map(|(known, _)| known.name.clone())
+        .collect();
+    if !gone.is_empty() {
+        console.say(&format!(
+            "Nicht mehr in Kalender vorhanden, wird entfernt: {}",
+            gone.join(", ")
+        ));
+    }
+    rights.calendars = calendars
+        .into_iter()
+        .zip(levels)
+        .filter_map(|(calendar, level)| {
+            level.map(|level| {
+                (
+                    CalendarEntry {
+                        id: calendar.id,
+                        name: calendar.name,
+                    },
+                    level,
+                )
+            })
+        })
+        .collect();
+    Ok(())
+}
+
+fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
+    let area = match word {
+        None => Area::All,
+        Some("mail") => Area::Mail,
+        Some("calendar") => Area::Calendar,
+        Some(other) => {
+            console.say(&format!(
+                "Unbekannter Bereich: {} (mail oder calendar)",
+                clean_str(other, Some(30))
+            ));
+            return 2;
+        }
     };
-    console.say("\nFreigabe fuer:");
-    for account in &chosen {
-        console.say(&format!("  - {}", describe(account)));
+    let mut rights = match ctx.settings.stored_rights() {
+        Ok(rights) => rights,
+        Err(error) => return failed(console, &error),
+    };
+    let before = rights.clone();
+    if matches!(area, Area::All | Area::Mail) {
+        if let Err(code) = setup_mail(ctx, console, &mut rights, area == Area::Mail) {
+            return code;
+        }
     }
+    if matches!(area, Area::All | Area::Calendar) {
+        if let Err(code) = setup_calendars(ctx, console, &mut rights, area == Area::Calendar) {
+            return code;
+        }
+    }
+    if rights == before {
+        console.say("Unveraendert.");
+        return 0;
+    }
+    console.say("\nNeue Freigaben:");
+    console.say(&format!("  Mail:     {}", granted(&mail_grants(&rights))));
+    console.say(&format!(
+        "  Kalender: {}",
+        granted(&calendar_grants(&rights))
+    ));
     if !console.confirm("Korrekt? [j/N] ") {
         console.say("Abgebrochen.");
         return 1;
     }
-    let previous = match load_config(ctx, console) {
-        Ok(previous) => previous,
-        Err(code) => return code,
-    };
-    let chosen_ids: HashSet<&str> = chosen.iter().map(|account| account.id.as_str()).collect();
-    let mut config = Object::new();
-    config.insert("version", Json::Int(CONFIG_VERSION));
-    config.insert(
-        "allowed_accounts",
-        Json::Arr(chosen.iter().map(|account| account.to_json()).collect()),
-    );
-    if let Some(Json::Obj(write)) = previous.get("write") {
-        let kept: Vec<Json> = match write.get("accounts") {
-            Some(Json::Arr(items)) => items
-                .iter()
-                .filter(|item| item.as_str().is_some_and(|id| chosen_ids.contains(id)))
-                .cloned()
-                .collect(),
-            _ => Vec::new(),
-        };
-        if !kept.is_empty() {
-            let mut section = write.clone();
-            section.insert("accounts", Json::Arr(kept));
-            config.insert("write", Json::Obj(section));
-        }
-    }
-    let code = save_config(ctx, console, &config);
+    let code = save_rights(ctx, console, &rights);
     if code == 0 {
         console.say(&format!("Gespeichert in {}", ctx.settings.config_path));
+        console.say("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
     }
     code
 }
 
 fn cmd_revoke(ctx: &Context, console: &mut Console) -> u8 {
-    if let Err(code) = load_config(ctx, console) {
-        return code;
-    }
-    let mut config = Object::new();
-    config.insert("version", Json::Int(CONFIG_VERSION));
-    config.insert("allowed_accounts", Json::Arr(Vec::new()));
-    let code = save_config(ctx, console, &config);
-    if code == 0 {
-        console.say("Alle Freigaben entfernt (auch Entwuerfe und Senden). Der Agent sieht keine Konten mehr.");
-    }
-    code
-}
-
-fn cmd_write_enable(ctx: &Context, console: &mut Console) -> u8 {
-    let listing = (|| {
-        let accounts = ctx.settings.allowed_accounts()?;
-        let current = ids(&ctx.settings.write_settings()?.accounts);
-        Ok::<_, ToolError>((accounts, current))
-    })();
-    let (accounts, current) = match listing {
-        Ok(listing) => listing,
+    let mut rights = match ctx.settings.stored_rights() {
+        Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
-    if accounts.is_empty() {
-        console.say(NO_ACCOUNTS);
-        return 1;
-    }
-    let shown: Vec<MailAccount> = accounts.iter().map(plain).collect();
-    print_accounts(console, &shown, &ids(&accounts), &current);
-    console.say(
-        "\nDamit darf der Agent fuer die gewaehlten Konten Entwuerfe anlegen und Mails senden.",
-    );
-    console
-        .say("Jede Mail wird erst gesendet, wenn du in einem macOS-Dialog auf 'Senden' klickst;");
-    console.say("der Agent kann diesen Dialog nicht bedienen.");
-    console.say(&format!(
-        "Grenzen: Klartext, kein Bcc, keine Anhaenge, max. {MAX_RECIPIENTS} Empfaenger, max. {MAX_SEND_CHARS} Zeichen pro gesendeter Mail,"
-    ));
-    console.say(&format!(
-        "         max. {MAX_SEND_LINES} Zeilen, max. {DEFAULT_SENDS_PER_HOUR} gesendete Mails und max. {MAX_DRAFTS_PER_HOUR} Entwuerfe pro Stunde. Jeder Versuch steht in {}",
-        ctx.settings.sendlog_path()
-    ));
-    let chosen = match choose(
-        console,
-        "Nummern der Konten mit Entwurf/Senden (z. B. 1 2), leer = nichts aendern: ",
-        &accounts,
-    ) {
-        Ok(Some(chosen)) => chosen,
-        Ok(None) => return 0,
-        Err(code) => return code,
-    };
-    console.say("\nEntwuerfe und Senden (mit Freigabe) fuer:");
-    for account in &chosen {
-        console.say(&format!(
-            "  - {}  {}",
-            account.name,
-            if account.addresses.is_empty() {
-                "-".to_string()
-            } else {
-                account.addresses.join(", ")
-            }
-        ));
-    }
-    if !console.confirm("Korrekt? [j/N] ") {
-        console.say("Abgebrochen.");
-        return 1;
-    }
-    let mut config = match load_config(ctx, console) {
-        Ok(config) => config,
-        Err(code) => return code,
-    };
-    let old = match config.get("write") {
-        Some(Json::Obj(old)) => old.get("max_per_hour").cloned(),
-        _ => None,
-    };
-    let limit = match to_int(old.as_ref(), DEFAULT_SENDS_PER_HOUR, 1, 30) {
-        Ok(limit) => limit,
-        Err(error) => return failed(console, &error),
-    };
-    let mut write = Object::new();
-    write.insert(
-        "accounts",
-        Json::Arr(
-            chosen
-                .iter()
-                .map(|account| Json::from(account.id.as_str()))
-                .collect(),
-        ),
-    );
-    write.insert("max_per_hour", Json::Int(limit));
-    config.insert("version", Json::Int(CONFIG_VERSION));
-    config.insert("write", Json::Obj(write));
-    let code = save_config(ctx, console, &config);
+    rights.mail.clear();
+    rights.calendars.clear();
+    let code = save_rights(ctx, console, &rights);
     if code == 0 {
-        console
-            .say("Gespeichert. Goose danach neu starten. Pruefen mit: avery mail selftest-write");
-    }
-    code
-}
-
-fn cmd_write_disable(ctx: &Context, console: &mut Console) -> u8 {
-    let mut config = match load_config(ctx, console) {
-        Ok(config) => config,
-        Err(code) => return code,
-    };
-    config.remove("write");
-    let code = save_config(ctx, console, &config);
-    if code == 0 {
-        console.say("Entwuerfe und Senden sind aus. Lesen bleibt wie freigegeben.");
+        console.say("Alle Freigaben entfernt (Mail und Kalender, auch Schreiben). Der Agent sieht keine Konten und Kalender mehr.");
     }
     code
 }
@@ -420,21 +388,193 @@ fn cmd_sendlog(ctx: &Context, console: &mut Console) -> u8 {
     0
 }
 
-fn cmd_status(ctx: &Context, console: &mut Console) -> u8 {
-    let state = (|| {
-        let accounts = ctx.settings.allowed_accounts()?;
-        let writable = ctx.settings.write_settings()?.accounts;
-        Ok::<_, ToolError>((accounts, writable))
-    })();
-    let (accounts, writable) = match state {
-        Ok(state) => state,
+fn title_of(entry: &ChangeEntry) -> String {
+    let fields = entry.after.as_ref().or(entry.before.as_ref());
+    one_line_str(fields.map_or("-", |fields| fields.summary.as_str()), 80)
+}
+
+fn cmd_changes(ctx: &Context, console: &mut Console) -> u8 {
+    let view = match changelog::read_entries(&ctx.settings, CHANGES_LINES) {
+        Ok(view) => view,
         Err(error) => return failed(console, &error),
     };
-    let labels = |list: &[Account]| {
-        list.iter()
-            .map(|account| account.label.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+    let attempts = changelog::attempts(&view.entries);
+    if attempts.is_empty() && view.unreadable == 0 {
+        console.say("Noch keine Eintraege.");
+        return 0;
+    }
+    let open = changelog::undoable(&view.entries);
+    let first = attempts.len().saturating_sub(CHANGES_SHOWN);
+    for entry in &attempts[first..] {
+        let outcome = match entry.outcome {
+            changelog::Outcome::Pending => "unklar",
+            other => other.as_str(),
+        };
+        let action = if entry.undoes.is_some() {
+            format!("undo-{}", entry.action.as_str())
+        } else {
+            entry.action.as_str().to_string()
+        };
+        let note = if open.iter().any(|candidate| candidate.id == entry.id) {
+            "  [rueckgaengig moeglich]"
+        } else {
+            ""
+        };
+        console.say(&format!(
+            "{}  {:<12} {:<9} {} | {} | {}{note}",
+            localtime::minute(entry.ts),
+            action,
+            outcome,
+            one_line_str(&entry.calendar, 60),
+            title_of(entry),
+            one_line_str(&entry.id, 12)
+        ));
+    }
+    if view.unreadable > 0 {
+        console.say(&format!(
+            "\n{} Zeile(n) in einem unbekannten Format uebersprungen.",
+            view.unreadable
+        ));
+    }
+    console.say(&format!("\nDatei: {}", ctx.settings.changes_path()));
+    0
+}
+
+fn inverse(entry: &ChangeEntry) -> Option<Change> {
+    let uid = entry.uid.clone();
+    match entry.action {
+        Action::Create => Some(Change::Delete {
+            uid: uid?,
+            before: entry.after.clone()?,
+        }),
+        Action::Update => Some(Change::Update {
+            uid: uid?,
+            before: entry.after.clone()?,
+            after: entry.before.clone()?,
+        }),
+        Action::Delete => Some(Change::Create {
+            after: entry.before.clone()?,
+        }),
+    }
+}
+
+fn undo_text(entry: &ChangeEntry) -> &'static str {
+    match entry.action {
+        Action::Create => "der angelegte Termin wird geloescht",
+        Action::Update => "der Termin bekommt seine alten Werte zurueck",
+        Action::Delete => {
+            "der Termin wird neu angelegt (Titel, Zeit, Ort, Notizen; Teilnehmer und Erinnerungen gehen nicht zurueck)"
+        }
+    }
+}
+
+fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
+    let view = match changelog::read_entries(&ctx.settings, CHANGES_LINES) {
+        Ok(view) => view,
+        Err(error) => return failed(console, &error),
+    };
+    let open = changelog::undoable(&view.entries);
+    let first = open.len().saturating_sub(CHANGES_SHOWN);
+    let candidates: Vec<&ChangeEntry> = open[first..].iter().rev().copied().collect();
+    if candidates.is_empty() {
+        console.say("Nichts zum Rueckgaengigmachen.");
+        return 0;
+    }
+    let entry = match wanted {
+        Some(prefix) => {
+            let hits: Vec<&&ChangeEntry> = candidates
+                .iter()
+                .filter(|candidate| !prefix.is_empty() && candidate.id.starts_with(prefix))
+                .collect();
+            match hits.as_slice() {
+                [only] => **only,
+                _ => {
+                    console.say(
+                        "Keine eindeutige Aenderung mit dieser Kennung. Siehe: avery mail changes",
+                    );
+                    return 1;
+                }
+            }
+        }
+        None => {
+            for (index, candidate) in candidates.iter().enumerate() {
+                console.say(&format!(
+                    "{}) {}  {:<7} {} | {}",
+                    index + 1,
+                    localtime::minute(candidate.ts),
+                    candidate.action.as_str(),
+                    one_line_str(&candidate.calendar, 60),
+                    title_of(candidate)
+                ));
+            }
+            let Some(answer) = console.ask(
+                "Nummer der Aenderung, die rueckgaengig gemacht werden soll (leer = Abbruch): ",
+            ) else {
+                console.say("Ungueltige Eingabe.");
+                return 1;
+            };
+            let answer = answer.trim();
+            if answer.is_empty() {
+                console.say("Unveraendert.");
+                return 0;
+            }
+            match answer
+                .parse::<usize>()
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .and_then(|index| candidates.get(index))
+            {
+                Some(found) => *found,
+                None => {
+                    console.say("Ungueltige Eingabe.");
+                    return 1;
+                }
+            }
+        }
+    };
+    let Some(change) = inverse(entry) else {
+        console.say("Der Eintrag enthaelt nicht genug Angaben fuer das Rueckgaengigmachen.");
+        return 1;
+    };
+    console.say(&format!(
+        "\n{} | {} | {}: {}",
+        one_line_str(&entry.calendar, 60),
+        entry.action.as_str(),
+        title_of(entry),
+        undo_text(entry)
+    ));
+    if !console.confirm("Rueckgaengig machen? Ein Freigabedialog erscheint. [j/N] ") {
+        console.say("Abgebrochen.");
+        return 1;
+    }
+    let calendar = Calendar {
+        id: entry.calendar_id.clone(),
+        name: entry.calendar.clone(),
+        label: entry.calendar.clone(),
+    };
+    match perform(ctx, &calendar, &change, Origin::Human, Some(&entry.id)) {
+        Err(error) => failed(console, &error),
+        Ok(performed) => match performed.decision {
+            Decision::Applied => {
+                console.say("Rueckgaengig gemacht.");
+                0
+            }
+            Decision::Declined => {
+                console.say("Im Dialog abgelehnt, nichts geaendert.");
+                1
+            }
+            Decision::TimedOut => {
+                console.say("Keine Antwort im Dialog, nichts geaendert.");
+                1
+            }
+        },
+    }
+}
+
+fn cmd_status(ctx: &Context, console: &mut Console) -> u8 {
+    let rights = match ctx.settings.rights() {
+        Ok(rights) => rights,
+        Err(error) => return failed(console, &error),
     };
     console.say(&format!("Version: {VERSION}"));
     console.say(&format!(
@@ -446,21 +586,11 @@ fn cmd_status(ctx: &Context, console: &mut Console) -> u8 {
             "fehlt"
         }
     ));
+    console.say(&format!("Mail: {}", granted(&mail_grants(&rights))));
+    console.say(&format!("Kalender: {}", granted(&calendar_grants(&rights))));
     console.say(&format!(
-        "Lesen freigegeben fuer: {}",
-        if accounts.is_empty() {
-            "kein Konto".to_string()
-        } else {
-            labels(&accounts)
-        }
-    ));
-    console.say(&format!(
-        "Entwuerfe/Senden: {}",
-        if writable.is_empty() {
-            "aus".to_string()
-        } else {
-            labels(&writable)
-        }
+        "Grenzen pro Stunde: {} gesendete Mails, {MAX_DRAFTS_PER_HOUR} Entwuerfe, {} Kalenderaenderungen",
+        rights.sends_per_hour, rights.changes_per_hour
     ));
     0
 }
@@ -471,110 +601,211 @@ fn timed<T>(action: impl FnOnce() -> Result<T, ToolError>) -> (Duration, Result<
     (started.elapsed(), result)
 }
 
+fn step(
+    console: &mut Console,
+    failures: &mut usize,
+    tag: &str,
+    title: &str,
+    result: (Duration, Result<String, ToolError>),
+) -> bool {
+    let (elapsed, result) = result;
+    match result {
+        Ok(detail) => {
+            let detail = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("  {detail}")
+            };
+            console.say(&format!(
+                "PASS  {tag}  {title} ({:.1} s){detail}",
+                elapsed.as_secs_f64()
+            ));
+            true
+        }
+        Err(error) => {
+            *failures += 1;
+            console.say(&format!("FAIL  {tag}  {title}: {error}"));
+            false
+        }
+    }
+}
+
+fn selftest_account(
+    ctx: &Context,
+    console: &mut Console,
+    failures: &mut usize,
+    tag: &str,
+    account: &crate::account::Account,
+) {
+    let reachable = timed(|| {
+        let info = ctx.backend.account_info(account)?;
+        Ok(format!(
+            "Typ={}",
+            if info.kind.is_empty() {
+                "?"
+            } else {
+                &info.kind
+            }
+        ))
+    });
+    if !step(console, failures, tag, "Konto erreichbar", reachable) {
+        return;
+    }
+    let boxes = timed(|| {
+        Ok(format!(
+            "{} Mailboxen",
+            ctx.backend.mailboxes(account)?.len()
+        ))
+    });
+    step(console, failures, tag, "Mailboxen lesen", boxes);
+    let mut first: Option<String> = None;
+    let listing = timed(|| {
+        let result = ctx.backend.messages(account, &probe_query(30, None, 5))?;
+        first = result.items.first().map(|item| item.id.clone());
+        Ok(format!(
+            "Posteingang: {} Treffer in 30 Tagen, {} geladen",
+            result.total,
+            result.items.len()
+        ))
+    });
+    if step(console, failures, tag, "Posteingang listen", listing) {
+        let reading = timed(|| {
+            let Some(id) = &first else {
+                return Ok("uebersprungen (keine Nachricht in 30 Tagen)".to_string());
+            };
+            let id = id
+                .parse::<i64>()
+                .map_err(|_| ToolError::msg("Nachrichten-ID ist keine Zahl"))?;
+            let message = ctx.backend.read(account, None, id, 500)?;
+            Ok(format!(
+                "Text {} Zeichen, {} Anhaenge",
+                message
+                    .body_chars
+                    .map_or_else(|| "?".to_string(), |count| count.to_string()),
+                message.attachments.len()
+            ))
+        });
+        step(console, failures, tag, "Nachricht lesen", reading);
+    }
+    let search = timed(|| {
+        Ok(format!(
+            "{} Treffer",
+            ctx.backend
+                .messages(account, &probe_query(30, Some("e"), 5))?
+                .total
+        ))
+    });
+    step(console, failures, tag, "Suche", search);
+}
+
+fn selftest_calendar(
+    ctx: &Context,
+    console: &mut Console,
+    failures: &mut usize,
+    tag: &str,
+    calendar: &Calendar,
+) {
+    let reachable = timed(|| {
+        let known = ctx.calendar.calendars()?;
+        let info = known
+            .iter()
+            .find(|info| info.id == calendar.id)
+            .ok_or_else(|| ToolError::msg("Kalender nicht mehr in Calendar vorhanden"))?;
+        Ok(if info.writable {
+            "beschreibbar".to_string()
+        } else {
+            "schreibgeschuetzt".to_string()
+        })
+    });
+    if !step(console, failures, tag, "Kalender erreichbar", reachable) {
+        return;
+    }
+    let mut rules: Vec<String> = Vec::new();
+    let reading = timed(|| {
+        let today = local_today().ok_or_else(|| ToolError::msg("Datum nicht lesbar"))?;
+        let to = today
+            .add_days(14)
+            .ok_or_else(|| ToolError::msg("Datum ausserhalb des Bereichs"))?;
+        let window = Window {
+            from: DateTime::midnight(today),
+            to: DateTime::midnight(to),
+        };
+        let events = ctx.calendar.events(calendar, window)?;
+        rules = events
+            .iter()
+            .filter(|event| !event.recurrence.is_empty())
+            .map(|event| event.recurrence.clone())
+            .collect();
+        Ok(format!(
+            "{} Eintraege in 14 Tagen, davon {} Serien",
+            events.len(),
+            rules.len()
+        ))
+    });
+    if !step(console, failures, tag, "Termine lesen", reading) {
+        return;
+    }
+    let unreadable: Vec<&String> = rules
+        .iter()
+        .filter(|rule| recurrence::parse(rule).is_err())
+        .collect();
+    let detail = format!(
+        "{} von {} Serien lassen sich entfalten",
+        rules.len() - unreadable.len(),
+        rules.len()
+    );
+    console.say(&format!("INFO  {tag}  Wiederholungen: {detail}"));
+    for rule in unreadable.iter().take(3) {
+        console.say(&format!(
+            "INFO  {tag}  nicht entfaltbare Regel: {}",
+            one_line_str(rule, 120)
+        ));
+    }
+}
+
 fn cmd_selftest(ctx: &Context, console: &mut Console) -> u8 {
-    let accounts = match ctx.settings.allowed_accounts() {
-        Ok(accounts) => accounts,
+    let listing = (|| {
+        let accounts = ctx.settings.allowed_accounts()?;
+        let calendars = ctx.settings.allowed_calendars()?;
+        Ok::<_, ToolError>((accounts, calendars))
+    })();
+    let (accounts, calendars) = match listing {
+        Ok(listing) => listing,
         Err(error) => {
             console.say(&format!("FAIL  config: {error}"));
             return 1;
         }
     };
-    if accounts.is_empty() {
+    if accounts.is_empty() && calendars.is_empty() {
         console.say(NO_ACCOUNTS);
+        console.say(NO_CALENDARS);
         return 1;
     }
     let mut failures = 0usize;
     for (number, account) in accounts.iter().enumerate() {
-        let tag = format!("Konto {}", number + 1);
-        let mut step =
-            |console: &mut Console, title: &str, result: (Duration, Result<String, ToolError>)| {
-                let (elapsed, result) = result;
-                match result {
-                    Ok(detail) => {
-                        let detail = if detail.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  {detail}")
-                        };
-                        console.say(&format!(
-                            "PASS  {tag}  {title} ({:.1} s){detail}",
-                            elapsed.as_secs_f64()
-                        ));
-                        true
-                    }
-                    Err(error) => {
-                        failures += 1;
-                        console.say(&format!("FAIL  {tag}  {title}: {error}"));
-                        false
-                    }
-                }
-            };
-        let reachable = timed(|| {
-            let info = ctx.backend.account_info(account)?;
-            Ok(format!(
-                "Typ={}",
-                if info.kind.is_empty() {
-                    "?"
-                } else {
-                    &info.kind
-                }
-            ))
-        });
-        if !step(console, "Konto erreichbar", reachable) {
-            continue;
-        }
-        let boxes = timed(|| {
-            Ok(format!(
-                "{} Mailboxen",
-                ctx.backend.mailboxes(account)?.len()
-            ))
-        });
-        step(console, "Mailboxen lesen", boxes);
-        let mut first: Option<String> = None;
-        let listing = timed(|| {
-            let result = ctx.backend.messages(account, &probe_query(30, None, 5))?;
-            first = result.items.first().map(|item| item.id.clone());
-            Ok(format!(
-                "Posteingang: {} Treffer in 30 Tagen, {} geladen",
-                result.total,
-                result.items.len()
-            ))
-        });
-        if step(console, "Posteingang listen", listing) {
-            let reading = timed(|| {
-                let Some(id) = &first else {
-                    return Ok("uebersprungen (keine Nachricht in 30 Tagen)".to_string());
-                };
-                let id = id
-                    .parse::<i64>()
-                    .map_err(|_| ToolError::msg("Nachrichten-ID ist keine Zahl"))?;
-                let message = ctx.backend.read(account, None, id, 500)?;
-                Ok(format!(
-                    "Text {} Zeichen, {} Anhaenge",
-                    message
-                        .body_chars
-                        .map_or_else(|| "?".to_string(), |count| count.to_string()),
-                    message.attachments.len()
-                ))
-            });
-            step(console, "Nachricht lesen", reading);
-        }
-        let search = timed(|| {
-            Ok(format!(
-                "{} Treffer",
-                ctx.backend
-                    .messages(account, &probe_query(30, Some("e"), 5))?
-                    .total
-            ))
-        });
-        step(console, "Suche", search);
+        selftest_account(
+            ctx,
+            console,
+            &mut failures,
+            &format!("Konto {}", number + 1),
+            account,
+        );
+    }
+    for (number, calendar) in calendars.iter().enumerate() {
+        selftest_calendar(
+            ctx,
+            console,
+            &mut failures,
+            &format!("Kalender {}", number + 1),
+            calendar,
+        );
     }
     console.say("");
     if failures > 0 {
         console.say(&format!("{failures} Pruefung(en) fehlgeschlagen."));
         return 1;
     }
-    console.say("Alle Pruefungen bestanden. Es wurde nichts gesendet, geloescht oder verschoben; Inhalte wurden nicht ausgegeben.");
+    console.say("Alle Pruefungen bestanden. Es wurde nichts gesendet, geloescht oder veraendert; Inhalte wurden nicht ausgegeben.");
     0
 }
 
@@ -606,19 +837,12 @@ fn self_message(
     }
 }
 
-fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
-    let settings = match ctx.settings.write_settings() {
-        Ok(settings) => settings,
-        Err(error) => {
-            console.say(&format!("FAIL  config: {error}"));
-            return 1;
-        }
-    };
-    if settings.accounts.is_empty() {
-        console.say(WRITE_OFF);
-        return 1;
-    }
-    let mut failures: Vec<String> = Vec::new();
+fn selftest_write_mail(
+    ctx: &Context,
+    console: &mut Console,
+    settings: &WriteSettings,
+    failures: &mut Vec<String>,
+) {
     console.say(
         "1) Freigabedialog. Gleich erscheint ein Testdialog, klicke 'Weiter' oder 'Abbrechen'.",
     );
@@ -795,12 +1019,172 @@ fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
             }
         }
     }
+    console.say("\nTest-Entwurf und Test-Mail kannst du loeschen.");
+}
+
+fn change_line(
+    console: &mut Console,
+    failures: &mut Vec<String>,
+    title: &str,
+    outcome: ToolResult<ChangeResult>,
+) -> Option<ChangeResult> {
+    match outcome {
+        Err(error) => {
+            failures.push(title.to_string());
+            console.say(&format!("FAIL  {title}: {error}"));
+            None
+        }
+        Ok(performed) => match performed.decision {
+            Decision::Applied => {
+                console.say(&format!("PASS  {title}"));
+                Some(performed)
+            }
+            Decision::Declined => {
+                console.say(&format!(
+                    "INFO  {title}: im Dialog abgelehnt, nichts geaendert"
+                ));
+                None
+            }
+            Decision::TimedOut => {
+                console.say(&format!(
+                    "INFO  {title}: keine Antwort im Dialog, nichts geaendert"
+                ));
+                None
+            }
+        },
+    }
+}
+
+fn selftest_write_calendar(
+    ctx: &Context,
+    console: &mut Console,
+    calendar: &Calendar,
+    max_per_hour: i64,
+    failures: &mut Vec<String>,
+) {
+    let origin = Origin::Model { max_per_hour };
+    let Some(start) = local_today()
+        .and_then(|today| today.add_days(1))
+        .and_then(|day| DateTime::new(day, 180))
+    else {
+        failures.push("clock".to_string());
+        console.say("FAIL  Datum nicht lesbar");
+        return;
+    };
+    let Some(end) = start.add_minutes(15) else {
+        failures.push("clock".to_string());
+        console.say("FAIL  Datum ausserhalb des Bereichs");
+        return;
+    };
+    console.say(&format!(
+        "\nKalender-Test fuer {}. Es wird ein Test-Termin angelegt, geaendert und wieder geloescht, jeweils mit Freigabedialog.",
+        one_line_str(&calendar.label, 80)
+    ));
+    if !console.confirm("Test-Termin anlegen? Der Freigabedialog erscheint. [j/N] ") {
+        return;
+    }
+    let created_fields = EventFields {
+        summary: "Scout Selbsttest - Termin (bitte loeschen)".to_string(),
+        start,
+        end,
+        all_day: false,
+        location: String::new(),
+        notes: "Test des Freigabedialogs.".to_string(),
+        url: String::new(),
+    };
+    let created = perform(
+        ctx,
+        calendar,
+        &Change::Create {
+            after: created_fields.clone(),
+        },
+        origin,
+        None,
+    );
+    let Some(created) = change_line(console, failures, "Termin angelegt", created) else {
+        return;
+    };
+    let Some(uid) = created.uid.clone() else {
+        failures.push("uid".to_string());
+        console.say("FAIL  Calendar nannte keine Termin-ID");
+        return;
+    };
+    let mut current = created.after.clone().unwrap_or(created_fields);
+    if console.confirm("Test-Termin aendern (Titel)? Der Freigabedialog erscheint. [j/N] ") {
+        let after = EventFields {
+            summary: "Scout Selbsttest - Termin geaendert (bitte loeschen)".to_string(),
+            ..current.clone()
+        };
+        let change = Change::Update {
+            uid: uid.clone(),
+            before: current.clone(),
+            after: after.clone(),
+        };
+        if let Some(changed) = change_line(
+            console,
+            failures,
+            "Termin geaendert",
+            perform(ctx, calendar, &change, origin, None),
+        ) {
+            current = changed.after.clone().unwrap_or(after);
+        }
+    }
+    if console.confirm("Test-Termin loeschen? Der Freigabedialog erscheint. [j/N] ") {
+        let change = Change::Delete {
+            uid,
+            before: current,
+        };
+        if change_line(
+            console,
+            failures,
+            "Termin geloescht",
+            perform(ctx, calendar, &change, origin, None),
+        )
+        .is_some()
+        {
+            return;
+        }
+    }
+    console.say("INFO  Der Test-Termin bleibt in Calendar bestehen: bitte dort loeschen.");
+}
+
+fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
+    let settings = (|| {
+        let mail = ctx.settings.write_settings()?;
+        let calendars = ctx.settings.calendar_write_settings()?;
+        Ok::<_, ToolError>((mail, calendars))
+    })();
+    let (mail, calendars) = match settings {
+        Ok(settings) => settings,
+        Err(error) => {
+            console.say(&format!("FAIL  config: {error}"));
+            return 1;
+        }
+    };
+    if mail.accounts.is_empty() && calendars.calendars.is_empty() {
+        console.say(WRITE_OFF);
+        console.say(CALENDAR_WRITE_OFF);
+        return 1;
+    }
+    let mut failures: Vec<String> = Vec::new();
+    if !mail.accounts.is_empty() {
+        selftest_write_mail(ctx, console, &mail, &mut failures);
+    }
+    for calendar in &calendars.calendars {
+        selftest_write_calendar(
+            ctx,
+            console,
+            calendar,
+            calendars.max_per_hour,
+            &mut failures,
+        );
+    }
     console.say("");
     if !failures.is_empty() {
         console.say(&format!("{} Pruefung(en) fehlgeschlagen.", failures.len()));
         return 1;
     }
-    console.say("Fertig. Test-Entwurf und Test-Mail kannst du loeschen.");
+    console.say("Fertig.");
     0
 }
 
@@ -876,12 +1260,13 @@ pub(crate) fn dispatch(
     let mut console = Console { input, out };
     match command {
         "accounts" => cmd_accounts(ctx, &mut console),
-        "setup" => cmd_setup(ctx, &mut console),
+        "calendars" => cmd_calendars(ctx, &mut console),
+        "setup" => cmd_setup(ctx, &mut console, args.get(1).map(String::as_str)),
         "revoke" => cmd_revoke(ctx, &mut console),
         "selftest" => cmd_selftest(ctx, &mut console),
-        "write-enable" => cmd_write_enable(ctx, &mut console),
-        "write-disable" => cmd_write_disable(ctx, &mut console),
         "sendlog" => cmd_sendlog(ctx, &mut console),
+        "changes" => cmd_changes(ctx, &mut console),
+        "undo" => cmd_undo(ctx, &mut console, args.get(1).map(String::as_str)),
         "selftest-write" => cmd_selftest_write(ctx, &mut console),
         "status" => cmd_status(ctx, &mut console),
         unknown => {
@@ -899,17 +1284,21 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake::{FakeBackend, FakeOptions};
+    use crate::backend::Backend;
+    use crate::calendar::{CalendarBackend, CalendarInfo};
+    use crate::error::ToolResult;
+    use crate::fake::FakeOptions;
+    use crate::journal;
+    use crate::json::Json;
     use crate::testutil::{j, log_entry, settings_at, TempDir, TestResult};
     use std::fs;
     use std::io::Cursor;
 
-    const ACCOUNT_1: &str = r#"{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"]}"#;
-    const ACCOUNT_2: &str =
-        r#"{"id": "ACC-2", "name": "Outlook", "type": "imap", "addresses": ["me@gmail.example"]}"#;
+    const ACCOUNT_1: &str = r#"{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"}"#;
+    const ACCOUNT_2: &str = r#"{"id": "ACC-2", "name": "Outlook", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"}"#;
 
     fn base() -> String {
-        format!(r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}, {ACCOUNT_2}]}}"#)
+        format!(r#"{{"version": 3, "mail": {{"accounts": [{ACCOUNT_1}, {ACCOUNT_2}]}}}}"#)
     }
 
     fn context(
@@ -925,7 +1314,7 @@ mod tests {
         if let Some(text) = config {
             fs::write(&settings.config_path, text)?;
         }
-        Ok(Context::new(settings, Box::new(FakeBackend::new(options))))
+        Ok(Context::demo(settings, options))
     }
 
     fn real(dir: &TempDir, config: Option<&str>) -> Result<Context, std::io::Error> {
@@ -948,58 +1337,89 @@ mod tests {
         Ok(j(&fs::read_to_string(&ctx.settings.config_path)?)?)
     }
 
-    fn write_accounts(config: &Json) -> Vec<String> {
-        let write = config
-            .as_object()
-            .and_then(|o| o.get("write"))
-            .and_then(Json::as_object);
-        crate::account::string_list(write.and_then(|w| w.get("accounts")))
+    fn section<'a>(config: &'a Json, name: &str) -> Option<&'a Json> {
+        config.as_object().and_then(|object| object.get(name))
     }
 
     struct Untouchable;
 
-    impl crate::backend::Backend for Untouchable {
-        fn all_accounts(&self) -> crate::error::ToolResult<Vec<MailAccount>> {
+    impl Backend for Untouchable {
+        fn all_accounts(&self) -> ToolResult<Vec<MailAccount>> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
-        fn account_info(&self, _: &Account) -> crate::error::ToolResult<MailAccount> {
+        fn account_info(&self, _: &crate::account::Account) -> ToolResult<MailAccount> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
-        fn mailboxes(&self, _: &Account) -> crate::error::ToolResult<Vec<crate::backend::Mailbox>> {
+        fn mailboxes(
+            &self,
+            _: &crate::account::Account,
+        ) -> ToolResult<Vec<crate::backend::Mailbox>> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
         fn messages(
             &self,
-            _: &Account,
+            _: &crate::account::Account,
             _: &MessageQuery,
-        ) -> crate::error::ToolResult<crate::backend::MessageList> {
+        ) -> ToolResult<crate::backend::MessageList> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
         fn read(
             &self,
-            _: &Account,
+            _: &crate::account::Account,
             _: Option<&str>,
             _: i64,
             _: usize,
-        ) -> crate::error::ToolResult<crate::backend::MessageBody> {
+        ) -> ToolResult<crate::backend::MessageBody> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
         fn compose(
             &self,
-            _: &Account,
+            _: &crate::account::Account,
             _: &ComposeRequest,
-        ) -> crate::error::ToolResult<crate::backend::Preview> {
+        ) -> ToolResult<crate::backend::Preview> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
-        fn approval_test(&self, _: u64) -> crate::error::ToolResult<String> {
+        fn approval_test(&self, _: u64) -> ToolResult<String> {
+            Err(ToolError::msg("BACKEND TOUCHED"))
+        }
+    }
+
+    struct UntouchableCalendar;
+
+    impl CalendarBackend for UntouchableCalendar {
+        fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
+            Err(ToolError::msg("BACKEND TOUCHED"))
+        }
+        fn events(
+            &self,
+            _: &crate::calendar::Calendar,
+            _: crate::calendar::Window,
+        ) -> ToolResult<Vec<crate::calendar::RawEvent>> {
+            Err(ToolError::msg("BACKEND TOUCHED"))
+        }
+        fn event(
+            &self,
+            _: &crate::calendar::Calendar,
+            _: &str,
+        ) -> ToolResult<crate::calendar::EventDetail> {
+            Err(ToolError::msg("BACKEND TOUCHED"))
+        }
+        fn change(
+            &self,
+            _: &crate::calendar::Calendar,
+            _: &crate::calendar::Change,
+            _: &crate::calendar::Approval,
+        ) -> ToolResult<crate::calendar::ChangeResult> {
             Err(ToolError::msg("BACKEND TOUCHED"))
         }
     }
 
     #[test]
-    fn a_broken_config_is_reported_before_mail_is_touched() -> TestResult {
+    fn a_broken_config_is_reported_before_mail_or_calendar_is_touched() -> TestResult {
         for config in [
+            "{\"version\": 2, \"allowed_accounts\": []}",
             "{\"version\": 3, \"allowed_accounts\": []}",
+            "{\"version\": 3, \"mail\": 5}",
             "not json",
             "[]",
             "{\"allowed_accounts\": []}",
@@ -1008,10 +1428,19 @@ mod tests {
             let mut settings = settings_at(&dir.path("config.json"));
             fs::write(&settings.config_path, config)?;
             settings.fake = false;
-            let ctx = Context::new(settings, Box::new(Untouchable));
+            let ctx = Context::new(
+                settings,
+                Box::new(Untouchable),
+                Box::new(UntouchableCalendar),
+            );
             for args in [
                 vec!["accounts"],
+                vec!["calendars"],
                 vec!["setup"],
+                vec!["setup", "mail"],
+                vec!["setup", "calendar"],
+                vec!["revoke"],
+                vec!["status"],
                 vec!["selftest"],
                 vec!["selftest-write"],
             ] {
@@ -1021,92 +1450,150 @@ mod tests {
                     !out.contains("BACKEND TOUCHED"),
                     "{config:?} {args:?}: {out}"
                 );
+                assert_eq!(fs::read_to_string(&ctx.settings.config_path)?, config);
             }
         }
         Ok(())
     }
 
     #[test]
-    fn write_enable_saves_the_chosen_accounts_with_the_default_limit() -> TestResult {
+    fn setup_asks_a_level_per_account_and_saves_levels_and_details() -> TestResult {
         let dir = TempDir::new()?;
-        let ctx = real(&dir, Some(&base()))?;
-        let (code, out) = run(&ctx, &["write-enable"], "2\nj\n");
+        let ctx = real(&dir, None)?;
+        let (code, out) = run(&ctx, &["setup", "mail"], "2\n1\n\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Neue Freigaben:"));
+        assert!(out.contains("Mail:     Demo Gmail (schreiben), Demo Outlook (lesen)"));
+        assert!(out.contains("Kalender: keine"));
+        assert!(out.contains("Gespeichert in"));
+        let config = saved(&ctx)?;
+        let accounts = section(&config, "mail")
+            .and_then(Json::as_object)
+            .and_then(|mail| mail.get("accounts"))
+            .and_then(Json::as_array)
+            .ok_or("accounts")?;
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(
+            accounts[0],
+            j(
+                r#"{"id": "FAKE-GMAIL", "name": "Demo Gmail", "type": "imap", "addresses": ["demo.privat@gmail.example"], "level": "write"}"#
+            )?
+        );
+        assert!(section(&config, "calendar").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn setup_for_all_areas_asks_mail_first_then_calendars() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = real(&dir, None)?;
+        let (code, out) = run(&ctx, &["setup"], "1\n\n\n2\n1\n\n\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Mail:     Demo Gmail (lesen)"));
+        assert!(out.contains("Kalender: Demo Privat (schreiben), Demo Familie (lesen)"));
+        let config = saved(&ctx)?;
+        let calendars = section(&config, "calendar")
+            .and_then(Json::as_object)
+            .and_then(|calendar| calendar.get("calendars"))
+            .and_then(Json::as_array)
+            .ok_or("calendars")?;
+        assert_eq!(calendars.len(), 2);
+        assert_eq!(
+            calendars[0],
+            j(r#"{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "write"}"#)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_for_one_area_keeps_the_other_area_and_the_limits() -> TestResult {
+        let dir = TempDir::new()?;
+        let start = r#"{"version": 3,
+            "mail": {"accounts": [{"id": "FAKE-GMAIL", "name": "Demo Gmail", "level": "write"}], "sends_per_hour": 3},
+            "calendar": {"calendars": [{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "read"}], "changes_per_hour": 4}}"#;
+        let ctx = real(&dir, Some(start))?;
+        let (code, out) = run(&ctx, &["setup", "calendar"], "\n2\n\n\nj\n");
         assert_eq!(code, 0, "{out}");
         let config = saved(&ctx)?;
-        assert_eq!(write_accounts(&config), ["ACC-2"]);
-        let limit = config
-            .as_object()
-            .and_then(|o| o.get("write"))
+        let mail = section(&config, "mail")
             .and_then(Json::as_object)
-            .and_then(|w| w.get("max_per_hour"));
-        assert_eq!(limit, Some(&Json::Int(5)));
-        assert!(out.contains(
-            "Grenzen: Klartext, kein Bcc, keine Anhaenge, max. 5 Empfaenger, max. 1500 Zeichen"
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn write_enable_keeps_a_configured_limit() -> TestResult {
-        let dir = TempDir::new()?;
-        let config = format!(
-            r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}], "write": {{"accounts": [], "max_per_hour": 99}}}}"#
+            .ok_or("mail")?;
+        assert_eq!(mail.get("sends_per_hour"), Some(&Json::Int(3)));
+        assert_eq!(
+            mail.get("accounts").and_then(Json::as_array).map(Vec::len),
+            Some(1)
         );
-        let ctx = real(&dir, Some(&config))?;
-        let (code, _) = run(&ctx, &["write-enable"], "1\nj\n");
-        assert_eq!(code, 0);
-        let limit = saved(&ctx)?
-            .as_object()
-            .and_then(|o| o.get("write"))
+        let calendar = section(&config, "calendar")
             .and_then(Json::as_object)
-            .and_then(|w| w.get("max_per_hour"))
-            .cloned();
-        assert_eq!(limit, Some(Json::Int(30)));
+            .ok_or("calendar")?;
+        assert_eq!(calendar.get("changes_per_hour"), Some(&Json::Int(4)));
+        let ids: Vec<String> = calendar
+            .get("calendars")
+            .and_then(Json::as_array)
+            .ok_or("list")?
+            .iter()
+            .filter_map(Json::as_object)
+            .map(|entry| {
+                format!(
+                    "{}:{}",
+                    crate::text::text_of(entry.get("id")),
+                    crate::text::text_of(entry.get("level"))
+                )
+            })
+            .collect();
+        assert_eq!(ids, ["FAKE-CAL-PRIVAT:read", "FAKE-CAL-FAMILIE:write"]);
         Ok(())
     }
 
     #[test]
-    fn write_disable_removes_only_the_write_section() -> TestResult {
+    fn setup_without_changes_says_so_and_writes_nothing() -> TestResult {
         let dir = TempDir::new()?;
-        let config = format!(
-            r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}, {ACCOUNT_2}], "write": {{"accounts": ["ACC-2"]}}}}"#
-        );
-        let ctx = real(&dir, Some(&config))?;
-        let (code, _) = run(&ctx, &["write-disable"], "");
-        assert_eq!(code, 0);
-        assert_eq!(saved(&ctx)?, j(&base())?);
+        let ctx = real(&dir, None)?;
+        let (code, out) = run(&ctx, &["setup"], "\n\n\n\n\n\n\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Unveraendert."));
+        assert!(!std::path::Path::new(&ctx.settings.config_path).exists());
         Ok(())
     }
 
     #[test]
-    fn write_enable_without_input_changes_nothing() -> TestResult {
+    fn a_read_only_calendar_cannot_get_the_write_level() -> TestResult {
         let dir = TempDir::new()?;
-        let config = format!(
-            r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}], "write": {{"accounts": ["ACC-1"]}}}}"#
-        );
-        let ctx = real(&dir, Some(&config))?;
-        let (code, out) = run(&ctx, &["write-enable"], "\n");
-        assert_eq!(code, 0);
-        assert!(out.contains("Unveraendert"));
-        assert_eq!(write_accounts(&saved(&ctx)?), ["ACC-1"]);
+        let ctx = real(&dir, None)?;
+        let (code, out) = run(&ctx, &["setup", "calendar"], "\n\n2\n1\n\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Demo Feiertage [schreibgeschuetzt]"));
+        assert!(out.contains("Dieser Eintrag ist schreibgeschuetzt (hoechstens Stufe 1)."));
+        assert!(out.contains("Kalender: Demo Feiertage (lesen)"));
         Ok(())
     }
 
     #[test]
-    fn write_enable_refuses_wrong_numbers_unconfirmed_choices_and_missing_input() -> TestResult {
+    fn entries_that_vanished_from_mail_are_removed_with_a_note() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = real(&dir, Some(&base()))?;
+        let (code, out) = run(&ctx, &["setup", "mail"], "\n\n\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Nicht mehr in Mail vorhanden, wird entfernt: Privat Gmail, Outlook"));
+        let config = saved(&ctx)?;
+        assert!(section(&config, "mail").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn setup_refuses_unconfirmed_choices_nonsense_and_missing_input() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, Some(&base()))?;
         for (input, expected) in [
-            ("9\n", "Nummer ausserhalb der Liste."),
-            ("0\n", "Nummer ausserhalb der Liste."),
-            ("-1\n", "Nummer ausserhalb der Liste."),
-            ("x\n", "Ungueltige Eingabe."),
-            ("1\nn\n", "Abgebrochen."),
-            ("1\n", "Abgebrochen."),
+            ("1\n\n\nn\n", "Abgebrochen."),
+            ("1\n\n\n", "Abgebrochen."),
             ("", "Ungueltige Eingabe."),
+            ("1\n", "Ungueltige Eingabe."),
+            ("x\nx\nx\n", "Zu viele ungueltige Eingaben."),
+            ("3\n9\n-1\n", "Zu viele ungueltige Eingaben."),
         ] {
-            let (code, out) = run(&ctx, &["write-enable"], input);
-            assert_eq!(code, 1, "{input:?}");
+            let (code, out) = run(&ctx, &["setup", "mail"], input);
+            assert_eq!(code, 1, "{input:?}: {out}");
             assert!(out.contains(expected), "{input:?}: {out}");
             assert_eq!(saved(&ctx)?, j(&base())?, "{input:?}");
         }
@@ -1114,96 +1601,47 @@ mod tests {
     }
 
     #[test]
-    fn write_enable_needs_accounts_that_are_enabled_for_reading() -> TestResult {
+    fn an_unknown_area_is_refused() -> TestResult {
         let dir = TempDir::new()?;
-        let ctx = real(&dir, Some(r#"{"version": 2, "allowed_accounts": []}"#))?;
-        let (code, out) = run(&ctx, &["write-enable"], "");
-        assert_eq!(code, 1);
-        assert!(out.contains("avery mail setup"));
+        let ctx = real(&dir, None)?;
+        let (code, out) = run(&ctx, &["setup", "notes\u{b}"], "");
+        assert_eq!(code, 2);
+        assert!(out.contains("Unbekannter Bereich: notes (mail oder calendar)"));
         Ok(())
     }
 
     #[test]
-    fn revoke_removes_reading_and_writing() -> TestResult {
+    fn an_endless_answer_line_is_refused() -> TestResult {
         let dir = TempDir::new()?;
-        let config = format!(
-            r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}], "write": {{"accounts": ["ACC-1"]}}}}"#
-        );
-        let ctx = real(&dir, Some(&config))?;
+        let ctx = real(&dir, Some(&base()))?;
+        let long = format!("{}\n", "1".repeat(20_000));
+        let (code, out) = run(&ctx, &["setup", "mail"], &long);
+        assert_eq!(code, 1);
+        assert!(out.contains("Ungueltige Eingabe."));
+        Ok(())
+    }
+
+    #[test]
+    fn revoke_removes_all_grants_and_keeps_the_limits() -> TestResult {
+        let dir = TempDir::new()?;
+        let config = r#"{"version": 3,
+            "mail": {"accounts": [{"id": "A", "name": "A", "level": "write"}], "sends_per_hour": 3},
+            "calendar": {"calendars": [{"id": "C", "name": "C", "level": "write"}]}}"#;
+        let ctx = real(&dir, Some(config))?;
         let (code, out) = run(&ctx, &["revoke"], "");
         assert_eq!(code, 0);
         assert!(out.contains("Alle Freigaben entfernt"));
         assert_eq!(
             saved(&ctx)?,
-            j(r#"{"version": 2, "allowed_accounts": []}"#)?
+            j(r#"{"version": 3, "mail": {"accounts": [], "sends_per_hour": 3}}"#)?
         );
-        Ok(())
-    }
-
-    #[test]
-    fn setup_keeps_write_rights_only_for_accounts_that_stay_enabled() -> TestResult {
-        let dir = TempDir::new()?;
-        let start = r#"{"version": 2, "allowed_accounts": [], "write": {"accounts": ["FAKE-GMAIL", "FAKE-OUTLOOK"], "max_per_hour": 3}}"#;
-        let ctx = real(&dir, Some(start))?;
-        let (code, _) = run(&ctx, &["setup"], "1\nj\n");
-        assert_eq!(code, 0);
-        let config = saved(&ctx)?;
-        assert_eq!(write_accounts(&config), ["FAKE-GMAIL"]);
-        let limit = config
-            .as_object()
-            .and_then(|o| o.get("write"))
-            .and_then(Json::as_object)
-            .and_then(|w| w.get("max_per_hour"));
-        assert_eq!(limit, Some(&Json::Int(3)));
-        let (code, _) = run(&ctx, &["setup"], "2\nj\n");
-        assert_eq!(code, 0);
-        let config = saved(&ctx)?;
-        assert!(config.as_object().is_some_and(|o| o.get("write").is_none()));
-        assert_eq!(
-            config.as_object().and_then(|o| o.get("version")),
-            Some(&Json::Int(2))
-        );
-        fs::write(&ctx.settings.config_path, start)?;
-        let (code, _) = run(&ctx, &["setup"], "1 2\nj\n");
-        assert_eq!(code, 0);
-        let config = saved(&ctx)?;
-        assert_eq!(write_accounts(&config), ["FAKE-GMAIL", "FAKE-OUTLOOK"]);
-        let limit = config
-            .as_object()
-            .and_then(|o| o.get("write"))
-            .and_then(Json::as_object)
-            .and_then(|w| w.get("max_per_hour"));
-        assert_eq!(limit, Some(&Json::Int(3)));
-        Ok(())
-    }
-
-    #[test]
-    fn setup_accepts_several_numbers_and_stores_their_details() -> TestResult {
-        let dir = TempDir::new()?;
-        let ctx = real(&dir, None)?;
-        let (code, out) = run(&ctx, &["setup"], "1, 2 1\nja\n");
-        assert_eq!(code, 0, "{out}");
-        let config = saved(&ctx)?;
-        let accounts = config
-            .as_object()
-            .and_then(|o| o.get("allowed_accounts"))
-            .and_then(Json::as_array)
-            .ok_or("accounts")?;
-        assert_eq!(accounts.len(), 2);
-        assert_eq!(
-            accounts[0],
-            j(
-                r#"{"id": "FAKE-GMAIL", "name": "Demo Gmail", "type": "imap", "addresses": ["demo.privat@gmail.example"]}"#
-            )?
-        );
-        assert!(out.contains("Gespeichert in"));
         Ok(())
     }
 
     #[test]
     fn a_config_that_cannot_be_read_is_never_overwritten() -> TestResult {
         for text in [
-            "{\"version\": 3, \"allowed_accounts\": []}",
+            "{\"version\": 2, \"allowed_accounts\": []}",
             "{\"allowed_accounts\": []}",
             "not json at all",
             "[]",
@@ -1212,9 +1650,8 @@ mod tests {
             let ctx = real(&dir, Some(text))?;
             for (args, input) in [
                 (vec!["setup"], "1\nj\n"),
+                (vec!["setup", "mail"], "1\nj\n"),
                 (vec!["revoke"], ""),
-                (vec!["write-enable"], "1\nj\n"),
-                (vec!["write-disable"], ""),
             ] {
                 let (code, out) = run(&ctx, &args, input);
                 assert_eq!(code, 1, "{text:?} {args:?}: {out}");
@@ -1233,7 +1670,7 @@ mod tests {
         let dir = TempDir::new()?;
         let ctx = real(&dir, Some(&base()))?;
         fs::create_dir(format!("{}.tmp", ctx.settings.config_path))?;
-        let (code, out) = run(&ctx, &["write-disable"], "");
+        let (code, out) = run(&ctx, &["revoke"], "");
         assert_eq!(code, 1);
         assert!(out.contains("nicht schreibbar"));
         assert_eq!(saved(&ctx)?, j(&base())?);
@@ -1254,7 +1691,7 @@ mod tests {
     fn sendlog_shows_one_line_per_attempt_and_marks_unclear_ones() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, Some(&base()))?;
-        let now = sendlog::now_seconds();
+        let now = journal::now_seconds();
         let mut first = log_entry(now - 100, Outcome::Pending, Some("a"));
         let mut second = log_entry(now - 90, Outcome::Sent, Some("a"));
         let mut third = log_entry(now - 50, Outcome::Pending, Some("b"));
@@ -1267,9 +1704,6 @@ mod tests {
             entry.subject = subject.to_string();
             sendlog::append(&ctx.settings, entry, true)?;
         }
-        fs::OpenOptions::new()
-            .append(true)
-            .open(ctx.settings.sendlog_path())?;
         let (code, out) = run(&ctx, &["sendlog"], "");
         assert_eq!(code, 0);
         let rows: Vec<&str> = out
@@ -1295,31 +1729,35 @@ mod tests {
     }
 
     #[test]
-    fn status_shows_enabled_accounts_and_write_rights() -> TestResult {
+    fn status_shows_the_levels_per_area_and_the_limits() -> TestResult {
         let dir = TempDir::new()?;
-        let writing = format!(
-            r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}], "write": {{"accounts": ["ACC-1"]}}}}"#
-        );
-        let ctx = real(&dir, Some(&writing))?;
+        let config = r#"{"version": 3,
+            "mail": {"accounts": [{"id": "A", "name": "Privat Gmail", "level": "write"}, {"id": "B", "name": "Outlook", "level": "read"}], "sends_per_hour": 2},
+            "calendar": {"calendars": [{"id": "C", "name": "Familie", "level": "read"}], "changes_per_hour": 6}}"#;
+        let ctx = real(&dir, Some(config))?;
         let (code, out) = run(&ctx, &["status"], "");
         assert_eq!(code, 0);
-        assert!(out.contains("Lesen freigegeben fuer: Privat Gmail"));
-        assert!(out.contains("Entwuerfe/Senden: Privat Gmail"));
+        assert!(out.contains("Mail: Privat Gmail (schreiben), Outlook (lesen)"));
+        assert!(out.contains("Kalender: Familie (lesen)"));
+        assert!(out.contains(
+            "Grenzen pro Stunde: 2 gesendete Mails, 30 Entwuerfe, 6 Kalenderaenderungen"
+        ));
         assert!(out.contains(&format!("Version: {VERSION}")));
-        let reading = format!(r#"{{"version": 2, "allowed_accounts": [{ACCOUNT_1}]}}"#);
-        let (_, out) = run(&real(&dir, Some(&reading))?, &["status"], "");
-        assert!(out.contains("Entwuerfe/Senden: aus"));
         let empty = TempDir::new()?;
         let (code, out) = run(&real(&empty, None)?, &["status"], "");
         assert_eq!(code, 0);
-        assert!(out.contains("(fehlt)") && out.contains("kein Konto"));
+        assert!(
+            out.contains("(fehlt)")
+                && out.contains("Mail: keine")
+                && out.contains("Kalender: keine")
+        );
         Ok(())
     }
 
     #[test]
     fn status_reports_an_unsupported_config_instead_of_guessing() -> TestResult {
         let dir = TempDir::new()?;
-        let ctx = real(&dir, Some(r#"{"version": 9, "allowed_accounts": []}"#))?;
+        let ctx = real(&dir, Some(r#"{"version": 2, "allowed_accounts": []}"#))?;
         let (code, out) = run(&ctx, &["status"], "");
         assert_eq!(code, 1);
         assert!(out.contains("Fehler: config.json has an unsupported format version"));
@@ -1327,17 +1765,18 @@ mod tests {
     }
 
     #[test]
-    fn accounts_marks_enabled_and_writable_accounts() -> TestResult {
+    fn accounts_marks_the_level_of_every_account() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = context(&dir, true, "FAKE-GMAIL", None, FakeOptions::default())?;
         let (code, out) = run(&ctx, &["accounts,"], "");
         assert_eq!(code, 0);
         assert!(
-            out.contains("* 1) Demo Gmail  [imap]  demo.privat@gmail.example  [Entwuerfe/Senden]"),
+            out.contains("* 1) Demo Gmail  [imap]  demo.privat@gmail.example  [schreiben]"),
             "{out}"
         );
         assert!(out.contains("* 2) Demo Outlook  [exchange]"));
-        assert!(out.contains("  3) Demo Firma"));
+        assert!(out.contains("[lesen]"));
+        assert!(out.contains("  3) Demo Firma  [exchange]  demo@firma.example  [aus]"));
         assert!(!out.contains("* 3)"));
         Ok(())
     }
@@ -1354,6 +1793,47 @@ mod tests {
         assert!(!out.contains("FAIL"));
         assert!(!out.contains("Paket"));
         assert!(out.contains("Alle Pruefungen bestanden."));
+        Ok(())
+    }
+
+    #[test]
+    fn calendars_marks_the_level_and_the_read_only_ones() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = context(&dir, true, "FAKE-CAL-PRIVAT", None, FakeOptions::default())?;
+        let (code, out) = run(&ctx, &["calendars"], "");
+        assert_eq!(code, 0);
+        assert!(out.contains("* 1) Demo Privat  [schreiben]"), "{out}");
+        assert!(out.contains("* 2) Demo Familie  [lesen]"));
+        assert!(out.contains("* 3) Demo Feiertage [schreibgeschuetzt]  [lesen]"));
+        assert!(out.contains("  4) Demo Firma  [aus]"));
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_checks_calendars_and_prints_no_event_text() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = context(&dir, true, "", None, FakeOptions::default())?;
+        let (code, out) = run(&ctx, &["selftest"], "");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("PASS  Kalender 1  Kalender erreichbar"));
+        assert!(out.contains("PASS  Kalender 1  Termine lesen"));
+        assert!(out.contains("Kalender 3  Kalender erreichbar (0.0 s)  schreibgeschuetzt"));
+        assert!(
+            out.contains("INFO  Kalender 2  Wiederholungen: 1 von 1 Serien lassen sich entfalten")
+        );
+        assert!(!out.contains("Zahnarzt") && !out.contains("Familienessen"));
+        let only = r#"{"version": 3, "calendar": {"calendars": [{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "read"}]}}"#;
+        let ctx = context(&dir, false, "", Some(only), FakeOptions::default())?;
+        let (code, out) = run(&ctx, &["selftest"], "");
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("Konto 1") && out.contains("Kalender 1"));
+        let gone = r#"{"version": 3, "calendar": {"calendars": [{"id": "GONE", "name": "Weg", "level": "read"}]}}"#;
+        let ctx = context(&dir, false, "", Some(gone), FakeOptions::default())?;
+        let (code, out) = run(&ctx, &["selftest"], "");
+        assert_eq!(code, 1);
+        assert!(out.contains(
+            "FAIL  Kalender 1  Kalender erreichbar: Kalender nicht mehr in Calendar vorhanden"
+        ));
         Ok(())
     }
 
@@ -1408,13 +1888,7 @@ mod tests {
         };
         let ctx = context(&dir, true, "FAKE-GMAIL", None, options)?;
         fs::create_dir_all(ctx.settings.sendlog_path())?;
-        let (code, out) = run(
-            &ctx,
-            &["selftest-write"],
-            "j
-j
-",
-        );
+        let (code, out) = run(&ctx, &["selftest-write"], "j\nj\n");
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("FAIL  Entwurf: The send log is not writable"));
         assert!(out.contains("FAIL  Senden: The send log is not writable"));
@@ -1434,17 +1908,12 @@ j
             ..FakeOptions::default()
         };
         let ctx = context(&dir, true, "FAKE-GMAIL", None, options)?;
-        let now = sendlog::now_seconds();
+        let now = journal::now_seconds();
         for index in 0..5 {
             let entry = log_entry(now - 1000 - index, Outcome::Sent, None);
             sendlog::append(&ctx.settings, &entry, true)?;
         }
-        let (code, out) = run(
-            &ctx,
-            &["selftest-write"],
-            "j
-",
-        );
+        let (code, out) = run(&ctx, &["selftest-write"], "j\n");
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("FAIL  Senden: Send limit reached (5 per hour)"));
         assert!(!fs::read_to_string(dir.path("outbox.jsonl"))
@@ -1491,7 +1960,7 @@ j
         let off = context(&dir, true, "", None, FakeOptions::default())?;
         let (code, out) = run(&off, &["selftest-write"], "");
         assert_eq!(code, 1);
-        assert!(out.contains("Writing is not enabled."));
+        assert!(out.contains("Writing mail is not enabled."));
         Ok(())
     }
 
@@ -1508,9 +1977,12 @@ j
         assert!(out.contains("Unbekannter Befehl: foo"));
         assert!(!out.contains("Usage") && !out.contains("Meintest"));
         assert!(out.contains(
-            "Befehle: accounts, setup, revoke, selftest, write-enable, write-disable, sendlog, selftest-write, status"
+            "Befehle: accounts, calendars, setup, revoke, selftest, sendlog, changes, undo, selftest-write, status"
         ));
         assert!(out.contains("Hilfe: avery mail help"));
+        let (code, out) = run(&ctx, &["write-enable"], "");
+        assert_eq!(code, 2);
+        assert!(out.contains("Unbekannter Befehl: write-enable"));
         Ok(())
     }
 
@@ -1522,6 +1994,7 @@ j
             let (code, out) = run(&ctx, &[flag], "");
             assert_eq!(code, 0);
             assert!(out.contains("Usage") && out.contains("selftest-write"));
+            assert!(!out.contains("write-enable"));
         }
         for flag in ["version", "-V", "--version"] {
             assert_eq!(run(&ctx, &[flag], ""), (0, format!("{VERSION}\n")));
@@ -1559,7 +2032,7 @@ j
             ("sendlg", Some("sendlog")),
             ("statu", Some("status")),
             ("acount", Some("accounts")),
-            ("write-enabel", Some("write-enable")),
+            ("calender", Some("calendars")),
             ("serv", Some("serve")),
             ("xyz", None),
             ("", None),
@@ -1569,27 +2042,318 @@ j
         assert_eq!(closest_command(&"a".repeat(500)), None);
     }
 
-    #[test]
-    fn picks_are_sorted_deduplicated_and_checked() {
-        assert_eq!(parse_picks("3, 1 1,2", 3), Ok(vec![0, 1, 2]));
-        assert_eq!(parse_picks("4", 3), Err("Nummer ausserhalb der Liste."));
-        assert_eq!(parse_picks("0", 3), Err("Nummer ausserhalb der Liste."));
-        assert_eq!(parse_picks("a", 3), Err("Ungueltige Eingabe."));
-        assert_eq!(parse_picks("1.5", 3), Err("Ungueltige Eingabe."));
-        assert_eq!(
-            parse_picks("99999999999999999999", 3),
-            Err("Ungueltige Eingabe.")
-        );
+    fn writer(dir: &TempDir, approve: &str) -> Result<Context, std::io::Error> {
+        context(
+            dir,
+            true,
+            "FAKE-CAL-PRIVAT",
+            None,
+            FakeOptions {
+                approve: approve.to_string(),
+                ..FakeOptions::default()
+            },
+        )
+    }
+
+    fn found(ctx: &Context, uid: &str) -> ToolResult<crate::calendar::EventDetail> {
+        let calendar = ctx
+            .settings
+            .allowed_calendars()?
+            .into_iter()
+            .find(|calendar| calendar.id == "FAKE-CAL-PRIVAT")
+            .ok_or_else(|| ToolError::msg("calendar"))?;
+        ctx.calendar.event(&calendar, uid)
+    }
+
+    fn tool_args(text: &str) -> Result<crate::json::Object, String> {
+        crate::testutil::args(text)
     }
 
     #[test]
-    fn an_endless_answer_line_is_refused() -> TestResult {
+    fn changes_without_entries_says_so_and_unreadable_lines_are_counted() -> TestResult {
         let dir = TempDir::new()?;
-        let ctx = real(&dir, Some(&base()))?;
-        let long = format!("{}\n", "1 ".repeat(20_000));
-        let (code, out) = run(&ctx, &["write-enable"], &long);
+        let ctx = writer(&dir, "yes")?;
+        let (code, out) = run(&ctx, &["changes"], "");
+        assert_eq!(code, 0);
+        assert!(out.contains("Noch keine Eintraege"));
+        fs::write(ctx.settings.changes_path(), "garbage\n")?;
+        let (code, out) = run(&ctx, &["changes"], "");
+        assert_eq!(code, 0);
+        assert!(out.contains("1 Zeile(n) in einem unbekannten Format uebersprungen."));
+        Ok(())
+    }
+
+    #[test]
+    fn changes_shows_one_line_per_attempt_and_marks_what_can_be_undone() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        crate::calendar::create_event(
+            &ctx,
+            &tool_args(r#"{"summary": "Tennis", "start": "2030-05-06 18:30"}"#)?,
+        )?;
+        crate::calendar::delete_event(&ctx, &tool_args(r#"{"id": "demo-dentist"}"#)?)?;
+        let (code, out) = run(&ctx, &["changes"], "");
+        assert_eq!(code, 0, "{out}");
+        let rows: Vec<&str> = out.lines().filter(|l| l.contains("Demo Privat")).collect();
+        assert_eq!(rows.len(), 2, "{out}");
+        assert!(
+            rows[0].contains("create") && rows[0].contains("done") && rows[0].contains("Tennis")
+        );
+        assert!(rows[0].contains("[rueckgaengig moeglich]"));
+        assert!(rows[1].contains("delete") && rows[1].contains("Zahnarzt"));
+        assert!(out.contains("Datei: "));
+        Ok(())
+    }
+
+    #[test]
+    fn undo_reverts_a_create_an_update_and_a_delete_one_after_the_other() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        let original = found(&ctx, "demo-dentist")?;
+        crate::calendar::delete_event(&ctx, &tool_args(r#"{"id": "demo-dentist"}"#)?)?;
+        crate::calendar::create_event(
+            &ctx,
+            &tool_args(r#"{"summary": "Tennis", "start": "2030-05-06 18:30"}"#)?,
+        )?;
+        crate::calendar::update_event(
+            &ctx,
+            &tool_args(r#"{"id": "fake-new-1", "summary": "Tennis abgesagt"}"#)?,
+        )?;
+        let (code, out) = run(&ctx, &["undo"], "1\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("der Termin bekommt seine alten Werte zurueck"),
+            "{out}"
+        );
+        assert!(out.contains("Rueckgaengig gemacht."));
+        assert_eq!(found(&ctx, "fake-new-1")?.event.summary, "Tennis");
+        let (code, out) = run(&ctx, &["undo"], "1\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("der angelegte Termin wird geloescht"));
+        assert!(found(&ctx, "fake-new-1").is_err());
+        let (code, out) = run(&ctx, &["undo"], "1\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("der Termin wird neu angelegt"));
+        let recreated = found(&ctx, "fake-new-2")?;
+        assert_eq!(recreated.event.summary, original.event.summary);
+        assert_eq!(recreated.event.start, original.event.start);
+        assert_eq!(recreated.event.location, original.event.location);
+        let (code, out) = run(&ctx, &["undo"], "");
+        assert_eq!(code, 0);
+        assert!(out.contains("Nichts zum Rueckgaengigmachen."));
+        let (_, out) = run(&ctx, &["changes"], "");
+        assert!(
+            out.contains("undo-update")
+                && out.contains("undo-create")
+                && out.contains("undo-delete")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn undo_can_pick_a_change_by_the_start_of_its_id() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        crate::calendar::create_event(
+            &ctx,
+            &tool_args(r#"{"summary": "Tennis", "start": "2030-05-06 18:30"}"#)?,
+        )?;
+        let id = crate::changelog::read_entries(&ctx.settings, 10)?
+            .entries
+            .first()
+            .map(|entry| entry.id.clone())
+            .ok_or("entry")?;
+        for wanted in ["", "zzzz"] {
+            let (code, out) = run(&ctx, &["undo", wanted], "j\n");
+            assert_eq!(code, 1, "{out}");
+            assert!(out.contains("Keine eindeutige Aenderung"), "{out}");
+        }
+        assert!(found(&ctx, "fake-new-1").is_ok());
+        let (code, out) = run(&ctx, &["undo", &id[..6]], "j\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(found(&ctx, "fake-new-1").is_err());
+        let (code, out) = run(&ctx, &["undo", &id[..6]], "j\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Nichts zum Rueckgaengigmachen."));
+        Ok(())
+    }
+
+    #[test]
+    fn undo_refuses_what_changed_since_and_needs_the_dialog() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        crate::calendar::create_event(
+            &ctx,
+            &tool_args(r#"{"summary": "Tennis", "start": "2030-05-06 18:30"}"#)?,
+        )?;
+        let calendar = ctx
+            .settings
+            .allowed_calendars()?
+            .into_iter()
+            .find(|calendar| calendar.id == "FAKE-CAL-PRIVAT")
+            .ok_or("calendar")?;
+        let current =
+            crate::calendar::EventFields::of(&ctx.calendar.event(&calendar, "fake-new-1")?);
+        let moved = crate::calendar::EventFields {
+            summary: "Selbst umbenannt".into(),
+            ..current.clone()
+        };
+        ctx.calendar.change(
+            &calendar,
+            &crate::calendar::Change::Update {
+                uid: "fake-new-1".into(),
+                before: current,
+                after: moved,
+            },
+            &crate::calendar::Approval {
+                seconds: 5,
+                undo: false,
+            },
+        )?;
+        let (code, out) = run(&ctx, &["undo"], "1\nj\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("changed in Calendar"), "{out}");
+        assert_eq!(found(&ctx, "fake-new-1")?.event.summary, "Selbst umbenannt");
+        let other = TempDir::new()?;
+        let declining = context(
+            &other,
+            true,
+            "FAKE-CAL-PRIVAT",
+            None,
+            FakeOptions::default(),
+        )?;
+        let yes = writer(&other, "yes")?;
+        crate::calendar::delete_event(&yes, &tool_args(r#"{"id": "demo-dentist"}"#)?)?;
+        let (code, out) = run(&declining, &["undo"], "1\nj\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("Im Dialog abgelehnt, nichts geaendert."),
+            "{out}"
+        );
+        let (code, out) = run(&declining, &["undo"], "1\nn\n");
+        assert_eq!(code, 1);
+        assert!(out.contains("Abgebrochen."));
+        let (code, out) = run(&declining, &["undo"], "9\n");
         assert_eq!(code, 1);
         assert!(out.contains("Ungueltige Eingabe."));
+        let (code, out) = run(&declining, &["undo"], "\n");
+        assert_eq!(code, 0);
+        assert!(out.contains("Unveraendert."));
+        Ok(())
+    }
+
+    #[test]
+    fn undo_ignores_the_limits_of_the_model_but_not_an_unwritable_log() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        crate::changelog::ensure_writable(&ctx.settings)?;
+        let now = journal::now_seconds();
+        for index in 0..9 {
+            let entry = crate::changelog::ChangeEntry {
+                ts: now - 1000 - index,
+                id: format!("old{index}"),
+                action: crate::calendar::Action::Create,
+                outcome: crate::changelog::Outcome::Done,
+                calendar_id: "FAKE-CAL-PRIVAT".into(),
+                calendar: "Demo Privat".into(),
+                uid: None,
+                before: None,
+                after: None,
+                undoes: None,
+            };
+            crate::changelog::append(&ctx.settings, &entry, true)?;
+        }
+        crate::calendar::delete_event(&ctx, &tool_args(r#"{"id": "demo-dentist"}"#)?)?;
+        let blocked = crate::calendar::create_event(
+            &ctx,
+            &tool_args(r#"{"summary": "Tennis", "start": "2030-05-06 18:30"}"#)?,
+        );
+        assert!(
+            matches!(&blocked, Err(ToolError::Msg(m)) if m.starts_with("Change limit reached")),
+            "{blocked:?}"
+        );
+        let (code, out) = run(&ctx, &["undo"], "1\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(found(&ctx, "fake-new-1").is_ok());
+        let still_blocked =
+            crate::calendar::delete_event(&ctx, &tool_args(r#"{"id": "fake-new-1"}"#)?);
+        assert!(
+            matches!(&still_blocked, Err(ToolError::Msg(m)) if m.starts_with("Change limit reached"))
+        );
+        fs::remove_file(ctx.settings.changes_path())?;
+        fs::create_dir_all(ctx.settings.changes_path())?;
+        let (code, out) = run(&ctx, &["undo"], "1\nj\n");
+        assert_eq!(code, 1, "{out}");
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_write_walks_through_create_change_and_delete_of_a_test_event() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        let (code, out) = run(&ctx, &["selftest-write"], "j\nj\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("Freigabedialog funktioniert"), "{out}");
+        assert!(out.contains("PASS  Termin angelegt"));
+        assert!(out.contains("PASS  Termin geaendert"));
+        assert!(out.contains("PASS  Termin geloescht"));
+        assert!(out.contains("Fertig."));
+        assert!(found(&ctx, "fake-new-1").is_err());
+        let log = crate::changelog::read_entries(&ctx.settings, 20)?;
+        let kinds: Vec<(&str, &str)> = log
+            .entries
+            .iter()
+            .map(|entry| (entry.action.as_str(), entry.outcome.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("create", "pending"),
+                ("create", "done"),
+                ("update", "pending"),
+                ("update", "done"),
+                ("delete", "pending"),
+                ("delete", "done"),
+            ]
+        );
+        let (code, out) = run(&ctx, &["selftest-write"], "n\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("PASS"));
+        let other = TempDir::new()?;
+        let declining = writer(&other, "no")?;
+        let (code, out) = run(&declining, &["selftest-write"], "j\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("INFO  Termin angelegt: im Dialog abgelehnt, nichts geaendert"));
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_write_keeps_the_test_event_when_the_delete_is_not_confirmed() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = writer(&dir, "yes")?;
+        let (code, out) = run(&ctx, &["selftest-write"], "j\nn\nn\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("INFO  Der Test-Termin bleibt in Calendar bestehen"));
+        assert!(found(&ctx, "fake-new-1").is_ok());
+        let other = TempDir::new()?;
+        let broken = writer(&other, "yes")?;
+        fs::create_dir_all(broken.settings.changes_path())?;
+        let (code, out) = run(&broken, &["selftest-write"], "j\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("FAIL  Termin angelegt: The change log is not writable"));
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_write_without_any_write_level_names_both_areas() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = context(&dir, true, "", None, FakeOptions::default())?;
+        let (code, out) = run(&ctx, &["selftest-write"], "");
+        assert_eq!(code, 1);
+        assert!(
+            out.contains("Writing mail is not enabled.")
+                && out.contains("Changing calendars is not enabled.")
+        );
         Ok(())
     }
 }

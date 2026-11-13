@@ -19,15 +19,6 @@ impl MailAccount {
             addresses: string_list(object.get("addresses")),
         })
     }
-
-    pub(crate) fn to_json(&self) -> Json {
-        Json::object(vec![
-            ("id", Json::from(&self.id)),
-            ("name", Json::from(&self.name)),
-            ("type", Json::from(&self.kind)),
-            ("addresses", Json::from(self.addresses.as_slice())),
-        ])
-    }
 }
 
 pub(crate) fn string_list(value: Option<&Json>) -> Vec<String> {

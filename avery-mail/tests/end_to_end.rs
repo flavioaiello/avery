@@ -12,8 +12,19 @@ const READ_TOOLS: [&str; 5] = [
     "search_messages",
     "read_message",
 ];
-const ACCOUNT: &str =
-    r#"{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"]}"#;
+
+fn account(id: &str, name: &str, level: &str) -> String {
+    format!(
+        r#"{{"id": "{id}", "name": "{name}", "type": "imap", "addresses": ["me@gmail.example"], "level": "{level}"}}"#
+    )
+}
+
+fn mail_config(level: &str) -> String {
+    format!(
+        r#"{{"version": 3, "mail": {{"accounts": [{}]}}}}"#,
+        account("ACC-1", "Privat Gmail", level)
+    )
+}
 
 fn start_writer(
     sandbox: &Sandbox,
@@ -45,9 +56,18 @@ fn the_server_greets_lists_its_tools_and_stops_at_the_end_of_input() -> TestResu
     let hello = server.rpc("initialize", r#"{"protocolVersion": "2024-11-05"}"#)?;
     assert!(hello.contains("\"name\": \"avery-mail\""), "{hello}");
     assert!(hello.contains(&format!("\"version\": \"{}\"", avery_mail::VERSION)));
-    assert_eq!(server.tool_names()?, READ_TOOLS);
+    let names = server.tool_names()?;
+    assert_eq!(names[..5], READ_TOOLS);
+    assert_eq!(names[5..], ["list_calendars", "list_events", "get_event"]);
     let (error, text) = server.call("list_accounts", "{}")?;
     assert!(!error && text.contains("Demo Gmail") && !text.contains("Demo Firma"));
+    let (error, text) = server.call("list_calendars", "{}")?;
+    assert!(!error && text.contains("Demo Privat") && !text.contains("Demo Firma"));
+    let (error, text) = server.call("list_events", r#"{"days": 14}"#)?;
+    assert!(
+        !error && text.contains("Zahnarzt") && !text.contains("Quartalsplanung"),
+        "{text}"
+    );
     assert_eq!(server.finish()?, Some(0));
     Ok(())
 }
@@ -68,7 +88,7 @@ fn writing_is_off_by_default() -> TestResult {
 fn a_declined_send_sends_nothing_and_is_logged_before_and_after() -> TestResult {
     let sandbox = Sandbox::new()?;
     let mut server = start_writer(&sandbox, "FAKE-GMAIL", "no", &[])?;
-    assert_eq!(server.tool_names()?.len(), 7);
+    assert_eq!(server.tool_names()?.len(), 10);
     let (error, text) = server.call("send_message", MAIL)?;
     assert!(!error && text.contains("did NOT approve"), "{text}");
     assert_eq!(sandbox.read("outbox.jsonl"), "");
@@ -162,24 +182,28 @@ fn an_uncertain_outcome_asks_the_user_to_check_mail_and_stays_pending() -> TestR
 
 #[test]
 fn real_mode_reads_the_configuration_file_and_never_guesses() -> TestResult {
-    let reading = format!(r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}]}}"#);
-    let writing = format!(
-        r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}], "write": {{"accounts": ["ACC-1"]}}}}"#
-    );
-    let foreign = format!(
-        r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}], "write": {{"accounts": ["ACC-OTHER"]}}}}"#
-    );
-    let broken = format!(r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}], "write": "kaputt"}}"#);
-    for (config, tools) in [(reading, 5), (writing, 7), (foreign, 5), (broken, 5)] {
+    let calendars = r#"{"version": 3, "calendar": {"calendars": [{"id": "C", "name": "K", "level": "write"}]}}"#;
+    for (config, tools) in [
+        (mail_config("read"), 5),
+        (mail_config("write"), 7),
+        (calendars.to_string(), 6),
+        (r#"{"version": 3}"#.to_string(), 0),
+        (r#"{"version": 2, "allowed_accounts": []}"#.to_string(), 8),
+        (
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "root"}]}}"#.to_string(),
+            8,
+        ),
+        ("not json".to_string(), 8),
+    ] {
         let sandbox = Sandbox::new()?;
         sandbox.write("config.json", &config)?;
         let mut server = Server::start(&sandbox, &[])?;
         assert_eq!(server.tool_names()?.len(), tools, "{config}");
     }
     let sandbox = Sandbox::new()?;
-    sandbox.write("config.json", r#"{"version": 3, "allowed_accounts": []}"#)?;
+    sandbox.write("config.json", r#"{"version": 2, "allowed_accounts": []}"#)?;
     let mut server = Server::start(&sandbox, &[])?;
-    assert_eq!(server.tool_names()?, READ_TOOLS);
+    assert_eq!(server.tool_names()?[..5], READ_TOOLS);
     let (error, text) = server.call("list_accounts", "{}")?;
     assert!(
         error && text.contains("unsupported format version"),
@@ -192,10 +216,7 @@ fn real_mode_reads_the_configuration_file_and_never_guesses() -> TestResult {
 fn avery_home_decides_where_the_configuration_lives() -> TestResult {
     let sandbox = Sandbox::new()?;
     std::fs::create_dir_all(sandbox.path("home/mail"))?;
-    let config = format!(
-        r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}], "write": {{"accounts": ["ACC-1"]}}}}"#
-    );
-    sandbox.write("home/mail/config.json", &config)?;
+    sandbox.write("home/mail/config.json", &mail_config("write"))?;
     let home = sandbox.path("home").to_string_lossy().into_owned();
     let mut server = Server::start(
         &sandbox,
@@ -223,16 +244,11 @@ fn garbage_and_oversized_lines_do_not_stop_the_server() -> TestResult {
 #[test]
 fn status_prints_the_configuration_and_exits_with_zero() -> TestResult {
     let sandbox = Sandbox::new()?;
-    let config = format!(
-        r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}], "write": {{"accounts": ["ACC-1"]}}}}"#
-    );
-    sandbox.write("config.json", &config)?;
+    sandbox.write("config.json", &mail_config("write"))?;
     let output = run_cli(&sandbox, &[], &["status"], "")?;
     assert_eq!(output.code, Some(0));
-    assert!(output
-        .stdout
-        .contains("Lesen freigegeben fuer: Privat Gmail"));
-    assert!(output.stdout.contains("Entwuerfe/Senden: Privat Gmail"));
+    assert!(output.stdout.contains("Mail: Privat Gmail (schreiben)"));
+    assert!(output.stdout.contains("Kalender: keine"));
     Ok(())
 }
 
@@ -265,44 +281,47 @@ fn demo_mode_selftest_and_accounts_work_without_mail() -> TestResult {
 }
 
 #[test]
-fn write_enable_reads_its_answers_from_standard_input() -> TestResult {
+fn setup_reads_its_answers_from_standard_input() -> TestResult {
     let sandbox = Sandbox::new()?;
-    let second = ACCOUNT
-        .replace("ACC-1", "ACC-2")
-        .replace("Privat Gmail", "Outlook");
-    sandbox.write(
-        "config.json",
-        &format!(r#"{{"version": 2, "allowed_accounts": [{ACCOUNT}, {second}]}}"#),
-    )?;
-    let output = run_cli(&sandbox, &[], &["write-enable"], "2\nj\n")?;
+    let env = [("MAIL_MCP_FAKE", "1")];
+    let output = run_cli(&sandbox, &env, &["setup"], "2\n1\n\n1\n\n\n\nj\n")?;
     assert_eq!(output.code, Some(0), "{}", output.stdout);
     let saved = sandbox.read("config.json");
     assert!(
-        saved.contains("\"ACC-2\"") && saved.contains("\"max_per_hour\": 5"),
+        saved.contains("\"level\": \"write\"") && saved.contains("FAKE-CAL-PRIVAT"),
         "{saved}"
     );
     let status = run_cli(&sandbox, &[], &["status"], "")?;
-    assert!(status.stdout.contains("Entwuerfe/Senden: Outlook"));
-    let disabled = run_cli(&sandbox, &[], &["write-disable"], "")?;
-    assert_eq!(disabled.code, Some(0));
-    assert!(!sandbox.read("config.json").contains("\"write\""));
+    assert!(status
+        .stdout
+        .contains("Mail: Demo Gmail (schreiben), Demo Outlook (lesen)"));
+    assert!(status.stdout.contains("Kalender: Demo Privat (lesen)"));
+    let revoked = run_cli(&sandbox, &env, &["revoke"], "")?;
+    assert_eq!(revoked.code, Some(0));
+    assert!(!sandbox.read("config.json").contains("level"));
     Ok(())
 }
 
 #[test]
 fn an_unsupported_configuration_is_never_overwritten() -> TestResult {
     let sandbox = Sandbox::new()?;
-    let original = r#"{"version": 3, "allowed_accounts": [], "areas": {"calendar": "write"}}"#;
-    sandbox.write("config.json", original)?;
-    for (args, input) in [
-        (vec!["setup"], "1\nj\n"),
-        (vec!["revoke"], ""),
-        (vec!["write-enable"], "1\nj\n"),
-        (vec!["write-disable"], ""),
-    ] {
-        let output = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &args, input)?;
-        assert_eq!(output.code, Some(1), "{args:?}: {}", output.stdout);
-        assert_eq!(sandbox.read("config.json"), original);
+    let originals = [
+        r#"{"version": 2, "allowed_accounts": [], "write": {"accounts": []}}"#,
+        r#"{"version": 4, "areas": {"calendar": "write"}}"#,
+        "not json",
+    ];
+    for original in originals {
+        sandbox.write("config.json", original)?;
+        for (args, input) in [
+            (vec!["setup"], "1\nj\n"),
+            (vec!["setup", "mail"], "1\nj\n"),
+            (vec!["setup", "calendar"], "1\nj\n"),
+            (vec!["revoke"], ""),
+        ] {
+            let output = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &args, input)?;
+            assert_eq!(output.code, Some(1), "{args:?}: {}", output.stdout);
+            assert_eq!(sandbox.read("config.json"), original);
+        }
     }
     Ok(())
 }
@@ -324,5 +343,162 @@ fn the_sendlog_command_shows_what_the_server_wrote() -> TestResult {
         1
     );
     assert!(output.stdout.contains("sent") && !output.stdout.contains("unklar"));
+    Ok(())
+}
+
+#[test]
+fn calendar_events_are_read_created_changed_and_deleted_through_the_server() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut server = start_writer(&sandbox, "FAKE-CAL-PRIVAT", "yes", &[])?;
+    let names = server.tool_names()?;
+    assert!(
+        names.contains(&"create_event".to_string()) && !names.contains(&"send_message".to_string())
+    );
+    let (error, text) = server.call("list_calendars", "{}")?;
+    assert!(
+        !error && text.contains("Demo Privat [write]") && text.contains("Demo Familie [read]"),
+        "{text}"
+    );
+    let (error, text) = server.call("list_events", r#"{"days": 14}"#)?;
+    assert!(
+        !error && text.contains("Zahnarzt") && text.contains("Familienessen"),
+        "{text}"
+    );
+    assert!(!text.contains("Quartalsplanung"));
+    let create = r#"{"summary": "Tennis", "start": "2030-05-06 18:30", "location": "Platz 3", "notes": "Schlaeger"}"#;
+    let (error, text) = server.call("create_event", create)?;
+    assert!(
+        !error && text.starts_with("Created: the user approved"),
+        "{text}"
+    );
+    let (error, text) = server.call(
+        "list_events",
+        r#"{"start": "2030-05-06", "days": 1, "calendar": "Demo Privat"}"#,
+    )?;
+    assert!(
+        !error && text.contains("id=fake-new-1") && text.contains("Tennis"),
+        "{text}"
+    );
+    let (error, text) = server.call(
+        "get_event",
+        r#"{"id": "fake-new-1", "calendar": "Demo Privat"}"#,
+    )?;
+    assert!(
+        !error && text.contains("--- NOTES (untrusted) ---\nSchlaeger"),
+        "{text}"
+    );
+    let (error, text) = server.call(
+        "update_event",
+        r#"{"id": "fake-new-1", "summary": "Tennis mit Ben", "start": "2030-05-06 19:00"}"#,
+    )?;
+    assert!(
+        !error && text.contains("Title: Tennis mit Ben") && text.contains("19:00-20:00"),
+        "{text}"
+    );
+    let (error, text) = server.call("delete_event", r#"{"id": "fake-new-1"}"#)?;
+    assert!(!error && text.starts_with("Deleted:"), "{text}");
+    let (error, text) = server.call(
+        "get_event",
+        r#"{"id": "fake-new-1", "calendar": "Demo Privat"}"#,
+    )?;
+    assert!(error && text.contains("Event not found"), "{text}");
+    let (error, text) = server.call("delete_event", r#"{"id": "demo-parents"}"#)?;
+    assert!(error && text.contains("has attendees"), "{text}");
+    let (error, text) = server.call(
+        "update_event",
+        r#"{"id": "demo-dinner", "summary": "X", "calendar": "Demo Privat"}"#,
+    )?;
+    assert!(error && text.contains("Event not found"), "{text}");
+    assert_eq!(server.finish()?, Some(0));
+    let log = sandbox.read("changes.jsonl");
+    let entries = lines(&log);
+    assert_eq!(entries.len(), 6, "{log}");
+    assert!(entries.iter().all(|line| line.contains("\"v\": 1")));
+    assert!(
+        entries[0].contains("\"action\": \"create\"")
+            && entries[0].contains("\"outcome\": \"pending\"")
+    );
+    assert!(
+        entries[5].contains("\"action\": \"delete\"")
+            && entries[5].contains("\"outcome\": \"done\"")
+    );
+    assert!(!sandbox.path("sendlog.jsonl").exists());
+    Ok(())
+}
+
+#[test]
+fn a_declined_calendar_change_changes_nothing_and_the_log_command_shows_it() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut server = start_writer(&sandbox, "FAKE-CAL-PRIVAT", "no", &[])?;
+    let (error, text) = server.call("delete_event", r#"{"id": "demo-dentist"}"#)?;
+    assert!(
+        !error && text.contains("did NOT approve") && text.contains("NOTHING was changed"),
+        "{text}"
+    );
+    let (error, text) = server.call(
+        "get_event",
+        r#"{"id": "demo-dentist", "calendar": "Demo Privat"}"#,
+    )?;
+    assert!(!error && text.contains("Title: Zahnarzt"), "{text}");
+    let (error, text) = server.call("delete_event", r#"{"id": "demo-dentist"}"#)?;
+    assert!(error && text.contains("just declined or ignored"), "{text}");
+    assert_eq!(server.finish()?, Some(0));
+    let output = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &["changes"], "")?;
+    assert_eq!(output.code, Some(0));
+    let rows: Vec<&str> = output
+        .stdout
+        .lines()
+        .filter(|l| l.contains("Zahnarzt"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{}", output.stdout);
+    assert!(rows[0].contains("declined") && !rows[0].contains("rueckgaengig moeglich"));
+    let undo = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &["undo"], "")?;
+    assert_eq!(undo.code, Some(0));
+    assert!(undo.stdout.contains("Nichts zum Rueckgaengigmachen."));
+    Ok(())
+}
+
+#[test]
+fn calendar_changes_are_refused_without_the_write_level_and_leave_no_log() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut server = Server::start(&sandbox, &[("MAIL_MCP_FAKE", "1")])?;
+    for (name, arguments) in [
+        (
+            "create_event",
+            r#"{"summary": "A", "start": "2030-05-06 09:00"}"#,
+        ),
+        ("update_event", r#"{"id": "demo-dentist", "summary": "A"}"#),
+        ("delete_event", r#"{"id": "demo-dentist"}"#),
+    ] {
+        let (error, text) = server.call(name, arguments)?;
+        assert!(
+            error && text.contains("Changing calendars is not enabled"),
+            "{text}"
+        );
+    }
+    assert!(!sandbox.path("changes.jsonl").exists());
+    Ok(())
+}
+
+#[test]
+fn an_undo_in_a_fresh_process_reports_an_event_that_is_gone() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut server = start_writer(&sandbox, "FAKE-CAL-PRIVAT", "yes", &[])?;
+    let (error, _) = server.call(
+        "create_event",
+        r#"{"summary": "Tennis", "start": "2030-05-06 18:30"}"#,
+    )?;
+    assert!(!error);
+    assert_eq!(server.finish()?, Some(0));
+    let env = [("MAIL_MCP_FAKE", "1"), ("MAIL_MCP_FAKE_APPROVE", "yes")];
+    let changes = run_cli(&sandbox, &env, &["changes"], "")?;
+    assert!(
+        changes.stdout.contains("[rueckgaengig moeglich]"),
+        "{}",
+        changes.stdout
+    );
+    let undo = run_cli(&sandbox, &env, &["undo"], "1\nj\n")?;
+    assert_eq!(undo.code, Some(1), "{}", undo.stdout);
+    assert!(undo.stdout.contains("Event not found"), "{}", undo.stdout);
     Ok(())
 }

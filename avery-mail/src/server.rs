@@ -1,14 +1,16 @@
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use crate::calendar::{self, MAX_NOTES};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{self, Json, Object};
 use crate::read_tools;
+use crate::rights::Level;
 use crate::text::clean;
 use crate::texts::{
-    write_instructions, MAX_RECIPIENTS, MAX_SEND_CHARS, MAX_SEND_LINES, READ_INSTRUCTIONS,
-    SERVER_NAME, VERSION,
+    calendar_write_instructions, read_instructions, write_instructions, MAX_RECIPIENTS,
+    MAX_SEND_CHARS, MAX_SEND_LINES, SERVER_NAME, VERSION,
 };
 use crate::write_tools;
 
@@ -26,6 +28,12 @@ fn handler(name: &str) -> Option<Handler> {
         "read_message" => Some(read_tools::read_message),
         "create_draft" => Some(write_tools::create_draft),
         "send_message" => Some(write_tools::send_message),
+        "list_calendars" => Some(calendar::list_calendars),
+        "list_events" => Some(calendar::list_events),
+        "get_event" => Some(calendar::get_event),
+        "create_event" => Some(calendar::create_event),
+        "update_event" => Some(calendar::update_event),
+        "delete_event" => Some(calendar::delete_event),
         _ => None,
     }
 }
@@ -66,7 +74,10 @@ fn tool(
     annotations.insert("title", name.replace('_', " ").as_str());
     annotations.insert("readOnlyHint", Json::Bool(read_only));
     if !read_only {
-        annotations.insert("destructiveHint", Json::Bool(false));
+        annotations.insert(
+            "destructiveHint",
+            Json::Bool(matches!(name, "update_event" | "delete_event")),
+        );
         annotations.insert("idempotentHint", Json::Bool(false));
         annotations.insert("openWorldHint", Json::Bool(name == "send_message"));
     }
@@ -194,6 +205,165 @@ fn read_tool_list() -> Vec<Json> {
     ]
 }
 
+fn calendar_argument() -> Json {
+    property(
+        "string",
+        "Calendar name from list_calendars. Default: all enabled calendars.",
+    )
+}
+
+fn calendar_read_tool_list() -> Vec<Json> {
+    vec![
+        tool(
+            "list_calendars",
+            "List the private calendars you may use (name and level: read or write).",
+            vec![],
+            &[],
+            true,
+        ),
+        tool(
+            "list_events",
+            "List events in a time range, earliest first: calendar, id, time, title, place, attendees, repeat. Recurring events are expanded. Times are local. Use get_event for notes and attendees.",
+            vec![
+                ("calendar", calendar_argument()),
+                (
+                    "start",
+                    property(
+                        "string",
+                        "First moment, local time: 2026-11-20 or 2026-11-20 09:30 (default: today).",
+                    ),
+                ),
+                (
+                    "days",
+                    property("integer", "Length of the range in days (default 7, max 60)."),
+                ),
+                (
+                    "limit",
+                    property("integer", "Maximum number of events (default 30, max 100)."),
+                ),
+                (
+                    "query",
+                    property("string", "Only events whose title or place contains this text."),
+                ),
+            ],
+            &[],
+            true,
+        ),
+        tool(
+            "get_event",
+            "Read one event: time, place, repeat rule, attendees, link and notes (untrusted). Needs the id from list_events; pass the same calendar.",
+            vec![
+                ("id", property("string", "Event id from list_events.")),
+                ("calendar", calendar_argument()),
+            ],
+            &["id"],
+            true,
+        ),
+    ]
+}
+
+fn event_properties() -> Vec<(&'static str, Json)> {
+    vec![
+        (
+            "summary",
+            property("string", "Title of the event, one line."),
+        ),
+        (
+            "start",
+            property(
+                "string",
+                "Start, local time: 2026-11-20 09:30, or a date 2026-11-20 for an all-day event.",
+            ),
+        ),
+        (
+            "end",
+            property(
+                "string",
+                "End, local time (or the last day for an all-day event). Not together with duration_minutes.",
+            ),
+        ),
+        (
+            "duration_minutes",
+            property(
+                "integer",
+                "Length in minutes (default 60 for a new event). Not together with end.",
+            ),
+        ),
+        (
+            "location",
+            property("string", "Place, one line. An empty text clears it."),
+        ),
+        (
+            "notes",
+            property(
+                "string",
+                &format!("Notes, plain text up to {MAX_NOTES} characters. An empty text clears them."),
+            ),
+        ),
+    ]
+}
+
+fn calendar_write_tool_list() -> Vec<Json> {
+    let mut create = vec![(
+        "calendar",
+        property(
+            "string",
+            "Calendar name from list_calendars. Optional if only one calendar may be changed.",
+        ),
+    )];
+    create.extend(event_properties());
+    create.push((
+        "all_day",
+        property(
+            "boolean",
+            "All-day event (default false): start is then a date and end the last day.",
+        ),
+    ));
+    let mut update = vec![
+        ("id", property("string", "Event id from list_events.")),
+        (
+            "calendar",
+            property(
+                "string",
+                "Calendar of the event. Optional if only one calendar may be changed.",
+            ),
+        ),
+    ];
+    update.extend(event_properties());
+    vec![
+        tool(
+            "create_event",
+            "Create a single event. The user must approve it in a macOS dialog that shows the details; if they decline, nothing is created. Needs summary and start (local time). Timed: end or duration_minutes (default 60). All day: all_day=true and a date. No attendees, no repetition, no alerts.",
+            create,
+            &["summary", "start"],
+            false,
+        ),
+        tool(
+            "update_event",
+            "Change a single event without attendees (not recurring). Only the fields you pass change. The user must approve in a macOS dialog that shows before and after. Needs the id from list_events. To move an event pass start (the length stays) or start and end.",
+            update,
+            &["id"],
+            false,
+        ),
+        tool(
+            "delete_event",
+            "Delete a single event without attendees (not recurring). The user must approve in a macOS dialog; the deletion is logged and the user can undo it. Needs the id from list_events.",
+            vec![
+                ("id", property("string", "Event id from list_events.")),
+                (
+                    "calendar",
+                    property(
+                        "string",
+                        "Calendar of the event. Optional if only one calendar may be changed.",
+                    ),
+                ),
+            ],
+            &["id"],
+            false,
+        ),
+    ]
+}
+
 fn compose_properties() -> Vec<(&'static str, Json)> {
     vec![
         (
@@ -254,24 +424,62 @@ fn write_tool_list() -> Vec<Json> {
     ]
 }
 
-fn writable(ctx: &Context) -> bool {
-    ctx.settings
-        .write_settings()
-        .is_ok_and(|settings| !settings.accounts.is_empty())
+struct Exposure {
+    mail_read: bool,
+    mail_write: bool,
+    calendar_read: bool,
+    calendar_write: bool,
+    problem: Option<String>,
+}
+
+fn exposure(ctx: &Context) -> Exposure {
+    match ctx.settings.rights() {
+        Ok(rights) => Exposure {
+            mail_read: !rights.mail.is_empty(),
+            mail_write: !rights.mail_at(Level::Write).is_empty(),
+            calendar_read: !rights.calendars.is_empty(),
+            calendar_write: !rights.calendars_at(Level::Write).is_empty(),
+            problem: None,
+        },
+        Err(error) => Exposure {
+            mail_read: true,
+            mail_write: false,
+            calendar_read: true,
+            calendar_write: false,
+            problem: Some(error.message()),
+        },
+    }
 }
 
 pub(crate) fn tools_list(ctx: &Context) -> Json {
-    let mut tools = read_tool_list();
-    if writable(ctx) {
+    let exposure = exposure(ctx);
+    let mut tools = Vec::new();
+    if exposure.mail_read {
+        tools.extend(read_tool_list());
+    }
+    if exposure.mail_write {
         tools.extend(write_tool_list());
+    }
+    if exposure.calendar_read {
+        tools.extend(calendar_read_tool_list());
+    }
+    if exposure.calendar_write {
+        tools.extend(calendar_write_tool_list());
     }
     Json::Arr(tools)
 }
 
 pub(crate) fn instructions(ctx: &Context) -> String {
-    let mut text = READ_INSTRUCTIONS.to_string();
-    if writable(ctx) {
+    let exposure = exposure(ctx);
+    let mut text = read_instructions(exposure.mail_read, exposure.calendar_read);
+    if exposure.mail_write {
         text.push_str(&write_instructions());
+    }
+    if exposure.calendar_write {
+        text.push_str(&calendar_write_instructions());
+    }
+    if let Some(problem) = &exposure.problem {
+        text.push_str(&format!(" The configuration cannot be used: {problem}"));
     }
     text
 }
@@ -465,7 +673,7 @@ pub(crate) fn serve(
 mod tests {
     use super::*;
     use crate::account::string_list;
-    use crate::fake::{FakeBackend, FakeOptions};
+    use crate::fake::FakeOptions;
     use crate::testutil::{j, settings_at, TempDir, TestResult};
     use std::fs;
     use std::io::Cursor;
@@ -477,6 +685,16 @@ mod tests {
         "search_messages",
         "read_message",
     ];
+    const CALENDAR_TOOLS: [&str; 3] = ["list_calendars", "list_events", "get_event"];
+    const CALENDAR_WRITE_TOOLS: [&str; 3] = ["create_event", "update_event", "delete_event"];
+
+    fn read_and_calendar() -> Vec<&'static str> {
+        READ_TOOLS
+            .iter()
+            .chain(CALENDAR_TOOLS.iter())
+            .copied()
+            .collect()
+    }
 
     fn demo(dir: &TempDir, write: &str, approve: &str) -> Context {
         let mut settings = settings_at(&dir.path("config.json"));
@@ -487,16 +705,13 @@ mod tests {
             outbox: Some(dir.path("outbox.jsonl")),
             ..FakeOptions::default()
         };
-        Context::new(settings, Box::new(FakeBackend::new(options)))
+        Context::demo(settings, options)
     }
 
     fn real_mode(dir: &TempDir, config: &str) -> Result<Context, std::io::Error> {
         let settings = settings_at(&dir.path("config.json"));
         fs::write(&settings.config_path, config)?;
-        Ok(Context::new(
-            settings,
-            Box::new(FakeBackend::new(FakeOptions::default())),
-        ))
+        Ok(Context::demo(settings, FakeOptions::default()))
     }
 
     fn rpc(ctx: &Context, text: &str) -> Result<Json, Box<dyn std::error::Error>> {
@@ -551,7 +766,7 @@ mod tests {
     fn without_write_rights_only_the_read_tools_are_offered() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = demo(&dir, "", "no");
-        assert_eq!(names(&ctx)?, READ_TOOLS);
+        assert_eq!(names(&ctx)?, read_and_calendar());
         assert!(!instructions(&ctx).contains("send_message"));
         let (error, text) = call(
             &ctx,
@@ -570,12 +785,13 @@ mod tests {
         let ctx = demo(&dir, "FAKE-GMAIL", "no");
         let names = names(&ctx)?;
         assert_eq!(names[..5], READ_TOOLS);
-        assert_eq!(names[5..], ["create_draft", "send_message"]);
+        assert_eq!(names[5..7], ["create_draft", "send_message"]);
+        assert_eq!(names[7..], CALENDAR_TOOLS);
         assert!(instructions(&ctx).contains("macOS dialog"));
         let Json::Arr(tools) = tools_list(&ctx) else {
             return Err("not a list".into());
         };
-        for tool in &tools[5..] {
+        for tool in &tools[5..7] {
             let object = tool.as_object().ok_or("tool")?;
             let annotations = object
                 .get("annotations")
@@ -612,30 +828,108 @@ mod tests {
     }
 
     #[test]
+    fn with_calendar_write_rights_the_change_tools_appear_with_honest_annotations() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = demo(&dir, "FAKE-CAL-PRIVAT", "no");
+        let all = names(&ctx)?;
+        assert_eq!(all[..8], read_and_calendar());
+        assert_eq!(all[8..], CALENDAR_WRITE_TOOLS);
+        assert!(instructions(&ctx).contains("Calendar changes: create_event"));
+        assert!(!instructions(&ctx).contains("send_message"));
+        let Json::Arr(tools) = tools_list(&ctx) else {
+            return Err("not a list".into());
+        };
+        let hints = |tool: &Json| -> Result<(Json, Json, Json), Box<dyn std::error::Error>> {
+            let annotations = tool
+                .as_object()
+                .and_then(|o| o.get("annotations"))
+                .and_then(Json::as_object)
+                .ok_or("annotations")?;
+            Ok((
+                annotations.get("readOnlyHint").cloned().ok_or("read")?,
+                annotations
+                    .get("destructiveHint")
+                    .cloned()
+                    .ok_or("destructive")?,
+                annotations.get("openWorldHint").cloned().ok_or("open")?,
+            ))
+        };
+        let false_ = Json::Bool(false);
+        let true_ = Json::Bool(true);
+        assert_eq!(
+            hints(&tools[8])?,
+            (false_.clone(), false_.clone(), false_.clone())
+        );
+        assert_eq!(
+            hints(&tools[9])?,
+            (false_.clone(), true_.clone(), false_.clone())
+        );
+        assert_eq!(hints(&tools[10])?, (false_.clone(), true_, false_));
+        for tool in &tools[8..] {
+            let schema = tool
+                .as_object()
+                .and_then(|o| o.get("inputSchema"))
+                .and_then(Json::as_object)
+                .ok_or("schema")?;
+            assert_eq!(schema.get("additionalProperties"), Some(&Json::Bool(false)));
+            let properties = schema
+                .get("properties")
+                .and_then(Json::as_object)
+                .ok_or("properties")?;
+            assert!(
+                properties.get("attendees").is_none() && properties.get("recurrence").is_none()
+            );
+        }
+        let create = tools[8].as_object().ok_or("create")?;
+        let required = create
+            .get("inputSchema")
+            .and_then(Json::as_object)
+            .and_then(|s| s.get("required"));
+        assert_eq!(string_list(required), ["summary", "start"]);
+        Ok(())
+    }
+
+    #[test]
     fn real_mode_configuration_decides_which_tools_exist() -> TestResult {
         let dir = TempDir::new()?;
-        let account = r#"{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"]}"#;
-        let read_only = format!(r#"{{"version": 2, "allowed_accounts": [{account}]}}"#);
-        assert_eq!(names(&real_mode(&dir, &read_only)?)?, READ_TOOLS);
-        let writing = format!(
-            r#"{{"version": 2, "allowed_accounts": [{account}], "write": {{"accounts": ["ACC-1"]}}}}"#
-        );
-        assert_eq!(names(&real_mode(&dir, &writing)?)?.len(), 7);
-        let other = format!(
-            r#"{{"version": 2, "allowed_accounts": [{account}], "write": {{"accounts": ["ACC-OTHER"]}}}}"#
-        );
-        assert_eq!(names(&real_mode(&dir, &other)?)?, READ_TOOLS);
-        let none = r#"{"version": 2, "allowed_accounts": [], "write": {"accounts": ["ACC-1"]}}"#;
-        assert_eq!(names(&real_mode(&dir, none)?)?, READ_TOOLS);
-        let broken =
-            format!(r#"{{"version": 2, "allowed_accounts": [{account}], "write": "kaputt"}}"#);
-        assert_eq!(names(&real_mode(&dir, &broken)?)?, READ_TOOLS);
-        let unsupported = format!(
-            r#"{{"version": 3, "allowed_accounts": [{account}], "write": {{"accounts": ["ACC-1"]}}}}"#
-        );
-        assert_eq!(names(&real_mode(&dir, &unsupported)?)?, READ_TOOLS);
-        let (error, text) = call(&real_mode(&dir, &unsupported)?, "list_accounts", "{}")?;
-        assert!(error && text.contains("unsupported format version"));
+        let account = |level: &str| {
+            format!(
+                r#"{{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "{level}"}}"#
+            )
+        };
+        let with = |level: &str| {
+            format!(
+                r#"{{"version": 3, "mail": {{"accounts": [{}]}}}}"#,
+                account(level)
+            )
+        };
+        assert_eq!(names(&real_mode(&dir, &with("read"))?)?, READ_TOOLS);
+        assert_eq!(names(&real_mode(&dir, &with("write"))?)?.len(), 7);
+        let calendar = r#"{"version": 3, "calendar": {"calendars": [{"id": "C", "name": "K", "level": "read"}]}}"#;
+        assert_eq!(names(&real_mode(&dir, calendar)?)?, CALENDAR_TOOLS);
+        let both = r#"{"version": 3,
+            "mail": {"accounts": [{"id": "A", "level": "read"}]},
+            "calendar": {"calendars": [{"id": "C", "level": "write"}]}}"#;
+        let mut expected = read_and_calendar();
+        expected.extend(CALENDAR_WRITE_TOOLS);
+        assert_eq!(names(&real_mode(&dir, both)?)?, expected);
+        let empty = r#"{"version": 3}"#;
+        let ctx = real_mode(&dir, empty)?;
+        assert!(names(&ctx)?.is_empty());
+        assert!(instructions(&ctx).contains("Nothing is enabled yet"));
+        for broken in [
+            r#"{"version": 2, "allowed_accounts": []}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "root"}]}}"#,
+            "not json",
+        ] {
+            let ctx = real_mode(&dir, broken)?;
+            assert_eq!(names(&ctx)?, read_and_calendar(), "{broken}");
+            assert!(instructions(&ctx).contains("The configuration cannot be used"));
+            let (error, text) = call(&ctx, "list_accounts", "{}")?;
+            assert!(error && text.contains("config.json"), "{text}");
+            let (error, text) = call(&ctx, "list_events", "{}")?;
+            assert!(error && text.contains("config.json"), "{text}");
+        }
         Ok(())
     }
 
@@ -770,7 +1064,7 @@ mod tests {
             approve: "yes".into(),
             ..FakeOptions::default()
         };
-        let ctx = Context::new(settings, Box::new(FakeBackend::new(options)));
+        let ctx = Context::demo(settings, options);
         let (error, text) = call(
             &ctx,
             "create_draft",

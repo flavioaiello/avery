@@ -1,14 +1,12 @@
-use std::time::Duration;
-
 use crate::account::{Account, MailAccount};
 use crate::backend::{
     Backend, ComposeRequest, Mailbox, MessageBody, MessageList, MessageQuery, Preview,
 };
 use crate::error::{ToolError, ToolResult};
-use crate::json::{self, Json, Object};
+use crate::json::{Json, Object};
+use crate::jxa::exchange;
 use crate::mailerror::failure;
-use crate::osascript::{Finished, Host, OsascriptHost};
-use crate::text::text_of;
+use crate::osascript::{App, Host, OsascriptHost};
 use crate::texts::{APPROVAL_SECONDS, JXA_TIMEOUT, MAX_HITS, MAX_RECIPIENTS};
 
 pub(crate) struct RealBackend {
@@ -25,55 +23,17 @@ impl RealBackend {
     }
 
     fn call(&self, request: Object, timeout_seconds: u64) -> ToolResult<Json> {
-        let op = request
-            .get("op")
-            .and_then(Json::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let op = op.as_str();
+        let op = request.get("op").and_then(Json::as_str).unwrap_or_default();
         if !matches!(op, "ping" | "approval_test") {
-            self.host.ensure_mail_running();
+            self.host.ensure_running(App::Mail);
         }
-        let payload = json::dumps(&Json::Obj(request), true);
-        let finished = self
-            .host
-            .run(&payload, Duration::from_secs(timeout_seconds));
-        let (stdout, stderr) = match finished {
-            Finished::TimedOut => return Err(failure("timed out", Some(op), false)),
-            Finished::NotStarted => {
-                return Err(failure("empty answer from osascript", Some(op), true))
-            }
-            Finished::TooLarge => {
-                return Err(failure("unexpected answer from osascript", Some(op), true))
-            }
-            Finished::Done { stdout, stderr, .. } => (stdout, stderr),
-        };
-        let reason = |fallback: &str| {
-            if stderr.is_empty() {
-                fallback.to_string()
-            } else {
-                stderr.clone()
-            }
-        };
-        let answer = stdout.trim();
-        if answer.is_empty() {
-            return Err(failure(
-                &reason("empty answer from osascript"),
-                Some(op),
-                true,
-            ));
-        }
-        let Ok(Json::Obj(result)) = json::parse(answer) else {
-            return Err(failure(
-                &reason("unexpected answer from osascript"),
-                Some(op),
-                true,
-            ));
-        };
-        if result.get("ok") != Some(&Json::Bool(true)) {
-            return Err(failure(&text_of(result.get("error")), Some(op), false));
-        }
-        Ok(result.get("data").cloned().unwrap_or(Json::Null))
+        exchange(
+            self.host.as_ref(),
+            App::Mail,
+            request,
+            timeout_seconds,
+            failure,
+        )
     }
 
     fn account_request(op: &str, account: &Account) -> Object {
@@ -190,12 +150,15 @@ mod tests {
     use super::*;
     use crate::account::with_labels;
     use crate::backend::{Mode, ReplySpec};
+    use crate::osascript::Finished;
     use crate::testutil::{j, TestResult};
+    use crate::text::text_of;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     #[cfg(target_os = "macos")]
     use std::process::Command;
     use std::rc::Rc;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct Script {
@@ -208,11 +171,13 @@ mod tests {
     struct Scripted(Rc<RefCell<Script>>);
 
     impl Host for Scripted {
-        fn ensure_mail_running(&self) {
+        fn ensure_running(&self, app: App) {
+            assert_eq!(app, App::Mail);
             self.0.borrow_mut().mail_checks += 1;
         }
 
-        fn run(&self, payload: &str, timeout: Duration) -> Finished {
+        fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished {
+            assert_eq!(app, App::Mail);
             let mut script = self.0.borrow_mut();
             script.payloads.push(payload.to_string());
             script.timeouts.push(timeout);

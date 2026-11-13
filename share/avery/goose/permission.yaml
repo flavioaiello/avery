@@ -6,9 +6,15 @@ user:
   - mail__search_messages
   - mail__read_message
   - mail__create_draft
+  - mail__list_calendars
+  - mail__list_events
+  - mail__get_event
   - todo__todo_write
   ask_before:
   - mail__send_message
+  - mail__create_event
+  - mail__update_event
+  - mail__delete_event
   never_allow: []
 smart_approve:
   always_allow: []

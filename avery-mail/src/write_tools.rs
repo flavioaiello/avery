@@ -2,6 +2,7 @@ use crate::account::Account;
 use crate::backend::{ComposeRequest, Mode, Preview, ReplySpec};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
+use crate::journal;
 use crate::json::{Json, Object};
 use crate::sendlog::{self, LogEntry, Outcome};
 use crate::text::{
@@ -231,7 +232,7 @@ fn log_attempt(
     strict: bool,
 ) -> ToolResult<()> {
     let entry = LogEntry::for_attempt(
-        sendlog::now_seconds(),
+        journal::now_seconds(),
         &account.label,
         request,
         outcome,
@@ -266,7 +267,7 @@ fn summary(preview: &Preview) -> String {
 }
 
 fn guard(ctx: &Context, mode: Mode, max_per_hour: i64) -> ToolResult<()> {
-    let now = sendlog::now_seconds();
+    let now = journal::now_seconds();
     let history = sendlog::read_window(&ctx.settings, now)?;
     match mode {
         Mode::Send => sendlog::check_send_limits(&history.entries, now, max_per_hour)?,
@@ -310,7 +311,7 @@ pub(crate) fn perform_send(
     max_per_hour: i64,
 ) -> ToolResult<(Preview, Outcome)> {
     guard(ctx, Mode::Send, max_per_hour)?;
-    let id = sendlog::attempt_id()?;
+    let id = journal::attempt_id()?;
     log_attempt(
         ctx,
         account,
@@ -380,7 +381,7 @@ pub(crate) fn send_message(ctx: &Context, args: &Object) -> ToolResult<String> {
 mod tests {
     use super::*;
     use crate::account::string_list;
-    use crate::fake::{FakeBackend, FakeOptions};
+    use crate::fake::FakeOptions;
     use crate::testutil::{args, j, log_entry, settings_at, TempDir, TestResult};
     use std::error::Error;
     use std::fs;
@@ -392,12 +393,14 @@ mod tests {
         let mut settings = settings_at(&dir.path("config.json"));
         settings.fake = true;
         settings.fake_write = accounts.to_string();
-        let backend = FakeBackend::new(FakeOptions {
-            approve: approve.to_string(),
-            outbox: Some(dir.path("outbox.jsonl")),
-            ..options
-        });
-        Context::new(settings, Box::new(backend))
+        Context::demo(
+            settings,
+            FakeOptions {
+                approve: approve.to_string(),
+                outbox: Some(dir.path("outbox.jsonl")),
+                ..options
+            },
+        )
     }
 
     fn gmail(dir: &TempDir, approve: &str) -> Context {
@@ -883,7 +886,7 @@ mod tests {
 
     #[test]
     fn the_log_drives_the_send_limits() -> TestResult {
-        let now = sendlog::now_seconds();
+        let now = journal::now_seconds();
         let case = |entries: Vec<LogEntry>| -> Result<ToolResult<String>, Box<dyn Error>> {
             let dir = TempDir::new()?;
             let ctx = gmail(&dir, "yes");
@@ -913,7 +916,7 @@ mod tests {
     fn a_pending_entry_and_its_result_count_once() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = gmail(&dir, "yes");
-        let now = sendlog::now_seconds();
+        let now = journal::now_seconds();
         let mut pairs = Vec::new();
         for i in 0..4 {
             let id = format!("q{i}");
@@ -947,7 +950,7 @@ mod tests {
             ..FakeOptions::default()
         };
         let ctx = writer(&dir, "FAKE-GMAIL", "yes", options);
-        let now = sendlog::now_seconds();
+        let now = journal::now_seconds();
         let pendings: Vec<LogEntry> = (0..4)
             .map(|i| log_entry(now - 900 - i, Outcome::Pending, Some(&format!("p{i}"))))
             .collect();
@@ -1010,7 +1013,7 @@ mod tests {
     fn a_flood_of_drafts_cannot_push_the_send_history_out_of_sight() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = gmail(&dir, "yes");
-        let now = sendlog::now_seconds();
+        let now = journal::now_seconds();
         let mut history: Vec<LogEntry> = (0..5)
             .map(|index| log_entry(now - 1800 - index, Outcome::Sent, None))
             .collect();

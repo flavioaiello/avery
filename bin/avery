@@ -173,8 +173,8 @@ avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + App
 
 Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
-  avery mail <befehl>    Mail-Anbindung verwalten: setup, selftest, write-enable, write-disable,
-                         selftest-write, accounts, sendlog, revoke, status, help
+  avery mail <befehl>    Mail- und Kalender-Anbindung verwalten: setup, accounts, calendars, selftest,
+                         selftest-write, sendlog, changes, undo, revoke, status, help
   avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen;
                          das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist
   avery down             Modell sofort beenden (gibt den Arbeitsspeicher frei)
@@ -215,7 +215,7 @@ cmd_init() {
   command -v splash >/dev/null 2>&1 || say "Hinweis: Splash fehlt. Installieren mit: brew install incoai/tap/splash"
   say ""
   say "Weiter mit:"
-  say "  avery mail setup       (private Mail-Konten waehlen)"
+  say "  avery mail setup       (private Mail-Konten und Kalender waehlen, je Stufe aus/lesen/schreiben)"
   say "  avery mail selftest    (Lesezugriff pruefen)"
   say "  avery up               (Modell als Dienst starten und Goose oeffnen)"
 }
@@ -407,10 +407,11 @@ cmd_doctor() {
         esac
       fi
     done
-    if grep -q "mail__send_message" "$GOOSE_ROOT/config/permission.yaml" 2>/dev/null; then
-      ok "Senden in Goose auf 'nachfragen' gestellt"
+    if grep -q "mail__send_message" "$GOOSE_ROOT/config/permission.yaml" 2>/dev/null \
+      && grep -q "mail__delete_event" "$GOOSE_ROOT/config/permission.yaml" 2>/dev/null; then
+      ok "Senden und Kalenderaenderungen in Goose auf 'nachfragen' gestellt"
     else
-      miss "permission.yaml: mail__send_message fehlt unter ask_before (avery init --force)"
+      miss "permission.yaml: mail__send_message oder mail__delete_event fehlt unter ask_before (avery init --force)"
     fi
   else
     miss "Goose-Profil -> avery init"

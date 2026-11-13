@@ -3,10 +3,10 @@
 # avery
 
 A private AI agent for macOS: [Goose](https://github.com/block/goose) Desktop, a local model served by
-[Splash](https://github.com/incoai/splash), and a small Apple Mail bridge that reads your private mail and can
-write drafts or send mail, but only after you click **Senden** in a native macOS dialog.
+[Splash](https://github.com/incoai/splash), and a small Apple Mail and Calendar bridge that reads your private mail and
+calendar, writes drafts, sends mail and changes calendar events, but only after you click in a native macOS dialog.
 
-Everything runs on your Mac. Mail credentials stay in macOS: Avery drives Mail.app and never sees passwords or tokens.
+Everything runs on your Mac. Credentials stay in macOS: Avery drives Mail.app and Calendar.app and never sees passwords or tokens.
 
 > Status: early (v0.4.0). After installing, run `avery mail selftest` and `avery mail selftest-write`.
 > They check the Mail integration on your machine, which the automated tests cannot do.
@@ -17,7 +17,7 @@ Everything runs on your Mac. Mail credentials stay in macOS: Avery drives Mail.a
 |---|---|
 | `Avery.app` | The icon in Spotlight and the Dock: starts the model, waits until it is ready and opens Goose with the Avery profile |
 | `avery` | Command line: creates the Goose profile, starts the model and Goose, checks the setup |
-| `avery-mail` | MCP server for Goose (stdio, Rust, no dependencies) that drives Mail.app through `osascript` |
+| `avery-mail` | MCP server for Goose (stdio, Rust, no dependencies) that drives Mail.app and Calendar.app through `osascript` |
 | Goose profile | Config, permissions and a local provider for Splash, created by `avery init` in `~/.avery/goose`; your default Goose profile is not touched |
 
 ## Requirements
@@ -48,15 +48,26 @@ Only install it from a tap you trust.
 ```sh
 avery init            # create the Goose profile in ~/.avery/goose
 avery pull            # download the model once (about 17 GB); stop it with Ctrl+C when it says Ready
-avery mail setup      # choose which Mail accounts the agent may read
-avery mail selftest   # check read access (macOS asks once to let Terminal control Mail)
+avery mail setup      # choose a level per Mail account and per calendar: off, read or write
+avery mail selftest   # check read access (macOS asks once to let Terminal control Mail and Calendar)
 ```
 
-Writing is off until you enable it per account:
+Everything is off until you give it a level. `write` means: drafts and sending for a Mail account, creating, changing
+and deleting single events for a calendar, each only after your click in a macOS dialog:
 
 ```sh
-avery mail write-enable    # drafts and sending (with approval) for chosen accounts
-avery mail selftest-write  # test the approval dialog, a draft, and optionally a mail to yourself
+avery mail selftest-write  # test the approval dialogs: a draft, a mail to yourself, a test event
+```
+
+### Upgrading from a release with config format 2
+
+The server reads only config format 3 and never rewrites an older file. Move the old file away, then choose the levels
+again (read access and the sending rights are not carried over):
+
+```sh
+mv ~/.avery/mail/config.json ~/.avery/mail/config.v2.json.bak
+avery mail setup
+avery init --force        # new profile files: the calendar tools ask before they run (the old ones are kept as backup)
 ```
 
 ## Daily use
@@ -81,12 +92,14 @@ a Goose configuration that cannot be parsed.
 
 Restart Goose after changing accounts or permissions.
 
-## How sending is protected
+## How sending and changes are protected
 
-The agent reads untrusted mail, so the design assumes that a mail can try to talk the model into doing something.
+The agent reads untrusted mail and calendar invitations, so the design assumes that they can try to talk the model into
+doing something.
 
-- **Allow list.** Only accounts you chose with `avery mail setup` are ever touched.
-- **Writing is opt-in** per account (`avery mail write-enable`), done by you in a terminal. The model cannot change it.
+- **Levels.** Only the accounts and calendars you gave a level with `avery mail setup` are ever touched: `read` or
+  `write`, set by you in a terminal. The model cannot change them. Calendar.app and Contacts.app know no accounts, so
+  rights are per calendar.
 - **Approval dialog.** `send_message` builds the mail in Mail.app and reads the content back from it. A native dialog,
   shown by the server process and not by Goose, lists sender, recipients, subject and the exact text. Recipients are
   never shortened: a sent mail goes only to plain ASCII addresses of at most 254 characters, and the server reads
@@ -94,17 +107,25 @@ The agent reads untrusted mail, so the design assumes that a mail can try to tal
   sends. Cancel, a timeout (75 s) or any error before the click means nothing is sent. If Mail itself reports an error
   while it sends, the outcome is unknown: the attempt stays in the log as unclear and counts as sent, and the model is
   told to ask you to check *Sent*. The model cannot operate the dialog.
-- **Goose asks too.** `permission.yaml` sets `mail__send_message` to `ask_before`.
-- **Limits.** Plain text only, no Bcc, no attachments, at most 5 recipients (also for replies to all), at most 1500
-  characters and 40 lines per sent mail (longer texts must be drafts you send from Mail), 5 sent mails per hour,
-  6 attempts per 10 minutes, a 20 second cool-down after you decline, and 30 drafts per hour. Every attempt is logged
-  before anything happens (`avery mail sendlog`). If the log cannot be written or read, contains a line the server does
-  not understand, or is too large to check the last hour, nothing is sent and no draft is made until you look at it
-  and move the file away.
+- **Calendar changes** (`create_event`, `update_event`, `delete_event`) work on single events without attendees and
+  without repetition. Events with attendees (a change would notify other people) and recurring events are refused.
+  The dialog shows the event as it is in Calendar and what will change (before and after); the server reads the event
+  again after your click and aborts if it differs. A failure after the click is reported as an unknown outcome.
+- **Goose asks too.** `permission.yaml` sets the sending and calendar change tools to `ask_before`.
+- **Limits.** Mail: plain text only, no Bcc, no attachments, at most 5 recipients (also for replies to all), at most
+  1500 characters and 40 lines per sent mail (longer texts must be drafts you send from Mail), 5 sent mails per hour,
+  30 drafts per hour. Calendar: title and place up to 200 characters, notes up to 1000, 10 changes per hour. For both:
+  6 attempts per 10 minutes and a 20 second cool-down after you decline. Every attempt is logged before anything
+  happens (`avery mail sendlog`, `avery mail changes`). If a log cannot be written or read, contains a line the server
+  does not understand, or is too large to check the last hour, nothing is sent or changed until you look at it and move
+  the file away. The hourly limits can be changed in `config.json` (`sends_per_hour`, `changes_per_hour`, 1 to 30).
+- **Undo.** The change log keeps the event as it was before and after every change. `avery mail undo` restores it
+  (a deleted event is created again; attendees and alerts do not come back). It asks for the dialog again and is not
+  held back by the hourly limits, which exist for the model.
 - **Hidden text.** Control, format and invisible characters (zero-width characters, Unicode tag characters, variation
-  selectors, fillers) are stripped from mail text the model reads and from text it writes, so what the dialog shows is
-  what is sent.
-- **No destructive tools.** There is no code that deletes, moves or flags mail.
+  selectors, fillers) are stripped from mail and event text the model reads and from text it writes, so what the dialog
+  shows is what is stored or sent.
+- **No other destructive tools.** There is no code that deletes, moves or flags mail.
 - **Replies** use Mail's reply: Mail picks the recipients and the subject.
 
 The dialog is the hard gate. Instructions to the model (`top-of-mind.md`) are only a second line of defence.
@@ -115,10 +136,10 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | Command | Purpose |
 |---|---|
 | `avery init [--force]` | Create the profile (existing files are kept; `--force` replaces them and keeps a backup) |
-| `avery mail setup` / `revoke` | Choose or remove readable accounts (`revoke` also switches writing off) |
-| `avery mail write-enable` / `write-disable` | Allow or forbid drafts and sending per account |
-| `avery mail selftest` / `selftest-write` | Check read access / the approval dialog and drafts |
-| `avery mail status` / `accounts` / `sendlog` | Show configuration, Mail accounts, recent send attempts |
+| `avery mail setup [mail\|calendar]` / `revoke` | Choose the level (off, read, write) per Mail account and calendar / remove all of them |
+| `avery mail selftest` / `selftest-write` | Check read access / the approval dialogs, drafts, sending and a test event |
+| `avery mail status` / `accounts` / `calendars` | Show configuration and levels, Mail accounts, calendars |
+| `avery mail sendlog` / `changes` / `undo [id]` | Recent send attempts / recent calendar changes / undo a calendar change |
 | `avery install-app` | Create `Avery.app` in `~/Applications` without the cask (skipped when the cask's app is installed) |
 | `avery up` / `avery down` | Start the model service and open Goose (it stops by itself after Goose is closed) / stop it now |
 | `avery pull` | Download the model once (online, foreground; Ctrl+C when it says Ready) |
@@ -140,23 +161,29 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 | Path | Content |
 |---|---|
 | `~/.avery/goose` | Goose profile (`config/`, `top-of-mind.md`, sessions) |
-| `~/.avery/mail/config.json` | Allow list and write settings (created by `avery mail setup`) |
+| `~/.avery/mail/config.json` | Levels per account and calendar, hourly limits (format version 3, created by `avery mail setup`) |
 | `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
+| `~/.avery/mail/changes.jsonl` | Log of calendar changes with the event before and after (format version 1; used by `avery mail undo`) |
 
 Set `AVERY_HOME` to use another base folder.
 
 ## Known limitations
 
-- macOS asks for permission to control Mail for the app that starts the server (Terminal for the CLI, Goose for the agent).
-  If Goose does not get the prompt, use `avery cli session` from a terminal.
+- macOS asks for permission to control Mail and Calendar for the app that starts the server (Terminal for the CLI,
+  Goose for the agent). If Goose does not get the prompt, use `avery cli session` from a terminal.
 - Mail search covers subject and sender, not the message body.
+- Calendar.app lists a recurring event only once, so Avery expands the common repeat rules (daily, weekly, monthly,
+  yearly with the usual parts) itself. Rules it cannot expand are shown once and flagged. All times are local.
+  Reading a calendar scans all of its events (up to 20000), so very large calendars are slow.
+- `avery mail selftest` and `selftest-write` are the first run against the real Calendar.app on your Mac; the automated
+  tests use demo data and a mock of the scripting interface.
 - The app and the cask are for Apple silicon and macOS 26 or later; the app is not notarized.
 - The model server settings assume Splash and the model named in `avery.env`.
 
 ## Development
 
 ```sh
-cargo test --manifest-path avery-mail/Cargo.toml   # mail server: unit and end-to-end tests on demo data, no Mail access
+cargo test --manifest-path avery-mail/Cargo.toml   # mail and calendar server: unit and end-to-end tests on demo data, no Mail or Calendar access
 tests/cli.sh                                        # bin/avery, app builder, disk image tools, cask and formula
 MAIL_MCP_FAKE=1 cargo run --manifest-path avery-mail/Cargo.toml -- status
 AVERY_MAIL_BIN=$PWD/avery-mail/target/debug/avery-mail bin/avery doctor   # AVERY_MAIL_BIN: use another mail server binary

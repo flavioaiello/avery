@@ -3,14 +3,17 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
-use crate::account::{self, Account, MailAccount};
+use crate::account::{self, Account};
+use crate::calendar::{self, Calendar};
 use crate::error::{ToolError, ToolResult};
 use crate::fake;
 use crate::json::{self, Json, Object};
-use crate::text::{self, clean, text_of};
-use crate::texts::{DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS, WRITE_OFF};
-
-pub(crate) const CONFIG_VERSION: i64 = 2;
+use crate::rights::{Level, Rights, CONFIG_VERSION};
+use crate::text::{clean, text_of};
+use crate::texts::{
+    CALENDAR_WRITE_OFF, DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS,
+    NO_CALENDARS, WRITE_OFF,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -22,6 +25,12 @@ pub(crate) struct Settings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WriteSettings {
     pub(crate) accounts: Vec<Account>,
+    pub(crate) max_per_hour: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CalendarWriteSettings {
+    pub(crate) calendars: Vec<Calendar>,
     pub(crate) max_per_hour: i64,
 }
 
@@ -52,16 +61,15 @@ impl Settings {
         join_path(&dirname(&self.config_path), "sendlog.jsonl")
     }
 
+    pub(crate) fn changes_path(&self) -> String {
+        join_path(&dirname(&self.config_path), "changes.jsonl")
+    }
+
     pub(crate) fn config_exists(&self) -> bool {
         Path::new(&self.config_path).exists()
     }
 
     pub(crate) fn load_config(&self) -> ToolResult<Object> {
-        let unexpected = || {
-            ToolError::msg(
-                "config.json has an unexpected format. Ask the user to move the file away and run `avery mail setup` again.",
-            )
-        };
         let unreadable = || {
             ToolError::msg(
                 "config.json is unreadable. Ask the user to move the file away and run `avery mail setup` again.",
@@ -72,7 +80,6 @@ impl Settings {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut empty = Object::new();
                 empty.insert("version", Json::Int(CONFIG_VERSION));
-                empty.insert("allowed_accounts", Json::Arr(Vec::new()));
                 return Ok(empty);
             }
             Err(_) => return Err(unreadable()),
@@ -80,17 +87,16 @@ impl Settings {
         let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
         let data = json::parse(&text).map_err(|_| unreadable())?;
         let Json::Obj(object) = data else {
-            return Err(unexpected());
+            return Err(ToolError::msg(
+                "config.json has an unexpected format. Ask the user to move the file away and run `avery mail setup` again.",
+            ));
         };
         if object.get("version") != Some(&Json::Int(CONFIG_VERSION)) {
             return Err(ToolError::msg(format!(
                 "config.json has an unsupported format version (expected {CONFIG_VERSION}). Ask the user to move the file away and run `avery mail setup` again."
             )));
         }
-        match object.get("allowed_accounts") {
-            None | Some(Json::Arr(_)) => Ok(object),
-            Some(_) => Err(unexpected()),
-        }
+        Ok(object)
     }
 
     pub(crate) fn save_config(&self, data: &Object) -> io::Result<()> {
@@ -112,84 +118,92 @@ impl Settings {
         fs::rename(&temporary, &self.config_path)
     }
 
-    pub(crate) fn allowed_accounts(&self) -> ToolResult<Vec<Account>> {
-        let entries: Vec<MailAccount> = if self.fake {
-            fake::accounts()
+    pub(crate) fn rights(&self) -> ToolResult<Rights> {
+        if self.fake {
+            return Ok(self.fake_rights());
+        }
+        self.stored_rights()
+    }
+
+    pub(crate) fn stored_rights(&self) -> ToolResult<Rights> {
+        let config = self.load_config()?;
+        Rights::parse(&config).map_err(|what| {
+            ToolError::msg(format!(
+                "config.json is invalid ({what}). Ask the user to fix it or to move it away and run `avery mail setup` again."
+            ))
+        })
+    }
+
+    pub(crate) fn save_rights(&self, rights: &Rights) -> io::Result<()> {
+        self.save_config(&rights.to_config())
+    }
+
+    fn fake_rights(&self) -> Rights {
+        let writable: Vec<&str> = self
+            .fake_write
+            .split(',')
+            .filter(|piece| !piece.is_empty())
+            .collect();
+        let level = |id: &str| {
+            if writable.contains(&id) {
+                Level::Write
+            } else {
+                Level::Read
+            }
+        };
+        Rights {
+            mail: fake::accounts()
                 .into_iter()
                 .filter(|entry| entry.id != "FAKE-WORK")
-                .collect()
-        } else {
-            let config = self.load_config()?;
-            let mut entries = Vec::new();
-            if let Some(Json::Arr(list)) = config.get("allowed_accounts") {
-                for item in list {
-                    let Some(object) = item.as_object() else {
-                        continue;
-                    };
-                    let id = match object.get("id").and_then(Json::as_str) {
-                        Some(id) if !id.is_empty() => id.to_string(),
-                        _ => continue,
-                    };
-                    let name = match object.get("name").and_then(Json::as_str) {
-                        Some(name) if !name.is_empty() => name.to_string(),
-                        _ => id.clone(),
-                    };
-                    let kind = object
-                        .get("type")
-                        .and_then(Json::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    entries.push(MailAccount {
-                        id,
-                        name,
-                        kind,
-                        addresses: account::string_list(object.get("addresses")),
-                    });
-                }
-            }
-            entries
-        };
-        Ok(account::with_labels(entries))
+                .map(|entry| {
+                    let granted = level(&entry.id);
+                    (entry, granted)
+                })
+                .collect(),
+            calendars: calendar::demo_entries()
+                .into_iter()
+                .filter(|entry| entry.id != "FAKE-CAL-FIRMA")
+                .map(|entry| {
+                    let granted = level(&entry.id);
+                    (entry, granted)
+                })
+                .collect(),
+            sends_per_hour: DEFAULT_SENDS_PER_HOUR,
+            changes_per_hour: DEFAULT_CHANGES_PER_HOUR,
+        }
+    }
+
+    pub(crate) fn allowed_accounts(&self) -> ToolResult<Vec<Account>> {
+        Ok(account::with_labels(self.rights()?.mail_at(Level::Read)))
     }
 
     pub(crate) fn write_settings(&self) -> ToolResult<WriteSettings> {
-        let (ids, limit): (Vec<String>, i64) = if self.fake {
-            let ids = self
-                .fake_write
-                .split(',')
-                .filter(|piece| !piece.is_empty())
-                .map(str::to_string)
-                .collect();
-            (ids, DEFAULT_SENDS_PER_HOUR)
-        } else {
-            let config = self.load_config()?;
-            let section = match config.get("write") {
-                Some(Json::Obj(section)) => Some(section),
-                _ => None,
-            };
-            let ids = match section.and_then(|section| section.get("accounts")) {
-                Some(Json::Arr(items)) => items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(str::to_string))
-                    .collect(),
-                _ => Vec::new(),
-            };
-            let limit = text::to_int(
-                section.and_then(|section| section.get("max_per_hour")),
-                DEFAULT_SENDS_PER_HOUR,
-                1,
-                30,
-            )?;
-            (ids, limit)
-        };
-        let accounts = self
-            .allowed_accounts()?
+        let rights = self.rights()?;
+        let accounts = account::with_labels(rights.mail_at(Level::Read))
             .into_iter()
-            .filter(|account| ids.contains(&account.id))
+            .filter(|account| rights.mail_level(&account.id) == Some(Level::Write))
             .collect();
         Ok(WriteSettings {
             accounts,
-            max_per_hour: limit,
+            max_per_hour: rights.sends_per_hour,
+        })
+    }
+
+    pub(crate) fn allowed_calendars(&self) -> ToolResult<Vec<Calendar>> {
+        Ok(calendar::with_labels(
+            self.rights()?.calendars_at(Level::Read),
+        ))
+    }
+
+    pub(crate) fn calendar_write_settings(&self) -> ToolResult<CalendarWriteSettings> {
+        let rights = self.rights()?;
+        let calendars = calendar::with_labels(rights.calendars_at(Level::Read))
+            .into_iter()
+            .filter(|calendar| rights.calendar_level(&calendar.id) == Some(Level::Write))
+            .collect();
+        Ok(CalendarWriteSettings {
+            calendars,
+            max_per_hour: rights.changes_per_hour,
         })
     }
 
@@ -198,22 +212,11 @@ impl Settings {
         if accounts.is_empty() {
             return Err(ToolError::msg(NO_ACCOUNTS));
         }
-        let wanted = account_filter(account_name)?;
+        let wanted = name_filter(account_name, "account")?;
         if wanted.is_empty() {
             return Ok(accounts);
         }
-        let mut hits: Vec<Account> = accounts
-            .iter()
-            .filter(|account| account.is_named(&wanted))
-            .cloned()
-            .collect();
-        if hits.is_empty() {
-            hits = accounts
-                .iter()
-                .filter(|account| account.label.to_lowercase().contains(&wanted))
-                .cloned()
-                .collect();
-        }
+        let hits = by_name(&accounts, &wanted, |a| &a.label, Account::is_named);
         if hits.is_empty() {
             let labels: Vec<&str> = accounts.iter().map(|a| a.label.as_str()).collect();
             return Err(ToolError::msg(format!(
@@ -235,7 +238,7 @@ impl Settings {
         }
         let labels: Vec<&str> = settings.accounts.iter().map(|a| a.label.as_str()).collect();
         let names = labels.join(", ");
-        let wanted = account_filter(account_name)?;
+        let wanted = name_filter(account_name, "account")?;
         if wanted.is_empty() {
             return match settings.accounts.as_slice() {
                 [only] => Ok((only.clone(), settings.clone())),
@@ -257,13 +260,95 @@ impl Settings {
             ))),
         }
     }
+
+    pub(crate) fn resolve_calendars(
+        &self,
+        calendar_name: Option<&Json>,
+    ) -> ToolResult<Vec<Calendar>> {
+        let calendars = self.allowed_calendars()?;
+        if calendars.is_empty() {
+            return Err(ToolError::msg(NO_CALENDARS));
+        }
+        let wanted = name_filter(calendar_name, "calendar")?;
+        if wanted.is_empty() {
+            return Ok(calendars);
+        }
+        let hits = by_name(&calendars, &wanted, |c| &c.label, Calendar::is_named);
+        if hits.is_empty() {
+            let labels: Vec<&str> = calendars.iter().map(|c| c.label.as_str()).collect();
+            return Err(ToolError::msg(format!(
+                "Unknown calendar '{}'. Allowed calendars: {}",
+                clean(calendar_name, Some(60)),
+                labels.join(", ")
+            )));
+        }
+        Ok(hits)
+    }
+
+    pub(crate) fn resolve_writable_calendar(
+        &self,
+        calendar_name: Option<&Json>,
+    ) -> ToolResult<(Calendar, CalendarWriteSettings)> {
+        let settings = self.calendar_write_settings()?;
+        if settings.calendars.is_empty() {
+            return Err(ToolError::msg(CALENDAR_WRITE_OFF));
+        }
+        let labels: Vec<&str> = settings
+            .calendars
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        let names = labels.join(", ");
+        let wanted = name_filter(calendar_name, "calendar")?;
+        if wanted.is_empty() {
+            return match settings.calendars.as_slice() {
+                [only] => Ok((only.clone(), settings.clone())),
+                _ => Err(ToolError::msg(format!(
+                    "Parameter 'calendar' is required. Calendars that may be changed: {names}"
+                ))),
+            };
+        }
+        let hits: Vec<&Calendar> = settings
+            .calendars
+            .iter()
+            .filter(|calendar| calendar.is_named(&wanted))
+            .collect();
+        match hits.as_slice() {
+            [hit] => Ok(((*hit).clone(), settings.clone())),
+            _ => Err(ToolError::msg(format!(
+                "Unknown calendar '{}'. Calendars that may be changed: {names}",
+                clean(calendar_name, Some(60))
+            ))),
+        }
+    }
 }
 
-fn account_filter(value: Option<&Json>) -> ToolResult<String> {
+fn by_name<T: Clone>(
+    items: &[T],
+    wanted: &str,
+    label: impl Fn(&T) -> &str,
+    named: impl Fn(&T, &str) -> bool,
+) -> Vec<T> {
+    let exact: Vec<T> = items
+        .iter()
+        .filter(|item| named(item, wanted))
+        .cloned()
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    items
+        .iter()
+        .filter(|item| label(item).to_lowercase().contains(wanted))
+        .cloned()
+        .collect()
+}
+
+fn name_filter(value: Option<&Json>, parameter: &str) -> ToolResult<String> {
     match value {
-        Some(Json::Arr(_) | Json::Obj(_)) => {
-            Err(ToolError::msg("Parameter 'account' must be text."))
-        }
+        Some(Json::Arr(_) | Json::Obj(_)) => Err(ToolError::msg(format!(
+            "Parameter '{parameter}' must be text."
+        ))),
         other => Ok(text_of(other).trim().to_lowercase()),
     }
 }
@@ -353,15 +438,20 @@ mod tests {
         Ok(settings_at(&path))
     }
 
-    const TWO_ACCOUNTS: &str = r#"{"version": 2, "allowed_accounts": [
-        {"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"]},
-        {"id": "ACC-2", "name": "Outlook", "type": "exchange", "addresses": ["me@outlook.example", "alias@outlook.example"]}]}"#;
+    const TWO_ACCOUNTS: &str = r#"{"version": 3, "mail": {"accounts": [
+        {"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"},
+        {"id": "ACC-2", "name": "Outlook", "type": "exchange", "addresses": ["me@outlook.example", "alias@outlook.example"], "level": "read"}]}}"#;
+
+    const CALENDARS: &str = r#"{"version": 3, "calendar": {"calendars": [
+        {"id": "CAL-1", "name": "Privat", "level": "write"},
+        {"id": "CAL-2", "name": "Familie", "level": "read"}], "changes_per_hour": 4}}"#;
 
     #[test]
     fn paths_follow_the_environment() {
         let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x")]));
         assert_eq!(s.config_path, "/home/x/.avery/mail/config.json");
         assert_eq!(s.sendlog_path(), "/home/x/.avery/mail/sendlog.jsonl");
+        assert_eq!(s.changes_path(), "/home/x/.avery/mail/changes.jsonl");
         assert!(!s.fake);
         let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x"), ("AVERY_HOME", "/opt/av/")]));
         assert_eq!(s.config_path, "/opt/av/mail/config.json");
@@ -416,32 +506,28 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_config_is_an_empty_allowlist() -> TestResult {
+    fn a_missing_config_grants_nothing() -> TestResult {
         let dir = TempDir::new()?;
         let s = settings_at(&dir.path("none.json"));
+        assert_eq!(s.rights(), Ok(Rights::empty()));
         assert_eq!(s.allowed_accounts(), Ok(vec![]));
+        assert_eq!(s.allowed_calendars(), Ok(vec![]));
         assert_eq!(s.resolve(None), Err(ToolError::msg(NO_ACCOUNTS)));
+        assert_eq!(s.resolve_calendars(None), Err(ToolError::msg(NO_CALENDARS)));
         Ok(())
     }
 
     #[test]
     fn unreadable_and_malformed_configs_are_refused() -> TestResult {
         let dir = TempDir::new()?;
-        for text in ["", "{", "nope", "\u{feff}{}", "{\"allowed_accounts\": NaN}"] {
+        for text in ["", "{", "nope", "\u{feff}{}", "{\"mail\": NaN}"] {
             let s = write_config(&dir, text)?;
             assert!(
                 matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")),
                 "{text:?}"
             );
         }
-        for text in [
-            "[]",
-            "\"x\"",
-            "5",
-            "{\"version\": 2, \"allowed_accounts\": 5}",
-            "{\"version\": 2, \"allowed_accounts\": null}",
-            "{\"version\": 2, \"allowed_accounts\": {}}",
-        ] {
+        for text in ["[]", "\"x\"", "5"] {
             let s = write_config(&dir, text)?;
             assert!(
                 matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unexpected format")),
@@ -452,17 +538,20 @@ mod tests {
             "{}",
             "{\"allowed_accounts\": []}",
             "{\"version\": 1, \"allowed_accounts\": []}",
-            "{\"version\": 3, \"allowed_accounts\": []}",
-            "{\"version\": \"2\", \"allowed_accounts\": []}",
-            "{\"version\": 2.0, \"allowed_accounts\": []}",
+            "{\"version\": 2, \"allowed_accounts\": [], \"write\": {\"accounts\": []}}",
+            "{\"version\": 4}",
+            "{\"version\": \"3\"}",
+            "{\"version\": 3.0}",
             "{\"version\": null}",
         ] {
             let s = write_config(&dir, text)?;
             assert!(
-                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unsupported format version (expected 2)")),
+                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unsupported format version (expected 3)")),
                 "{text:?}"
             );
+            assert!(s.rights().is_err(), "{text:?}");
             assert!(s.allowed_accounts().is_err(), "{text:?}");
+            assert!(s.allowed_calendars().is_err(), "{text:?}");
             assert_eq!(fs::read_to_string(&s.config_path)?, text);
         }
         fs::write(dir.path("bytes.json"), [0xff, 0xfe, 0x7b, 0x7d])?;
@@ -474,10 +563,33 @@ mod tests {
     }
 
     #[test]
-    fn a_config_without_allowed_accounts_is_accepted_and_empty() -> TestResult {
+    fn a_config_with_unexpected_content_is_invalid_as_a_whole() -> TestResult {
         let dir = TempDir::new()?;
-        let s = write_config(&dir, "{\"version\": 2}")?;
+        for text in [
+            r#"{"version": 3, "allowed_accounts": []}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": 7, "level": "read"}]}}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "admin"}]}}"#,
+            r#"{"version": 3, "mail": {"sends_per_hour": 0}}"#,
+            r#"{"version": 3, "calendar": {"calendars": [{"id": "C"}]}}"#,
+        ] {
+            let s = write_config(&dir, text)?;
+            assert!(
+                matches!(s.rights(), Err(ToolError::Msg(m)) if m.starts_with("config.json is invalid (")),
+                "{text}"
+            );
+            assert!(s.allowed_accounts().is_err());
+            assert!(s.calendar_write_settings().is_err());
+            assert_eq!(fs::read_to_string(&s.config_path)?, text);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_config_without_sections_grants_nothing() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, "{\"version\": 3}")?;
         assert_eq!(s.allowed_accounts(), Ok(vec![]));
+        assert_eq!(s.allowed_calendars(), Ok(vec![]));
         Ok(())
     }
 
@@ -497,28 +609,16 @@ mod tests {
     }
 
     #[test]
-    fn odd_entries_are_skipped_or_normalized() -> TestResult {
-        let dir = TempDir::new()?;
-        let s = write_config(
-            &dir,
-            r#"{"version": 2, "allowed_accounts": [5, "x", {"name": "no id"}, {"id": ""}, {"id": 7},
-                {"id": "A", "name": null, "type": null, "addresses": "abc"}]}"#,
-        )?;
-        let accounts = s.allowed_accounts()?;
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].id, "A");
-        assert_eq!(accounts[0].name, "A");
-        assert_eq!(accounts[0].kind, "");
-        assert!(accounts[0].addresses.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn demo_mode_never_exposes_the_company_account() -> TestResult {
+    fn demo_mode_never_exposes_the_company_account_or_calendar() -> TestResult {
         let mut s = settings_at("/nonexistent/config.json");
         s.fake = true;
         let ids: Vec<String> = s.allowed_accounts()?.into_iter().map(|a| a.id).collect();
         assert_eq!(ids, ["FAKE-GMAIL", "FAKE-OUTLOOK"]);
+        let calendars: Vec<String> = s.allowed_calendars()?.into_iter().map(|c| c.id).collect();
+        assert_eq!(
+            calendars,
+            ["FAKE-CAL-PRIVAT", "FAKE-CAL-FAMILIE", "FAKE-CAL-FEIERTAGE"]
+        );
         Ok(())
     }
 
@@ -562,64 +662,71 @@ mod tests {
     }
 
     #[test]
-    fn writing_is_off_unless_enabled_for_a_readable_account() -> TestResult {
+    fn writing_needs_the_write_level_for_the_account() -> TestResult {
         let dir = TempDir::new()?;
         let off = write_config(&dir, TWO_ACCOUNTS)?;
         assert_eq!(off.write_settings()?.accounts, vec![]);
         assert_eq!(off.resolve_writable(None), Err(ToolError::msg(WRITE_OFF)));
-
-        for text in [
-            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": ["ACC-OTHER"]}}"#,
-            r#"{"version": 2, "allowed_accounts": [], "write": {"accounts": ["ACC-1"]}}"#,
-            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": "kaputt"}"#,
-            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": "ACC-1"}}"#,
-            r#"{"version": 2, "allowed_accounts": [{"id": "ACC-1", "name": "A"}], "write": {"accounts": [1, null]}}"#,
-        ] {
-            let s = write_config(&dir, text)?;
-            assert_eq!(s.write_settings()?.accounts, vec![], "{text}");
-        }
+        let writing = write_config(
+            &dir,
+            r#"{"version": 3, "mail": {"accounts": [
+                {"id": "ACC-1", "name": "A", "level": "read"},
+                {"id": "ACC-2", "name": "B", "level": "write"}]}}"#,
+        )?;
+        let settings = writing.write_settings()?;
+        let ids: Vec<&str> = settings.accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["ACC-2"]);
+        assert_eq!(writing.allowed_accounts()?.len(), 2);
+        let (only, _) = writing.resolve_writable(None)?;
+        assert_eq!(only.id, "ACC-2");
+        assert_eq!(
+            writing.resolve_writable(Some(&j("\"A\"")?)),
+            Err(ToolError::msg(
+                "Unknown account 'A'. Accounts that may write: B"
+            ))
+        );
         Ok(())
     }
 
     #[test]
     fn write_settings_carry_the_hourly_limit() -> TestResult {
         let dir = TempDir::new()?;
-        let s = write_config(
-            &dir,
-            r#"{"version": 2, "allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": 3}}"#,
-        )?;
+        let with = |limit: &str| {
+            format!(
+                r#"{{"version": 3, "mail": {{"accounts": [{{"id": "A", "name": "A", "level": "write"}}], {limit}}}}}"#
+            )
+        };
+        let s = write_config(&dir, &with(r#""sends_per_hour": 3"#))?;
         let settings = s.write_settings()?;
         assert_eq!(settings.accounts.len(), 1);
         assert_eq!(settings.max_per_hour, 3);
-        for (value, expected) in [("100", 30), ("0", 1), ("\"7\"", 7), ("null", 5)] {
-            let s = write_config(
-                &dir,
-                &format!(
-                    r#"{{"version": 2, "allowed_accounts": [{{"id": "A", "name": "A"}}], "write": {{"accounts": ["A"], "max_per_hour": {value}}}}}"#
-                ),
-            )?;
-            assert_eq!(s.write_settings()?.max_per_hour, expected, "{value}");
-        }
+        let s = write_config(&dir, &with(r#""x": 1"#))?;
+        assert!(s.write_settings().is_err());
         let s = write_config(
             &dir,
-            r#"{"version": 2, "allowed_accounts": [{"id": "A", "name": "A"}], "write": {"accounts": ["A"], "max_per_hour": true}}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "write"}]}}"#,
         )?;
-        assert_eq!(
-            s.write_settings(),
-            Err(ToolError::msg("Invalid number: true"))
-        );
+        assert_eq!(s.write_settings()?.max_per_hour, 5);
+        for bad in ["0", "31", "\"7\"", "null", "true"] {
+            let s = write_config(&dir, &with(&format!(r#""sends_per_hour": {bad}"#)))?;
+            assert!(s.write_settings().is_err(), "{bad}");
+        }
         Ok(())
     }
 
     #[test]
-    fn demo_write_accounts_come_from_the_environment_variable() -> TestResult {
+    fn demo_write_ids_come_from_the_environment_variable() -> TestResult {
         let mut s = settings_at("/nonexistent/config.json");
         s.fake = true;
-        s.fake_write = "FAKE-GMAIL,,FAKE-WORK,FAKE-OUTLOOK".into();
+        s.fake_write = "FAKE-GMAIL,,FAKE-WORK,FAKE-OUTLOOK,FAKE-CAL-PRIVAT,FAKE-CAL-FIRMA".into();
         let settings = s.write_settings()?;
         let ids: Vec<&str> = settings.accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["FAKE-GMAIL", "FAKE-OUTLOOK"]);
         assert_eq!(settings.max_per_hour, 5);
+        let calendars = s.calendar_write_settings()?;
+        let ids: Vec<&str> = calendars.calendars.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["FAKE-CAL-PRIVAT"]);
+        assert_eq!(calendars.max_per_hour, 10);
         Ok(())
     }
 
@@ -655,15 +762,107 @@ mod tests {
     }
 
     #[test]
+    fn calendars_are_read_with_levels_limit_and_labels() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, CALENDARS)?;
+        let all = s.allowed_calendars()?;
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].label, "Privat");
+        let writing = s.calendar_write_settings()?;
+        let ids: Vec<&str> = writing.calendars.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["CAL-1"]);
+        assert_eq!(writing.max_per_hour, 4);
+        let (only, _) = s.resolve_writable_calendar(None)?;
+        assert_eq!(only.id, "CAL-1");
+        assert_eq!(
+            s.resolve_writable_calendar(Some(&j("\"Familie\"")?)),
+            Err(ToolError::msg(
+                "Unknown calendar 'Familie'. Calendars that may be changed: Privat"
+            ))
+        );
+        let read_only = write_config(
+            &dir,
+            r#"{"version": 3, "calendar": {"calendars": [{"id": "C", "name": "N", "level": "read"}]}}"#,
+        )?;
+        assert_eq!(
+            read_only.resolve_writable_calendar(None),
+            Err(ToolError::msg(CALENDAR_WRITE_OFF))
+        );
+        assert_eq!(read_only.calendar_write_settings()?.max_per_hour, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_calendars_finds_by_label_or_part_and_names_the_allowed_ones() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, CALENDARS)?;
+        let ids = |value: &str| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            Ok(s.resolve_calendars(Some(&j(value)?))?
+                .into_iter()
+                .map(|c| c.id)
+                .collect())
+        };
+        assert_eq!(ids("\"privat\"")?, ["CAL-1"]);
+        assert_eq!(ids("\" FAMILIE \"")?, ["CAL-2"]);
+        assert_eq!(ids("\"fam\"")?, ["CAL-2"]);
+        assert_eq!(ids("\"\"")?, ["CAL-1", "CAL-2"]);
+        assert_eq!(s.resolve_calendars(None)?.len(), 2);
+        assert_eq!(
+            s.resolve_calendars(Some(&j("\"Firma\"")?)),
+            Err(ToolError::msg(
+                "Unknown calendar 'Firma'. Allowed calendars: Privat, Familie"
+            ))
+        );
+        assert_eq!(
+            s.resolve_calendars(Some(&j("[]")?)),
+            Err(ToolError::msg("Parameter 'calendar' must be text."))
+        );
+        let mut demo = settings_at("/nonexistent/config.json");
+        demo.fake = true;
+        demo.fake_write = "FAKE-CAL-PRIVAT,FAKE-CAL-FAMILIE".into();
+        assert_eq!(
+            demo.resolve_writable_calendar(None),
+            Err(ToolError::msg("Parameter 'calendar' is required. Calendars that may be changed: Demo Privat, Demo Familie"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rights_survive_a_save_and_load() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = settings_at(&dir.path("sub/dir/config.json"));
+        let mut rights = Rights::empty();
+        rights.sends_per_hour = 7;
+        rights.mail.push((
+            crate::account::MailAccount {
+                id: "A".into(),
+                name: "N".into(),
+                kind: "imap".into(),
+                addresses: vec!["a@example.org".into()],
+            },
+            Level::Write,
+        ));
+        rights.calendars.push((
+            crate::calendar::CalendarEntry {
+                id: "C".into(),
+                name: "K".into(),
+            },
+            Level::Read,
+        ));
+        s.save_rights(&rights)?;
+        assert_eq!(s.rights()?, rights);
+        Ok(())
+    }
+
+    #[test]
     fn save_config_writes_indented_json_with_private_permissions() -> TestResult {
         let dir = TempDir::new()?;
         let s = settings_at(&dir.path("sub/dir/config.json"));
         let mut config = Object::new();
-        config.insert("version", 2i64);
-        config.insert("allowed_accounts", Json::Arr(vec![]));
+        config.insert("version", 3i64);
         s.save_config(&config)?;
         let text = fs::read_to_string(dir.path("sub/dir/config.json"))?;
-        assert_eq!(text, "{\n  \"version\": 2,\n  \"allowed_accounts\": []\n}");
+        assert_eq!(text, "{\n  \"version\": 3\n}");
         let file_mode = fs::metadata(dir.path("sub/dir/config.json"))?
             .permissions()
             .mode()
@@ -701,10 +900,10 @@ mod tests {
         fs::write(dir.path("victim"), "keep")?;
         std::os::unix::fs::symlink(dir.path("victim"), format!("{}.tmp", s.config_path))?;
         let mut config = Object::new();
-        config.insert("version", 2i64);
+        config.insert("version", 3i64);
         s.save_config(&config)?;
         assert_eq!(fs::read_to_string(dir.path("victim"))?, "keep");
-        assert!(fs::read_to_string(&s.config_path)?.contains("\"version\": 2"));
+        assert!(fs::read_to_string(&s.config_path)?.contains("\"version\": 3"));
         Ok(())
     }
 }

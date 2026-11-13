@@ -385,8 +385,8 @@ run_J() {
     skip "J7 YAML der Konfiguration ist gueltig" "ruby fehlt"
   fi
   perm="$(cat "$f_perm" 2>/dev/null)"
-  has "$perm" $'ask_before:\n  - mail__send_message' && has "$perm" "- mail__create_draft" && has "$perm" "never_allow: []"
-  check "J8 Senden steht auf 'nachfragen', Entwurf erlaubt" $? "$perm"
+  has "$perm" $'ask_before:\n  - mail__send_message\n  - mail__create_event\n  - mail__update_event\n  - mail__delete_event' && has "$perm" "- mail__create_draft" && has "$perm" "- mail__list_events" && has "$perm" "never_allow: []"
+  check "J8 Senden und Kalenderaenderungen stehen auf 'nachfragen', Entwurf erlaubt" $? "$perm"
   [ "$(stat -f '%Lp' "$home/.avery" 2>/dev/null)" = "700" ]
   check "J9 Profil-Ordner nur fuer dich lesbar (700)" $? "$(stat -f '%Lp' "$home/.avery" 2>/dev/null)"
   tmpl="$(cat "$SHARE/goose/config.yaml.tmpl")"
@@ -443,7 +443,7 @@ run_J() {
   check "J15c 'avery mail' ohne gebautes avery-mail: klare Meldung statt Absturz" $? "$RC $ERR"
 
   avery mail status
-  has "$OUT" "Konfiguration: $AHOME/.avery/mail/config.json (fehlt)" && has "$OUT" "kein Konto"
+  has "$OUT" "Konfiguration: $AHOME/.avery/mail/config.json (fehlt)" && has "$OUT" "Mail: keine" && has "$OUT" "Kalender: keine"
   check "J16 AVERY_HOME bestimmt den Konfigurationspfad des Mail-Servers" $? "$OUT"
   avery AVERY_HOME="$weird" mail status
   has "$OUT" "Konfiguration: $weird/mail/config.json (fehlt)"
@@ -482,7 +482,7 @@ run_J() {
   ends "$(trim "$OUT")" "/Contents/Resources/bin/goose session"
   check "J23 cli ruft die Goose-CLI der App auf" $? "$OUT"
   avery doctor
-  { [ "$RC" = 0 ] || [ "$RC" = 1 ]; } && has "$OUT" "Avery $CARGO_VERSION" && has "$OUT" "Lesen freigegeben fuer: kein Konto" \
+  { [ "$RC" = 0 ] || [ "$RC" = 1 ]; } && has "$OUT" "Avery $CARGO_VERSION" && has "$OUT" "Mail: keine" \
     && has "$OUT" "ok      avery-mail ($MAIL_BIN)" && { has "$OUT" "Alles bereit." || has "$OUT" "Punkt(e) offen."; }
   check "J24 doctor laeuft durch und zeigt Version, Profil und Konten" $? "$OUT$ERR"
 

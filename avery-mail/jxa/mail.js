@@ -8,11 +8,6 @@ function run(argv) {
 }
 
 function mail() { return Application('Mail'); }
-function pad(n) { return (n < 10 ? '0' : '') + n; }
-function fmt(d) {
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
-    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-}
 
 var INBOX_NAMES = ['inbox', 'posteingang', 'boite de reception', 'bo\u00eete de r\u00e9ception',
                    'posta in arrivo', 'bandeja de entrada', 'postvak in'];
@@ -167,14 +162,6 @@ function readMessage(acc, req) {
   return out;
 }
 
-function sleepSeconds(n) {
-  try {
-    var sa = Application.currentApplication();
-    sa.includeStandardAdditions = true;
-    sa.delay(n);
-  } catch (e) {}
-}
-
 function addrOf(text) {
   var s = String(text || ''), m = s.match(/<([^<>]+)>/);
   return (m ? m[1] : s).trim().toLowerCase();
@@ -191,28 +178,6 @@ function rcptList(coll) {
 
 function discard(msg) {
   try { mail().delete(msg); } catch (e) {}
-}
-
-function hidden(cp) {
-  for (var k = 0; k < INVISIBLE_RANGES.length; k++) {
-    if (cp >= INVISIBLE_RANGES[k][0] && cp <= INVISIBLE_RANGES[k][1]) { return true; }
-  }
-  return false;
-}
-
-function shown(value) {
-  var s = String(value === null || value === undefined ? '' : value), out = '', i, cp;
-  for (i = 0; i < s.length; i++) {
-    cp = s.codePointAt(i);
-    if (cp > 0xffff) { i++; }
-    if (!hidden(cp)) { out += String.fromCodePoint(cp); }
-  }
-  return out;
-}
-
-function flat(value, max) {
-  var chars = Array.from(shown(String(value === null || value === undefined ? '' : value).replace(/[\s\u0085]+/g, ' ')).trim());
-  return chars.length > max ? chars.slice(0, max - 1).join('') + '\u2026' : chars.join('');
 }
 
 var ADDRESS = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]{1,64}@[A-Za-z0-9.-]{3,189}$/;
@@ -252,9 +217,6 @@ function flatList(list) {
 }
 
 function askApproval(p, seconds) {
-  var app = Application.currentApplication();
-  app.includeStandardAdditions = true;
-  try { app.activate(); } catch (e) {}
   var label = p.sendLabel || 'Senden';
   var lines = [p.note || 'Pr\u00fcfe Empf\u00e4nger und Text. Nur senden, wenn du das gerade selbst veranlasst hast.', ''];
   lines.push('Von:        ' + flat(p.from, 200));
@@ -263,23 +225,8 @@ function askApproval(p, seconds) {
   lines.push('Betreff:    ' + flat(p.subject, 300));
   if (p.reply) { lines.push('Antwort auf: ' + flat(p.reply.subject, 150) + ' (von ' + flat(p.reply.from, 100) + ')'); }
   lines.push('', '--------------------------------', p.body, '--------------------------------');
-  var answer;
-  try {
-    answer = app.displayDialog(lines.join('\n'), {
-      withTitle: p.title || 'Goose m\u00f6chte eine E-Mail senden',
-      buttons: ['Abbrechen', label],
-      defaultButton: 'Abbrechen',
-      cancelButton: 'Abbrechen',
-      withIcon: 'caution',
-      givingUpAfter: seconds
-    });
-  } catch (e) {
-    var text = String((e && e.message) || e);
-    if (text.indexOf('-128') >= 0) { return 'declined'; }
-    throw new Error('approval_dialog_failed: ' + text);
-  }
-  if (answer.gaveUp) { return 'timeout'; }
-  return answer.buttonReturned === label ? 'send' : 'declined';
+  var decision = showDialog(p.title || 'Goose m\u00f6chte eine E-Mail senden', lines, label, seconds);
+  return decision === 'approved' ? 'send' : decision;
 }
 
 function composeMessage(acc, req) {

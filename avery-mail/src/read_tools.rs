@@ -301,13 +301,14 @@ pub(crate) fn read_message(ctx: &Context, args: &Object) -> ToolResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake::{FakeBackend, FakeOptions};
+    use crate::calendar::FakeCalendar;
+    use crate::fake::FakeOptions;
     use crate::testutil::{args, settings_at, TestResult};
 
     fn demo() -> Context {
         let mut settings = settings_at("/nonexistent/avery-test/config.json");
         settings.fake = true;
-        Context::new(settings, Box::new(FakeBackend::new(FakeOptions::default())))
+        Context::demo(settings, FakeOptions::default())
     }
 
     fn call(f: fn(&Context, &Object) -> ToolResult<String>, text: &str) -> Result<String, String> {
@@ -502,7 +503,11 @@ mod tests {
     fn read_message_truncates_and_says_so() -> TestResult {
         let mut settings = settings_at("/nonexistent/avery-test/config.json");
         settings.fake = true;
-        let ctx = Context::new(settings, Box::new(LongBody));
+        let ctx = Context::new(
+            settings,
+            Box::new(LongBody),
+            Box::new(FakeCalendar::new(FakeOptions::default())),
+        );
         let text = read_message(
             &ctx,
             &args(r#"{"id": 1, "account": "Demo Gmail", "max_chars": 500}"#)?,

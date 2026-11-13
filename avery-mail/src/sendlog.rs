@@ -1,13 +1,10 @@
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::{ComposeRequest, Mode, Preview};
-use crate::config::{dirname, make_dirs, Settings};
+use crate::config::Settings;
 use crate::error::{ToolError, ToolResult};
-use crate::json::{self, Json, Object};
+use crate::journal::{Journal, Messages, View, COOL_DOWN, HOUR, TEN_MINUTES};
+use crate::json::{Json, Object};
 use crate::sha256::sha256_hex;
 use crate::text::{char_len, one_line_str};
 use crate::texts::{
@@ -16,11 +13,13 @@ use crate::texts::{
 };
 
 pub(crate) const LOG_VERSION: i64 = 1;
-const TAIL_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_LOGGED_RECIPIENTS: usize = 10;
-const HOUR: i64 = 3600;
-const TEN_MINUTES: i64 = 600;
-const COOL_DOWN: i64 = 20;
+
+static MESSAGES: Messages = Messages {
+    blocked: LOG_BLOCKED,
+    unreadable: LOG_UNREADABLE,
+    too_large: LOG_TOO_LARGE,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -213,140 +212,26 @@ impl LogEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub(crate) struct LogView {
-    pub(crate) entries: Vec<LogEntry>,
-    pub(crate) unreadable: usize,
-}
+pub(crate) type LogView = View<LogEntry>;
 
-pub(crate) fn now_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or(0)
-}
-
-pub(crate) fn attempt_id() -> ToolResult<String> {
-    let mut bytes = [0u8; 6];
-    File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut bytes))
-        .map_err(|_| ToolError::internal("random"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-fn tail(path: &str) -> io::Result<(String, bool)> {
-    let mut file = File::open(path)?;
-    let length = file.metadata()?.len();
-    let start = length.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    if start == 0 {
-        return Ok((text, false));
-    }
-    Ok((
-        match text.split_once('\n') {
-            Some((_, rest)) => rest.to_string(),
-            None => String::new(),
-        },
-        true,
-    ))
-}
-
-fn parse_lines(text: &str, limit: usize) -> LogView {
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let first = lines.len().saturating_sub(limit);
-    let mut view = LogView::default();
-    for line in lines.iter().skip(first) {
-        match json::parse(line)
-            .ok()
-            .and_then(|value| LogEntry::from_json(&value))
-        {
-            Some(entry) => view.entries.push(entry),
-            None => view.unreadable += 1,
-        }
-    }
-    view
+fn journal(settings: &Settings) -> Journal {
+    Journal::new(settings.sendlog_path(), &MESSAGES)
 }
 
 pub(crate) fn read_entries(settings: &Settings, limit: usize) -> ToolResult<LogView> {
-    match tail(&settings.sendlog_path()) {
-        Ok((text, _)) => Ok(parse_lines(&text, limit)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(LogView::default()),
-        Err(_) => Err(ToolError::msg(LOG_BLOCKED)),
-    }
+    journal(settings).recent(limit, LogEntry::from_json)
 }
 
 pub(crate) fn read_window(settings: &Settings, now: i64) -> ToolResult<LogView> {
-    let (text, cut) = match tail(&settings.sendlog_path()) {
-        Ok(found) => found,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(LogView::default()),
-        Err(_) => return Err(ToolError::msg(LOG_BLOCKED)),
-    };
-    let view = parse_lines(&text, usize::MAX);
-    if view.unreadable > 0 {
-        return Err(ToolError::msg(LOG_UNREADABLE));
-    }
-    if cut {
-        let covers_the_hour = view
-            .entries
-            .first()
-            .is_some_and(|oldest| now.saturating_sub(oldest.ts) >= HOUR);
-        if !covers_the_hour {
-            return Err(ToolError::msg(LOG_TOO_LARGE));
-        }
-    }
-    Ok(view)
+    journal(settings).window(now, LogEntry::from_json, |entry| entry.ts)
 }
 
 pub(crate) fn ensure_writable(settings: &Settings) -> ToolResult<()> {
-    let path = settings.sendlog_path();
-    make_dirs(&dirname(&path), 0o700).map_err(|_| ToolError::msg(LOG_BLOCKED))?;
-    OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(&path)
-        .map(drop)
-        .map_err(|_| ToolError::msg(LOG_BLOCKED))
+    journal(settings).ensure_writable()
 }
 
 pub(crate) fn append(settings: &Settings, entry: &LogEntry, strict: bool) -> ToolResult<()> {
-    let mut line = json::dumps(&entry.to_json(), false);
-    line.push('\n');
-    let written = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(settings.sendlog_path())
-        .and_then(|mut file| {
-            let mut data = Vec::new();
-            if file.metadata()?.len() > 0 {
-                let mut last = [0u8; 1];
-                file.seek(SeekFrom::End(-1))?;
-                file.read_exact(&mut last)?;
-                if last != *b"\n" {
-                    data.push(b'\n');
-                }
-            }
-            data.extend_from_slice(line.as_bytes());
-            file.write_all(&data)?;
-            file.sync_all()
-        });
-    match written {
-        Ok(()) => Ok(()),
-        Err(_) if strict => Err(ToolError::msg(LOG_BLOCKED)),
-        Err(_) => {
-            eprintln!("send log not writable");
-            Ok(())
-        }
-    }
+    journal(settings).append(&entry.to_json(), strict)
 }
 
 pub(crate) fn attempts(entries: &[LogEntry]) -> Vec<&LogEntry> {
@@ -423,6 +308,7 @@ pub(crate) fn check_send_limits(
 mod tests {
     use super::*;
     use crate::backend::ReplySpec;
+    use crate::json;
     use crate::testutil::{j, log_entry as entry, settings_at, TempDir, TestResult};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -529,26 +415,6 @@ mod tests {
     }
 
     #[test]
-    fn append_writes_private_lines_and_read_returns_them() -> TestResult {
-        let dir = TempDir::new()?;
-        let settings = settings_at(&dir.path("mail/config.json"));
-        make_dirs(&dir.path("mail"), 0o700)?;
-        let first = entry(10, Outcome::Pending, Some("a"));
-        let second = entry(11, Outcome::Sent, Some("a"));
-        append(&settings, &first, true)?;
-        append(&settings, &second, true)?;
-        let mode = fs::metadata(settings.sendlog_path())?.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let text = fs::read_to_string(settings.sendlog_path())?;
-        assert_eq!(text.lines().count(), 2);
-        assert!(text.ends_with('\n'));
-        let view = read_entries(&settings, 300)?;
-        assert_eq!(view.entries, [first, second]);
-        assert_eq!(view.unreadable, 0);
-        Ok(())
-    }
-
-    #[test]
     fn ensure_writable_creates_the_private_folder_and_blocks_on_failure() -> TestResult {
         let dir = TempDir::new()?;
         let settings = settings_at(&dir.path("fresh/mail/config.json"));
@@ -577,75 +443,6 @@ mod tests {
         let mut line = json::dumps(&value, false);
         line.push('\n');
         line
-    }
-
-    #[test]
-    fn reading_is_bounded_and_counts_unreadable_lines() -> TestResult {
-        let dir = TempDir::new()?;
-        let settings = settings_at(&dir.path("config.json"));
-        let mut text = String::from("not json\n{\"v\": 9}\n");
-        for ts in 0..6000 {
-            text.push_str(&padded(ts, Outcome::Sent));
-        }
-        fs::write(settings.sendlog_path(), &text)?;
-        assert!(u64::try_from(text.len())? > TAIL_BYTES * 2);
-        let view = read_entries(&settings, 300)?;
-        assert_eq!(view.entries.len(), 300);
-        assert_eq!(view.unreadable, 0);
-        assert_eq!(view.entries.last().map(|e| e.ts), Some(5999));
-        let all = read_entries(&settings, 100_000)?;
-        assert!(all.entries.len() < 6000);
-        assert!(all.entries.first().is_some_and(|e| e.ts > 0));
-        let small = TempDir::new()?;
-        let settings = settings_at(&small.path("config.json"));
-        fs::write(settings.sendlog_path(), "garbage\n\n{\"v\": 9}\n")?;
-        let view = read_entries(&settings, 300)?;
-        assert_eq!((view.entries.len(), view.unreadable), (0, 2));
-        assert_eq!(
-            read_entries(&settings_at(&small.path("nothing/c.json")), 5),
-            Ok(LogView::default())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn the_window_for_the_limits_must_reach_back_an_hour_or_sending_is_blocked() -> TestResult {
-        let now = 1_700_000_000;
-        let recent_only = TempDir::new()?;
-        let settings = settings_at(&recent_only.path("config.json"));
-        let mut text = String::new();
-        for index in 0..4000 {
-            text.push_str(&padded(now - 3000 + index % 100, Outcome::Drafted));
-        }
-        fs::write(settings.sendlog_path(), &text)?;
-        assert_eq!(
-            read_window(&settings, now),
-            Err(ToolError::msg(LOG_TOO_LARGE))
-        );
-
-        let reaching_back = TempDir::new()?;
-        let settings = settings_at(&reaching_back.path("config.json"));
-        let mut text = String::new();
-        for index in 0..3000 {
-            text.push_str(&padded(now - 9000 - index, Outcome::Sent));
-        }
-        for index in 0..100 {
-            text.push_str(&padded(now - 100 + index, Outcome::Sent));
-        }
-        fs::write(settings.sendlog_path(), &text)?;
-        let view = read_window(&settings, now)?;
-        assert!(view.entries.len() > 100);
-        assert!(view.entries.last().is_some_and(|last| last.ts >= now - 100));
-
-        let small = TempDir::new()?;
-        let settings = settings_at(&small.path("config.json"));
-        fs::write(settings.sendlog_path(), padded(now - 5, Outcome::Sent))?;
-        assert_eq!(read_window(&settings, now)?.entries.len(), 1);
-        assert_eq!(
-            read_window(&settings_at(&small.path("none/c.json")), now),
-            Ok(LogView::default())
-        );
-        Ok(())
     }
 
     #[test]
@@ -692,21 +489,6 @@ mod tests {
             Err(ToolError::msg(LOG_BLOCKED)),
             "the append needs to read the last byte, so a log that cannot be read blocks too"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn a_torn_last_line_does_not_swallow_the_next_entry() -> TestResult {
-        let dir = TempDir::new()?;
-        let settings = settings_at(&dir.path("config.json"));
-        fs::write(settings.sendlog_path(), "{\"v\": 1, \"ts\": 17000")?;
-        append(&settings, &entry(18_000, Outcome::Pending, Some("a")), true)?;
-        let view = read_entries(&settings, 10)?;
-        assert_eq!(view.unreadable, 1);
-        assert_eq!(view.entries.len(), 1);
-        assert_eq!(view.entries[0].ts, 18_000);
-        append(&settings, &entry(18_001, Outcome::Sent, Some("a")), true)?;
-        assert_eq!(read_entries(&settings, 10)?.entries.len(), 2);
         Ok(())
     }
 
@@ -886,16 +668,6 @@ mod tests {
         let now = 1_700_000_000;
         let future = many(5, -500, Outcome::Sent, now);
         assert!(check_send_limits(&future, now, 5).is_err());
-    }
-
-    #[test]
-    fn attempt_ids_are_twelve_hex_characters_and_differ() -> TestResult {
-        let first = attempt_id()?;
-        let second = attempt_id()?;
-        assert_eq!(first.len(), 12);
-        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(first, second);
-        Ok(())
     }
 
     #[test]

@@ -51,6 +51,7 @@ impl Object {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn remove(&mut self, key: &str) -> Option<Json> {
         let position = self.entries.iter().position(|(name, _)| name == key)?;
         Some(self.entries.remove(position).1)

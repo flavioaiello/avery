@@ -7,13 +7,45 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub(crate) const OSASCRIPT: &str = "/usr/bin/osascript";
+pub(crate) const COMMON_SCRIPT: &str = include_str!("../jxa/common.js");
 pub(crate) const MAIL_SCRIPT: &str = include_str!("../jxa/mail.js");
+pub(crate) const CALENDAR_SCRIPT: &str = include_str!("../jxa/calendar.js");
 
-pub(crate) fn mail_script() -> String {
+fn assemble(body: &str) -> String {
     format!(
-        "var INVISIBLE_RANGES = {};\n{MAIL_SCRIPT}",
+        "var INVISIBLE_RANGES = {};\n{COMMON_SCRIPT}\n{body}",
         crate::text::hidden_ranges_js()
     )
+}
+
+pub(crate) fn mail_script() -> String {
+    assemble(MAIL_SCRIPT)
+}
+
+pub(crate) fn calendar_script() -> String {
+    assemble(CALENDAR_SCRIPT)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum App {
+    Mail,
+    Calendar,
+}
+
+impl App {
+    fn name(self) -> &'static str {
+        match self {
+            App::Mail => "Mail",
+            App::Calendar => "Calendar",
+        }
+    }
+
+    fn script(self) -> String {
+        match self {
+            App::Mail => mail_script(),
+            App::Calendar => calendar_script(),
+        }
+    }
 }
 pub(crate) const STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) const STDERR_LIMIT: usize = 64 * 1024;
@@ -119,31 +151,35 @@ pub(crate) fn run_command(program: &str, args: &[&str], timeout: Duration) -> Fi
 }
 
 pub(crate) trait Host {
-    fn ensure_mail_running(&self);
-    fn run(&self, payload: &str, timeout: Duration) -> Finished;
+    fn ensure_running(&self, app: App);
+    fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished;
 }
 
 pub(crate) struct OsascriptHost;
 
-fn mail_running() -> bool {
+fn running(app: App) -> bool {
     matches!(
-        run_command("/usr/bin/pgrep", &["-x", "Mail"], Duration::from_secs(5)),
+        run_command(
+            "/usr/bin/pgrep",
+            &["-x", app.name()],
+            Duration::from_secs(5)
+        ),
         Finished::Done { code: Some(0), .. }
     )
 }
 
 impl Host for OsascriptHost {
-    fn ensure_mail_running(&self) {
-        if mail_running() {
+    fn ensure_running(&self, app: App) {
+        if running(app) {
             return;
         }
         let _ = run_command(
             "/usr/bin/open",
-            &["-g", "-j", "-a", "Mail"],
+            &["-g", "-j", "-a", app.name()],
             Duration::from_secs(20),
         );
         for _ in 0..40 {
-            if mail_running() {
+            if running(app) {
                 break;
             }
             thread::sleep(Duration::from_millis(500));
@@ -151,8 +187,8 @@ impl Host for OsascriptHost {
         thread::sleep(Duration::from_secs(2));
     }
 
-    fn run(&self, payload: &str, timeout: Duration) -> Finished {
-        let script = mail_script();
+    fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished {
+        let script = app.script();
         run_command(
             OSASCRIPT,
             &["-l", "JavaScript", "-e", script.as_str(), payload],
