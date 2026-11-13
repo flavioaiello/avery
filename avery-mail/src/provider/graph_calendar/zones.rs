@@ -60,6 +60,10 @@ const ZONES: &[(&str, &str)] = &[
     ("America/Araguaina", "Tocantins Standard Time"),
     ("America/Argentina/Buenos_Aires", "Argentina Standard Time"),
     ("America/Argentina/Catamarca", "Argentina Standard Time"),
+    (
+        "America/Argentina/ComodRivadavia",
+        "Argentina Standard Time",
+    ),
     ("America/Argentina/Cordoba", "Argentina Standard Time"),
     ("America/Argentina/Jujuy", "Argentina Standard Time"),
     ("America/Argentina/La_Rioja", "Argentina Standard Time"),
@@ -628,6 +632,10 @@ mod tests {
     fn well_known_zones_map_to_their_windows_names() {
         for (iana, windows) in [
             ("Europe/Zurich", "W. Europe Standard Time"),
+            (
+                "America/Argentina/ComodRivadavia",
+                "Argentina Standard Time",
+            ),
             ("EST5EDT", "Eastern Standard Time"),
             ("CST6CDT", "Central Standard Time"),
             ("MST7MDT", "Mountain Standard Time"),
