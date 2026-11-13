@@ -76,6 +76,14 @@ fn sanitized(account: MailAccount) -> MailAccount {
     }
 }
 
+fn editable(ctx: &Context, console: &mut Console) -> bool {
+    if ctx.settings.fake {
+        console.say("Im Demo-Modus (MAIL_MCP_FAKE=1) nicht moeglich: Verbinden, Trennen, Einrichten und Widerrufen aendern die echte Konfiguration.");
+        return false;
+    }
+    true
+}
+
 fn update_failed(ctx: &Context, console: &mut Console, error: &UpdateError) -> u8 {
     match error {
         UpdateError::Unreadable(error) => return failed(console, error),
@@ -455,6 +463,9 @@ fn setup_apple_entries(console: &mut Console, apple: &mut Apple) -> Result<(), u
 }
 
 fn setup_accounts(ctx: &Context, console: &mut Console) -> u8 {
+    if !editable(ctx, console) {
+        return 1;
+    }
     let mut rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
@@ -507,6 +518,9 @@ fn unique<T>(items: Vec<T>, id: impl Fn(&T) -> &str) -> Vec<T> {
 }
 
 fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
+    if !editable(ctx, console) {
+        return 1;
+    }
     let mut rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
@@ -658,6 +672,9 @@ fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
 }
 
 fn cmd_revoke(ctx: &Context, console: &mut Console) -> u8 {
+    if !editable(ctx, console) {
+        return 1;
+    }
     let revoked = ctx.settings.update_rights(|rights| {
         let had_apple = rights.apple.enabled();
         rights.revoke();
@@ -689,9 +706,25 @@ fn prompt_level(console: &mut Console) -> Option<bool> {
     }
 }
 
+fn abandon(ctx: &Context, console: &mut Console, provider: Provider, address: &str) {
+    match ctx.linker.unlink(provider, address) {
+        Ok(()) => {
+            console.say("Die eben im Schluesselbund gespeicherte Anmeldung wurde wieder entfernt.")
+        }
+        Err(error) => {
+            console.say(&format!(
+                "Die eben im Schluesselbund gespeicherte Anmeldung blieb: {error}"
+            ));
+            console.say(&format!(
+                "Entfernen mit: avery mail unlink {}:{address}",
+                provider.as_str()
+            ));
+        }
+    }
+}
+
 fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 {
-    if ctx.settings.fake {
-        console.say("Im Demo-Modus (MAIL_MCP_FAKE=1) nicht moeglich.");
+    if !editable(ctx, console) {
         return 1;
     }
     let Some(provider) = provider.and_then(Provider::parse_remote) else {
@@ -755,6 +788,7 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     };
     let Some(mut fresh) = RemoteAccount::new(provider, &linked.address) else {
         console.say("Fehler: Die Adresse des Kontos ist nicht verwendbar.");
+        abandon(ctx, console, provider, &linked.address);
         return 1;
     };
     fresh.mail = Some(if write && linked.write_mail {
@@ -773,7 +807,11 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     });
     let (relinked, level) = match saved {
         Ok(done) => done,
-        Err(error) => return update_failed(ctx, console, &error),
+        Err(error) => {
+            let code = update_failed(ctx, console, &error);
+            abandon(ctx, console, provider, &linked.address);
+            return code;
+        }
     };
     console.say(&format!(
         "\n{}: {} ({}). Mail: {}.",
@@ -794,33 +832,19 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     0
 }
 
-fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
-    let rights = match ctx.settings.stored_rights() {
-        Ok(rights) => rights,
-        Err(error) => return failed(console, &error),
-    };
-    let wanted = wanted
-        .map(|text| text.trim().to_lowercase())
-        .unwrap_or_default();
-    let target = match wanted.split_once(':') {
-        Some((name, address)) => Provider::parse_remote(name).map(|named| (Some(named), address)),
-        None => Some((None, wanted.as_str())),
-    };
-    let hits: Vec<usize> = rights
+fn single_account(
+    console: &mut Console,
+    rights: &Rights,
+    wanted: &str,
+) -> Result<(Provider, String), u8> {
+    let hits: Vec<(Provider, String)> = rights
         .accounts
         .iter()
-        .enumerate()
-        .filter(|(_, account)| {
-            target.is_some_and(|(named, address)| {
-                !address.is_empty()
-                    && account.address() == address
-                    && named.is_none_or(|provider| account.provider() == provider)
-            })
-        })
-        .map(|(index, _)| index)
+        .filter(|account| !wanted.is_empty() && account.address() == wanted)
+        .map(|account| (account.provider(), account.address().to_string()))
         .collect();
-    let index = match hits.as_slice() {
-        [only] => *only,
+    match hits.as_slice() {
+        [only] => Ok(only.clone()),
         [] => {
             if rights.accounts.is_empty() {
                 console.say("Es ist kein Konto direkt verbunden.");
@@ -834,45 +858,101 @@ fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 
                     ));
                 }
             }
-            return 1;
+            console.say("Eine Anmeldung ohne Eintrag in der Konfiguration (etwa nach einem abgebrochenen Verbinden) entfernt: avery mail unlink google:<adresse> | microsoft:<adresse>");
+            Err(1)
         }
         _ => {
             console.say("Die Adresse ist mehrfach verbunden. Benutzung: avery mail unlink google:<adresse> | microsoft:<adresse>");
-            return 1;
+            Err(1)
         }
-    };
-    let Some(account) = rights.accounts.get(index) else {
+    }
+}
+
+fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
+    if !editable(ctx, console) {
         return 1;
+    }
+    let wanted = wanted
+        .map(|text| text.trim().to_lowercase())
+        .unwrap_or_default();
+    let named = wanted.split_once(':').and_then(|(name, address)| {
+        let provider = Provider::parse_remote(name)?;
+        RemoteAccount::new(provider, address).map(|_| (provider, address.to_string()))
+    });
+    let snapshot = ctx.settings.stored_rights();
+    let (provider, address) = match (named, &snapshot) {
+        (Some(target), _) => target,
+        (None, Err(error)) => return failed(console, error),
+        (None, Ok(rights)) => match single_account(console, rights, &wanted) {
+            Ok(target) => target,
+            Err(code) => return code,
+        },
     };
-    let (provider, address) = (account.provider(), account.address().to_string());
-    if !console.confirm(&format!(
-        "{address} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht. [j/N] "
-    )) {
+    let configured = snapshot
+        .as_ref()
+        .is_ok_and(|rights| rights.account(provider, &address).is_some());
+    let held = ctx.linker.stored(provider, &address);
+    if !configured && !held {
+        if let Err(error) = &snapshot {
+            return failed(console, error);
+        }
+        console.say(&format!(
+            "{}:{address} ist nicht verbunden: weder ein Eintrag in der Konfiguration noch eine gespeicherte Anmeldung. Nichts geaendert.",
+            provider.as_str()
+        ));
+        return 1;
+    }
+    let question = if configured {
+        format!(
+            "{address} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht. [j/N] "
+        )
+    } else {
+        format!(
+            "{}:{address} steht nicht in der Konfiguration, aber seine Anmeldung liegt noch im Schluesselbund. Anmeldung loeschen? [j/N] ",
+            provider.as_str()
+        )
+    };
+    if !console.confirm(&question) {
         console.say("Abgebrochen.");
         return 1;
     }
-    let removed = ctx.settings.update_rights(|rights| {
-        rights.remove_account(provider, &address);
-        Ok(())
-    });
-    if let Err(error) = removed {
-        return update_failed(ctx, console, &error);
+    if let Err(error) = ctx.linker.unlink(provider, &address) {
+        console.say(&format!(
+            "Fehler: {error} Nichts geaendert, die Konfiguration blieb wie sie war."
+        ));
+        console.say("Im Programm 'Schluesselbundverwaltung' den Eintrag 'avery-mail' loeschen.");
+        return 1;
     }
-    match ctx.linker.unlink(provider, &address) {
-        Ok(()) => {
-            console.say(&format!("{address} getrennt."));
-            console.say("Zugriff der App auch im Konto widerrufen (Google: myaccount.google.com/permissions, Microsoft: account.live.com/consent/Manage).");
-            0
-        }
+    let removed = ctx
+        .settings
+        .update_rights(|rights| Ok(rights.remove_account(provider, &address)));
+    let removed = match removed {
+        Ok(removed) => removed,
         Err(error) => {
             console.say(&format!(
-                "Freigaben entfernt, aber die Anmeldung im Schluesselbund blieb: {error}"
+                "{address}: die Anmeldung im Schluesselbund ist geloescht, die Konfiguration aber nicht geaendert."
             ));
-            console
-                .say("Im Programm 'Schluesselbundverwaltung' den Eintrag 'avery-mail' loeschen.");
-            1
+            let code = update_failed(ctx, console, &error);
+            console.say(&format!(
+                "Nach der Behebung den Befehl wiederholen: avery mail unlink {}:{address}",
+                provider.as_str()
+            ));
+            return code;
         }
+    };
+    match (removed, held) {
+        (true, true) => console.say(&format!("{address} getrennt.")),
+        (true, false) => console.say(&format!(
+            "{address} getrennt (die Anmeldung im Schluesselbund fehlte schon)."
+        )),
+        (false, true) => console.say(&format!(
+            "{}:{address} stand nicht in der Konfiguration; die gespeicherte Anmeldung im Schluesselbund ist geloescht.",
+            provider.as_str()
+        )),
+        (false, false) => console.say(&format!("{address} war schon getrennt.")),
     }
+    console.say("Zugriff der App auch im Konto widerrufen (Google: myaccount.google.com/permissions, Microsoft: account.live.com/consent/Manage).");
+    0
 }
 
 fn cmd_sendlog(ctx: &Context, console: &mut Console) -> u8 {
@@ -3156,9 +3236,31 @@ mod tests {
         apple: Untouchable,
     }
 
+    #[derive(Default)]
+    struct Faults {
+        on_store: Option<Box<dyn Fn()>>,
+        fail_delete: bool,
+    }
+
+    impl Faults {
+        fn on_store(hook: impl Fn() + 'static) -> Faults {
+            Faults {
+                on_store: Some(Box::new(hook)),
+                fail_delete: false,
+            }
+        }
+
+        fn undeletable() -> Faults {
+            Faults {
+                on_store: None,
+                fail_delete: true,
+            }
+        }
+    }
+
     struct Meddling {
         inner: crate::vault::memory::Shared,
-        on_store: Option<Box<dyn Fn()>>,
+        faults: Faults,
     }
 
     impl crate::vault::Vault for Meddling {
@@ -3167,13 +3269,16 @@ mod tests {
         }
 
         fn store(&self, name: &str, secret: &str) -> Result<(), crate::vault::VaultError> {
-            if let Some(hook) = &self.on_store {
+            if let Some(hook) = &self.faults.on_store {
                 hook();
             }
             self.inner.store(name, secret)
         }
 
         fn delete(&self, name: &str) -> Result<(), crate::vault::VaultError> {
+            if self.faults.fail_delete {
+                return Err(crate::vault::VaultError::Unavailable("locked".to_string()));
+            }
             self.inner.delete(name)
         }
     }
@@ -3186,7 +3291,15 @@ mod tests {
         visit: crate::provider::fakes::Visit,
         transport: crate::http::scripted::Scripted,
     ) -> Result<Cloudy, Box<dyn std::error::Error>> {
-        meddled(dir, config, records, remote, visit, transport, None)
+        meddled(
+            dir,
+            config,
+            records,
+            remote,
+            visit,
+            transport,
+            Faults::default(),
+        )
     }
 
     fn meddled(
@@ -3196,7 +3309,7 @@ mod tests {
         remote: Remote,
         visit: crate::provider::fakes::Visit,
         transport: crate::http::scripted::Scripted,
-        on_store: Option<Box<dyn Fn()>>,
+        faults: Faults,
     ) -> Result<Cloudy, Box<dyn std::error::Error>> {
         let settings = settings_at(&dir.path("config.json"));
         fs::write(&settings.config_path, config)?;
@@ -3209,7 +3322,7 @@ mod tests {
             Box::new(transport),
             Box::new(Meddling {
                 inner: crate::vault::memory::Shared(std::sync::Arc::clone(&vault)),
-                on_store,
+                faults,
             }),
             Box::new(crate::provider::fakes::Visitor {
                 visit,
@@ -3532,7 +3645,7 @@ mod tests {
             (vec!["unlink", "apple:alice@gmail.example"], "Verbunden:"),
             (
                 vec!["unlink", "microsoft:alice@gmail.example"],
-                "Verbunden:",
+                "ist nicht verbunden",
             ),
         ] {
             let (code, out) = run(&cloud.ctx, &arguments, "j\n");
@@ -4049,9 +4162,9 @@ mod tests {
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(true)),
-            Some(Box::new(move || {
+            Faults::on_store(move || {
                 let _ = run(&other, &["revoke"], "");
-            })),
+            }),
         )?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n2\n");
         assert_eq!(code, 0, "{out}");
@@ -4084,9 +4197,9 @@ mod tests {
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(false)),
-            Some(Box::new(move || {
+            Faults::on_store(move || {
                 let _ = fs::write(&path, &crowded);
-            })),
+            }),
         )?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 0, "{out}");
@@ -4101,9 +4214,9 @@ mod tests {
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(false)),
-            Some(Box::new(move || {
+            Faults::on_store(move || {
                 let _ = fs::write(&path, &full);
-            })),
+            }),
         )?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 1, "{out}");
@@ -4112,6 +4225,7 @@ mod tests {
         assert!(stored(&cloud)?
             .account(Provider::Google, "alice@gmail.example")
             .is_none());
+        assert!(cloud.vault.get("google:alice@gmail.example").is_none());
         Ok(())
     }
 
@@ -4171,7 +4285,7 @@ mod tests {
                 remote,
                 crate::provider::fakes::Visit::Good("c"),
                 crate::provider::fakes::google_transport(&google_tokens(false)),
-                None,
+                Faults::default(),
             )?;
             let held = fs::OpenOptions::new()
                 .write(true)
@@ -4195,6 +4309,329 @@ mod tests {
                 assert_eq!(code, 0);
             }
         }
+        Ok(())
+    }
+
+    fn lock_held(ctx: &Context) -> Result<fs::File, Box<dyn std::error::Error>> {
+        let held = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(ctx.settings.lock_path())?;
+        held.lock()?;
+        Ok(held)
+    }
+
+    fn bob_and_alice() -> [(&'static str, &'static str); 2] {
+        [
+            ("google:alice@gmail.example", READ_SCOPE),
+            ("microsoft:bob@outlook.example", "Mail.Read"),
+        ]
+    }
+
+    #[test]
+    fn an_unlink_deletes_the_sign_in_first_so_a_failed_config_update_leaves_no_orphan() -> TestResult
+    {
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &bob_and_alice(),
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let held = lock_held(&cloud.ctx)?;
+        let (code, out) = run(&cloud.ctx, &["unlink", "bob@outlook.example"], "j\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("die Anmeldung im Schluesselbund ist geloescht, die Konfiguration aber nicht geaendert"),
+            "{out}"
+        );
+        assert!(out.contains("Ein anderer Avery-Befehl"), "{out}");
+        assert!(
+            out.contains("avery mail unlink microsoft:bob@outlook.example"),
+            "{out}"
+        );
+        assert!(cloud.vault.get("microsoft:bob@outlook.example").is_none());
+        assert!(cloud.vault.get("google:alice@gmail.example").is_some());
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, LINKED);
+        held.unlock()?;
+        let (code, out) = run(&cloud.ctx, &["unlink", "bob@outlook.example"], "j\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains(
+                "bob@outlook.example getrennt (die Anmeldung im Schluesselbund fehlte schon)."
+            ),
+            "{out}"
+        );
+        assert_eq!(stored(&cloud)?.accounts.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_sign_in_that_cannot_be_deleted_stops_the_unlink_before_the_config_changes() -> TestResult {
+        let dir = TempDir::new()?;
+        let cloud = meddled(
+            &dir,
+            LINKED,
+            &bob_and_alice(),
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+            Faults::undeletable(),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["unlink", "bob@outlook.example"], "j\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("could not be removed"), "{out}");
+        assert!(out.contains("Schluesselbundverwaltung"), "{out}");
+        assert!(out.contains("Nichts geaendert"), "{out}");
+        assert!(!out.contains("getrennt."), "{out}");
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, LINKED);
+        assert!(cloud.vault.get("microsoft:bob@outlook.example").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_sign_in_without_a_config_entry_is_removed_when_the_provider_is_named() -> TestResult {
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            r#"{"version": 3}"#,
+            &[("google:orphan@gmail.example", READ_SCOPE)],
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["unlink", "orphan@gmail.example"], "j\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("kein Konto direkt verbunden"), "{out}");
+        assert!(
+            out.contains("avery mail unlink google:<adresse> | microsoft:<adresse>"),
+            "{out}"
+        );
+        assert!(cloud.vault.get("google:orphan@gmail.example").is_some());
+        let (code, out) = run(
+            &cloud.ctx,
+            &["unlink", "microsoft:orphan@gmail.example"],
+            "j\n",
+        );
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("ist nicht verbunden"), "{out}");
+        assert!(!out.contains("[j/N]"), "{out}");
+        let (code, out) = run(
+            &cloud.ctx,
+            &["unlink", "Google:Orphan@Gmail.example"],
+            "n\n",
+        );
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("google:orphan@gmail.example steht nicht in der Konfiguration, aber seine Anmeldung liegt noch im Schluesselbund"),
+            "{out}"
+        );
+        assert!(cloud.vault.get("google:orphan@gmail.example").is_some());
+        let (code, out) = run(
+            &cloud.ctx,
+            &["unlink", "Google:Orphan@Gmail.example"],
+            "j\n",
+        );
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("google:orphan@gmail.example stand nicht in der Konfiguration; die gespeicherte Anmeldung im Schluesselbund ist geloescht."),
+            "{out}"
+        );
+        assert!(cloud.vault.get("google:orphan@gmail.example").is_none());
+        assert_eq!(
+            fs::read_to_string(&cloud.ctx.settings.config_path)?,
+            r#"{"version": 3}"#
+        );
+        assert_eq!(cloud.apple.calls(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unlink_with_the_provider_works_without_a_readable_config_and_never_rewrites_it(
+    ) -> TestResult {
+        for text in ["not json", r#"{"version": 2, "allowed_accounts": []}"#] {
+            let dir = TempDir::new()?;
+            let cloud = cloudy(
+                &dir,
+                text,
+                &[("google:alice@gmail.example", READ_SCOPE)],
+                quiet(),
+                crate::provider::fakes::Visit::Nothing,
+                crate::http::scripted::Scripted::new(),
+            )?;
+            let (code, out) = run(&cloud.ctx, &["unlink", "alice@gmail.example"], "j\n");
+            assert_eq!(code, 1, "{out}");
+            assert!(out.contains("move the file away"), "{out}");
+            assert!(cloud.vault.get("google:alice@gmail.example").is_some());
+            let (code, out) = run(&cloud.ctx, &["unlink", "google:alice@gmail.example"], "j\n");
+            assert_eq!(code, 1, "{out}");
+            assert!(
+                out.contains("die Anmeldung im Schluesselbund ist geloescht, die Konfiguration aber nicht geaendert"),
+                "{out}"
+            );
+            assert!(out.contains("move the file away"), "{out}");
+            assert!(cloud.vault.get("google:alice@gmail.example").is_none());
+            assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, text);
+            let (code, out) = run(&cloud.ctx, &["unlink", "google:alice@gmail.example"], "j\n");
+            assert_eq!(code, 1, "{out}");
+            assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, text);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_removes_the_fresh_sign_in_again_when_the_config_cannot_be_updated() -> TestResult {
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            r#"{"version": 3}"#,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+        )?;
+        let held = lock_held(&cloud.ctx)?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Ein anderer Avery-Befehl"), "{out}");
+        assert!(
+            out.contains(
+                "Die eben im Schluesselbund gespeicherte Anmeldung wurde wieder entfernt."
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("Verbunden:"), "{out}");
+        assert!(cloud.vault.get("google:alice@gmail.example").is_none());
+        assert_eq!(
+            fs::read_to_string(&cloud.ctx.settings.config_path)?,
+            r#"{"version": 3}"#
+        );
+        held.unlock()?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(cloud.vault.get("google:alice@gmail.example").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_that_finds_the_list_full_removes_its_sign_in_and_says_so_when_that_fails_too(
+    ) -> TestResult {
+        let accounts: Vec<String> = (0..16)
+            .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
+            .collect();
+        let full = format!(r#"{{"version": 3, "accounts": [{}]}}"#, accounts.join(","));
+        for undeletable in [false, true] {
+            let dir = TempDir::new()?;
+            let path = dir.path("config.json");
+            let text = full.clone();
+            let hook = move || {
+                let _ = fs::write(&path, &text);
+            };
+            let faults = if undeletable {
+                Faults {
+                    fail_delete: true,
+                    ..Faults::on_store(hook)
+                }
+            } else {
+                Faults::on_store(hook)
+            };
+            let cloud = meddled(
+                &dir,
+                r#"{"version": 3}"#,
+                &[],
+                quiet(),
+                crate::provider::fakes::Visit::Good("c"),
+                crate::provider::fakes::google_transport(&google_tokens(false)),
+                faults,
+            )?;
+            let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+            assert_eq!(code, 1, "{undeletable}: {out}");
+            assert!(out.contains("Es sind schon 16 Konten verbunden"), "{out}");
+            assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, full);
+            if undeletable {
+                assert!(
+                    out.contains("Die eben im Schluesselbund gespeicherte Anmeldung blieb")
+                        && out.contains(
+                            "Entfernen mit: avery mail unlink google:alice@gmail.example"
+                        ),
+                    "{out}"
+                );
+                assert!(cloud.vault.get("google:alice@gmail.example").is_some());
+            } else {
+                assert!(out.contains("wieder entfernt"), "{out}");
+                assert!(cloud.vault.get("google:alice@gmail.example").is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_link_again_that_cannot_save_removes_the_new_sign_in_and_the_account_asks_for_a_new_link(
+    ) -> TestResult {
+        let dir = TempDir::new()?;
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &[("google:alice@gmail.example", WRITE_SCOPE)],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(false)),
+        )?;
+        let held = lock_held(&cloud.ctx)?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(cloud.vault.get("google:alice@gmail.example").is_none());
+        held.unlock()?;
+        assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, LINKED);
+        let (code, out) = run(&cloud.ctx, &["accounts"], "");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("alice@gmail.example  [gmail]  alice@gmail.example  [schreiben]  [Anmeldung fehlt, neu verbinden mit: avery mail link]"),
+            "{out}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_five_config_commands_refuse_in_demo_mode_and_touch_nothing() -> TestResult {
+        for (args, input) in [
+            (vec!["link", "google"], "id\nsecret\n1\n"),
+            (vec!["unlink", "bob@outlook.example"], "j\n"),
+            (vec!["unlink", "google:alice@gmail.example"], "j\n"),
+            (vec!["setup"], "1\n1\n1\nj\n"),
+            (vec!["setup", "apple"], "1\n1\n1\nj\n"),
+            (vec!["revoke"], ""),
+        ] {
+            let dir = TempDir::new()?;
+            let mut cloud = cloudy(
+                &dir,
+                LINKED,
+                &bob_and_alice(),
+                quiet(),
+                crate::provider::fakes::Visit::Good("c"),
+                crate::provider::fakes::google_transport(&google_tokens(false)),
+            )?;
+            cloud.ctx.settings.fake = true;
+            let (code, out) = run(&cloud.ctx, &args, input);
+            assert_eq!(code, 1, "{args:?}: {out}");
+            assert!(
+                out.contains("Im Demo-Modus (MAIL_MCP_FAKE=1) nicht moeglich"),
+                "{args:?}: {out}"
+            );
+            assert!(
+                !out.contains("[j/N]") && !out.contains("Client-ID"),
+                "{args:?}: {out}"
+            );
+            assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, LINKED);
+            assert!(!std::path::Path::new(&cloud.ctx.settings.lock_path()).exists());
+            assert_eq!(cloud.vault.count(), 2, "{args:?}");
+            assert_eq!(cloud.apple.calls(), 0, "{args:?}");
+        }
+        let (code, out) = run(&real(&TempDir::new()?, None)?, &["setup", "nonsense"], "");
+        assert_eq!(code, 2, "{out}");
         Ok(())
     }
 }

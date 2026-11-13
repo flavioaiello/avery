@@ -452,6 +452,11 @@ impl Linker {
         })
     }
 
+    pub(crate) fn stored(&self, provider: Provider, address: &str) -> bool {
+        account_id(provider, address)
+            .is_some_and(|name| !matches!(self.vault.load(&name), Ok(None)))
+    }
+
     pub(crate) fn unlink(&self, provider: Provider, address: &str) -> Result<(), String> {
         let name = account_id(provider, address).ok_or("This is not a valid account.")?;
         self.vault
@@ -1314,6 +1319,10 @@ mod tests {
             admin.capability(Provider::Google, "bob@outlook.example"),
             None
         );
+        assert!(admin.stored(Provider::Microsoft, "bob@outlook.example"));
+        assert!(!admin.stored(Provider::Microsoft, "nobody@outlook.example"));
+        assert!(!admin.stored(Provider::Google, "bob@outlook.example"));
+        assert!(!admin.stored(Provider::Apple, "bob@outlook.example"));
         assert_eq!(
             admin.unlink(Provider::Microsoft, "bob@outlook.example"),
             Ok(())
@@ -1322,9 +1331,36 @@ mod tests {
             admin.capability(Provider::Microsoft, "bob@outlook.example"),
             None
         );
+        assert!(!admin.stored(Provider::Microsoft, "bob@outlook.example"));
+        assert_eq!(
+            admin.unlink(Provider::Microsoft, "bob@outlook.example"),
+            Ok(())
+        );
         assert!(admin
             .unlink(Provider::Apple, "bob@outlook.example")
             .is_err());
         Ok(())
+    }
+
+    #[test]
+    fn an_entry_counts_as_stored_when_it_is_unreadable_or_cannot_be_looked_up() {
+        for vault in [
+            Memory::new().with("google:alice@gmail.example", "not a record"),
+            Memory::broken(),
+        ] {
+            let admin = Linker::new(
+                Box::new(Scripted::new()),
+                Box::new(vault),
+                Box::new(Visitor {
+                    visit: Visit::Nothing,
+                    seen: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+            assert!(admin.stored(Provider::Google, "alice@gmail.example"));
+            assert_eq!(
+                admin.capability(Provider::Google, "alice@gmail.example"),
+                None
+            );
+        }
     }
 }

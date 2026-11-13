@@ -293,22 +293,53 @@ fn demo_mode_selftest_and_accounts_work_without_mail() -> TestResult {
 #[test]
 fn setup_reads_its_answers_from_standard_input() -> TestResult {
     let sandbox = Sandbox::new()?;
-    let env = [("MAIL_MCP_FAKE", "1")];
-    let output = run_cli(&sandbox, &env, &["setup", "apple"], "2\n1\n\n1\n\n\n\nj\n")?;
+    sandbox.write(
+        "config.json",
+        r#"{"version": 3, "apple": {
+            "mail": [{"id": "ACC-1", "name": "Privat Gmail", "level": "read"},
+                     {"id": "ACC-2", "name": "Privat Outlook", "level": "read"}],
+            "calendars": [{"id": "CAL-1", "name": "Privat", "level": "read"}]}}"#,
+    )?;
+    let output = run_cli(&sandbox, &[], &["setup"], "2\n0\n2\nj\n")?;
     assert_eq!(output.code, Some(0), "{}", output.stdout);
     let saved = sandbox.read("config.json");
     assert!(
-        saved.contains("\"level\": \"write\"") && saved.contains("FAKE-CAL-PRIVAT"),
+        saved.contains("\"level\": \"write\"") && saved.contains("CAL-1"),
         "{saved}"
     );
+    assert!(!saved.contains("ACC-2"), "{saved}");
     let status = run_cli(&sandbox, &[], &["status"], "")?;
-    assert!(status
-        .stdout
-        .contains("Mail: Demo Gmail (schreiben), Demo Outlook (lesen)"));
-    assert!(status.stdout.contains("Kalender: Demo Privat (lesen)"));
-    let revoked = run_cli(&sandbox, &env, &["revoke"], "")?;
+    assert!(status.stdout.contains("Mail: Privat Gmail (schreiben)"));
+    assert!(status.stdout.contains("Kalender: Privat (schreiben)"));
+    let revoked = run_cli(&sandbox, &[], &["revoke"], "")?;
     assert_eq!(revoked.code, Some(0));
     assert!(!sandbox.read("config.json").contains("level"));
+    assert!(sandbox.path("config.lock").exists());
+    Ok(())
+}
+
+#[test]
+fn demo_mode_refuses_the_commands_that_change_the_configuration() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let env = [("MAIL_MCP_FAKE", "1")];
+    for (args, input) in [
+        (vec!["link", "google"], "id\nsecret\n1\n"),
+        (vec!["unlink", "alice@gmail.example"], "j\n"),
+        (vec!["unlink", "google:alice@gmail.example"], "j\n"),
+        (vec!["setup"], "1\nj\n"),
+        (vec!["setup", "apple"], "2\n1\n\n1\n\n\n\nj\n"),
+        (vec!["revoke"], ""),
+    ] {
+        let output = run_cli(&sandbox, &env, &args, input)?;
+        assert_eq!(output.code, Some(1), "{args:?}: {}", output.stdout);
+        assert!(
+            output.stdout.contains("Demo-Modus"),
+            "{args:?}: {}",
+            output.stdout
+        );
+        assert!(!sandbox.path("config.json").exists(), "{args:?}");
+        assert!(!sandbox.path("config.lock").exists(), "{args:?}");
+    }
     Ok(())
 }
 
@@ -326,8 +357,9 @@ fn an_unsupported_configuration_is_never_overwritten() -> TestResult {
             (vec!["setup"], "1\nj\n"),
             (vec!["setup", "apple"], "1\nj\n"),
             (vec!["revoke"], ""),
+            (vec!["unlink", "alice@gmail.example"], "j\n"),
         ] {
-            let output = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &args, input)?;
+            let output = run_cli(&sandbox, &[], &args, input)?;
             assert_eq!(output.code, Some(1), "{args:?}: {}", output.stdout);
             assert_eq!(sandbox.read("config.json"), original);
         }

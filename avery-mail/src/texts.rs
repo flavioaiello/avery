@@ -137,7 +137,8 @@ pub(crate) const HELP: &str = concat!(
     "Usage\n",
     "  avery mail [serve]         MCP server on stdin/stdout (what goose starts)\n",
     "  avery mail link google|microsoft   connect Gmail or Outlook.com (OAuth in the browser)\n",
-    "  avery mail unlink <address>        disconnect such an account and delete its sign-in\n",
+    "  avery mail unlink <address>        disconnect such an account and delete its sign-in; google:<address> or\n",
+    "                             microsoft:<address> also deletes a sign-in that has no config entry\n",
     "  avery mail setup           choose the level per account and calendar\n",
     "  avery mail setup apple     include Apple Mail and Calendar (optional; lists them live)\n",
     "  avery mail accounts        list the accounts with their level\n",
@@ -149,7 +150,8 @@ pub(crate) const HELP: &str = concat!(
     "  avery mail status          show configuration and rights (no network, no Mail or Calendar access)\n",
     "  avery mail selftest        check read access without printing any content\n",
     "  avery mail selftest-write  check the approval dialog, drafts and sending\n",
-    "Set MAIL_MCP_FAKE=1 to run against synthetic demo data (no account, no Mail or Calendar access).\n"
+    "Set MAIL_MCP_FAKE=1 to run against synthetic demo data (no account, no Mail or Calendar access);\n",
+    "link, unlink, setup and revoke refuse in demo mode.\n"
 );
 
 pub(crate) fn calendar_write_instructions() -> String {

@@ -67,9 +67,13 @@ and deleting single events for a calendar, each only after your click in a macOS
 avery mail selftest-write  # test the approval dialogs: a draft, a mail to yourself, a test event, an all-day test event
 ```
 
-The server reads only config format 3. A config file in any other format is rejected and never rewritten: move it away
-(`mv ~/.avery/mail/config.json ~/.avery/mail/config.old.json`), then link and set up again. If `avery doctor` reports
-profile files that do not ask before changes, `avery init --force` writes new ones (the old ones are kept as backup).
+The server reads only config format 3. A config file in any other format is rejected and never rewritten. Before you move
+it away, run `avery mail unlink <address>` for every account that was linked with it: that deletes the account's token from
+the Keychain, which nothing can find any more once the file is gone. If this version cannot read the file, or the file does
+not list the account, name the provider: `avery mail unlink google:<address>` or `microsoft:<address>` deletes the token
+without a config entry. Then move the file away (`mv ~/.avery/mail/config.json ~/.avery/mail/config.old.json`), then link and
+set up again. If `avery doctor` reports profile files that do not ask before changes, `avery init --force` writes new ones
+(the old ones are kept as backup).
 
 ## Gmail and Outlook.com
 
@@ -208,7 +212,7 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | Command | Purpose |
 |---|---|
 | `avery init [--force]` | Create the profile (existing files are kept; `--force` replaces them and keeps a backup) |
-| `avery mail link google\|microsoft` / `unlink <address>` | Connect Gmail or Outlook.com (OAuth in the browser, token in the Keychain) / disconnect it and delete the token |
+| `avery mail link google\|microsoft` / `unlink <address>` | Connect Gmail or Outlook.com (OAuth in the browser, token in the Keychain) / disconnect it and delete the token (`unlink google:<address>` also deletes a token that has no config entry) |
 | `avery mail setup` / `setup apple` / `revoke` | Choose the level (off, read, write) per account and calendar / include Apple Mail and Calendar (optional) / remove all grants (Apple off again) |
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialogs, drafts, sending and a test event |
 | `avery mail status` / `accounts` / `calendars` | Show configuration and levels, accounts, calendars |
@@ -290,7 +294,7 @@ section is optional and only present while Apple Mail and Calendar are switched 
 ```sh
 cargo test --manifest-path avery-mail/Cargo.toml   # mail and calendar server: unit and end-to-end tests on demo data, no Mail or Calendar access
 tests/cli.sh                                        # bin/avery, app builder, disk image tools, cask and formula
-MAIL_MCP_FAKE=1 cargo run --manifest-path avery-mail/Cargo.toml -- status
+MAIL_MCP_FAKE=1 cargo run --manifest-path avery-mail/Cargo.toml -- status   # demo data; link, unlink, setup and revoke refuse in demo mode
 AVERY_MAIL_BIN=$PWD/avery-mail/target/debug/avery-mail bin/avery doctor   # AVERY_MAIL_BIN: use another mail server binary
 AVERY_DRY_RUN=1 bin/avery model   # print the command instead of running it
 ```
