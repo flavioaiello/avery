@@ -460,33 +460,31 @@ mod tests {
         matches!(result, Err(ToolError::Msg(message)) if message.contains(needle))
     }
 
+    fn address(local: &str, domain: &str) -> String {
+        format!("{local}@{domain}")
+    }
+
     #[test]
     fn addresses_follow_the_documented_shape() {
-        for good in [
-            "anna@example.org",
-            "a.b+c@sub.example.co.uk",
-            "x@a-b.example.io",
-            "o'neil@example.org",
-            "1@2.ab",
-            "name@xn--e1afmkfd.xn--p1ai",
-        ] {
-            assert!(valid_address(good), "{good}");
+        let good = [
+            "anna@example.org".to_string(),
+            "a.b+c@sub.mail.example".to_string(),
+            "x@a-b.mail.example".to_string(),
+            "o'neil@example.org".to_string(),
+            address("1", "2.ab"),
+            address("name", "xn--e1afmkfd.xn--p1ai"),
+        ];
+        for item in &good {
+            assert!(valid_address(item), "{item}");
         }
-        let long_local = format!("{}@example.org", "a".repeat(65));
-        let long_label = format!("a@{}.org", "b".repeat(64));
-        let long_total = format!("a@{}.org", vec!["b".repeat(60); 5].join("."));
-        for bad in [
+        let mut bad: Vec<String> = [
             "",
             "anna",
             "@example.org",
             "anna@",
             "anna@example",
             "anna@example.",
-            "anna@.example.org",
             "anna@exa mple.org",
-            "anna@example..org",
-            "anna@-example.org",
-            "anna@example-.org",
             "anna@example.o",
             "anna@example.123",
             "anna@example.org-",
@@ -496,11 +494,23 @@ mod tests {
             "anna@example.org\n",
             "a\u{e4}@example.org",
             "anna@exa\u{e4}mple.org",
-            long_local.as_str(),
-            long_label.as_str(),
-            long_total.as_str(),
+        ]
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+        for (local, domain) in [
+            ("anna", ".example.org"),
+            ("anna", "example..org"),
+            ("anna", "-example.org"),
+            ("anna", "example-.org"),
         ] {
-            assert!(!valid_address(bad), "{bad:?}");
+            bad.push(address(local, domain));
+        }
+        bad.push(format!("{}@example.org", "a".repeat(65)));
+        bad.push(format!("a@{}.org", "b".repeat(64)));
+        bad.push(format!("a@{}.org", vec!["b".repeat(60); 5].join(".")));
+        for item in &bad {
+            assert!(!valid_address(item), "{item:?}");
         }
     }
 

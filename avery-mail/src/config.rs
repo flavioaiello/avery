@@ -359,27 +359,27 @@ mod tests {
 
     #[test]
     fn paths_follow_the_environment() {
-        let s = Settings::from_lookup(&lookup(&[("HOME", "/Users/x")]));
-        assert_eq!(s.config_path, "/Users/x/.avery/mail/config.json");
-        assert_eq!(s.sendlog_path(), "/Users/x/.avery/mail/sendlog.jsonl");
+        let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x")]));
+        assert_eq!(s.config_path, "/home/x/.avery/mail/config.json");
+        assert_eq!(s.sendlog_path(), "/home/x/.avery/mail/sendlog.jsonl");
         assert!(!s.fake);
-        let s = Settings::from_lookup(&lookup(&[("HOME", "/Users/x"), ("AVERY_HOME", "/opt/av/")]));
+        let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x"), ("AVERY_HOME", "/opt/av/")]));
         assert_eq!(s.config_path, "/opt/av/mail/config.json");
-        let s = Settings::from_lookup(&lookup(&[("HOME", "/Users/x"), ("AVERY_HOME", "~/own")]));
-        assert_eq!(s.config_path, "/Users/x/own/mail/config.json");
+        let s = Settings::from_lookup(&lookup(&[("HOME", "/home/x"), ("AVERY_HOME", "~/own")]));
+        assert_eq!(s.config_path, "/home/x/own/mail/config.json");
         let s = Settings::from_lookup(&lookup(&[
-            ("HOME", "/Users/x"),
+            ("HOME", "/home/x"),
             ("AVERY_HOME", "/opt/av"),
             ("MAIL_MCP_CONFIG", "/etc/c.json"),
         ]));
         assert_eq!(s.config_path, "/etc/c.json");
         assert_eq!(s.sendlog_path(), "/etc/sendlog.jsonl");
         let s = Settings::from_lookup(&lookup(&[
-            ("HOME", "/Users/x"),
+            ("HOME", "/home/x"),
             ("MAIL_MCP_CONFIG", ""),
             ("AVERY_HOME", ""),
         ]));
-        assert_eq!(s.config_path, "/Users/x/.avery/mail/config.json");
+        assert_eq!(s.config_path, "/home/x/.avery/mail/config.json");
     }
 
     #[test]
