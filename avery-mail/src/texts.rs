@@ -100,10 +100,12 @@ pub(crate) fn read_instructions(mail: bool, calendar: bool) -> String {
     text
 }
 
-pub(crate) const COMMANDS: [&str; 10] = [
+pub(crate) const COMMANDS: [&str; 12] = [
     "accounts",
     "calendars",
     "setup",
+    "link",
+    "unlink",
     "revoke",
     "selftest",
     "sendlog",
@@ -133,6 +135,8 @@ pub(crate) const HELP: &str = concat!(
     "  avery mail accounts        list all Mail accounts with their level\n",
     "  avery mail calendars       list all calendars with their level\n",
     "  avery mail setup [area]    choose the level per account and calendar (area: mail or calendar)\n",
+    "  avery mail link google|microsoft   connect Gmail or Outlook.com directly (OAuth in the browser)\n",
+    "  avery mail unlink <address>        disconnect such an account and delete its sign-in\n",
     "  avery mail revoke          remove all rights (mail and calendar)\n",
     "  avery mail sendlog         show the latest send attempts\n",
     "  avery mail changes         show the latest calendar changes\n",

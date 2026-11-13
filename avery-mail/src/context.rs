@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::calendar::{CalendarBackend, FakeCalendar, RealCalendar};
-use crate::cloud::{CalendarRouter, CloudCalendar, CloudMail, MailRouter};
+use crate::cloud::{CalendarRouter, CloudAdmin, CloudCalendar, CloudMail, MailRouter};
 use crate::config::Settings;
 use crate::fake::FakeBackend;
 #[cfg(test)]
@@ -11,6 +11,7 @@ pub(crate) struct Context {
     pub(crate) settings: Settings,
     pub(crate) backend: Box<dyn Backend>,
     pub(crate) calendar: Box<dyn CalendarBackend>,
+    pub(crate) cloud: CloudAdmin,
 }
 
 impl Context {
@@ -18,11 +19,13 @@ impl Context {
         settings: Settings,
         backend: Box<dyn Backend>,
         calendar: Box<dyn CalendarBackend>,
+        cloud: CloudAdmin,
     ) -> Context {
         Context {
             settings,
             backend,
             calendar,
+            cloud,
         }
     }
 
@@ -32,6 +35,7 @@ impl Context {
             settings,
             Box::new(FakeBackend::new(options.clone())),
             Box::new(FakeCalendar::new(options)),
+            CloudAdmin::inert(),
         )
     }
 
@@ -42,6 +46,7 @@ impl Context {
                 settings,
                 Box::new(FakeBackend::from_env()),
                 Box::new(FakeCalendar::from_env()),
+                CloudAdmin::inert(),
             );
         }
         Context::new(
@@ -54,6 +59,7 @@ impl Context {
                 Box::new(RealCalendar::system()),
                 CloudCalendar::system(),
             )),
+            CloudAdmin::system(),
         )
     }
 }

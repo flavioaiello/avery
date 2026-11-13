@@ -168,6 +168,7 @@ impl Settings {
                     (entry, granted)
                 })
                 .collect(),
+            linked: Vec::new(),
             sends_per_hour: DEFAULT_SENDS_PER_HOUR,
             changes_per_hour: DEFAULT_CHANGES_PER_HOUR,
         }

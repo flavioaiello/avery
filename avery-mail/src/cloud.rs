@@ -4,6 +4,7 @@ mod gmail;
 mod google_calendar;
 mod graph;
 mod graph_calendar;
+mod link;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -26,6 +27,10 @@ use crate::osascript::{Host, OsascriptHost};
 use crate::source::{account_address, calendar_id, calendar_parts, Source};
 use crate::text::one_line_str;
 use crate::vault::{Keychain, Vault};
+
+#[cfg(test)]
+pub(crate) use link::fakes;
+pub(crate) use link::{Client, CloudAdmin};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(45);

@@ -1,6 +1,7 @@
 use crate::account::{string_list, MailAccount};
 use crate::calendar::CalendarEntry;
 use crate::json::{Json, Object};
+use crate::source::{account_address, calendar_parts, plain_address, Source};
 use crate::texts::{DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, MAX_LIMIT_PER_HOUR};
 
 pub(crate) const CONFIG_VERSION: i64 = 3;
@@ -28,10 +29,19 @@ impl Level {
     }
 }
 
+pub(crate) const MAX_LINKS: usize = 16;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Link {
+    pub(crate) source: Source,
+    pub(crate) address: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Rights {
     pub(crate) mail: Vec<(MailAccount, Level)>,
     pub(crate) calendars: Vec<(CalendarEntry, Level)>,
+    pub(crate) linked: Vec<Link>,
     pub(crate) sends_per_hour: i64,
     pub(crate) changes_per_hour: i64,
 }
@@ -148,11 +158,97 @@ fn parse_calendars(section: &Object) -> Result<Vec<(CalendarEntry, Level)>, Stri
     Ok(found)
 }
 
+fn parse_links(section: &Object) -> Result<Vec<Link>, String> {
+    let mut found: Vec<Link> = Vec::new();
+    let items = list_of(section, "accounts", "cloud")?;
+    if items.len() > MAX_LINKS {
+        return Err(format!("cloud.accounts has more than {MAX_LINKS} entries"));
+    }
+    for (index, item) in items.iter().enumerate() {
+        let place = format!("cloud.accounts[{index}]");
+        let entry = object_of(item, &place)?;
+        only_keys(entry, &["source", "address"], &place)?;
+        let source = entry
+            .get("source")
+            .and_then(Json::as_str)
+            .and_then(Source::parse_cloud)
+            .ok_or_else(|| format!("{place}.source must be \"google\" or \"microsoft\""))?;
+        let address = match entry.get("address").and_then(Json::as_str) {
+            Some(address) if plain_address(address) && address == address.to_lowercase() => {
+                address.to_string()
+            }
+            _ => {
+                return Err(format!(
+                    "{place}.address must be a plain lower-case mail address"
+                ))
+            }
+        };
+        if found
+            .iter()
+            .any(|link| link.source == source && link.address == address)
+        {
+            return Err(format!("{place} appears twice"));
+        }
+        found.push(Link { source, address });
+    }
+    Ok(found)
+}
+
+fn check_grants(
+    mail: &[(MailAccount, Level)],
+    calendars: &[(CalendarEntry, Level)],
+    linked: &[Link],
+) -> Result<(), String> {
+    let is_linked = |source: Source, address: &str| {
+        linked
+            .iter()
+            .any(|link| link.source == source && link.address == address)
+    };
+    for (index, (account, _)) in mail.iter().enumerate() {
+        if Source::of_id(&account.id) == Source::Apple {
+            continue;
+        }
+        match account_address(&account.id) {
+            Some((source, address)) if is_linked(source, address) => {}
+            Some(_) => {
+                return Err(format!(
+                    "mail.accounts[{index}] belongs to an account that is not linked"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "mail.accounts[{index}].id is not a valid cloud account"
+                ))
+            }
+        }
+    }
+    for (index, (calendar, _)) in calendars.iter().enumerate() {
+        if Source::of_id(&calendar.id) == Source::Apple {
+            continue;
+        }
+        match calendar_parts(&calendar.id) {
+            Some((source, address, _)) if is_linked(source, address) => {}
+            Some(_) => {
+                return Err(format!(
+                    "calendar.calendars[{index}] belongs to an account that is not linked"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "calendar.calendars[{index}].id is not a valid cloud calendar"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Rights {
     pub(crate) fn empty() -> Rights {
         Rights {
             mail: Vec::new(),
             calendars: Vec::new(),
+            linked: Vec::new(),
             sends_per_hour: DEFAULT_SENDS_PER_HOUR,
             changes_per_hour: DEFAULT_CHANGES_PER_HOUR,
         }
@@ -162,7 +258,7 @@ impl Rights {
         if config.get("version") != Some(&Json::Int(CONFIG_VERSION)) {
             return Err(format!("the format version must be {CONFIG_VERSION}"));
         }
-        only_keys(config, &["version", "mail", "calendar"], "config")?;
+        only_keys(config, &["version", "mail", "calendar", "cloud"], "config")?;
         let mut rights = Rights::empty();
         if let Some(value) = config.get("mail") {
             let section = object_of(value, "mail")?;
@@ -182,6 +278,12 @@ impl Rights {
                 "calendar",
             )?;
         }
+        if let Some(value) = config.get("cloud") {
+            let section = object_of(value, "cloud")?;
+            only_keys(section, &["accounts"], "cloud")?;
+            rights.linked = parse_links(section)?;
+        }
+        check_grants(&rights.mail, &rights.calendars, &rights.linked)?;
         Ok(rights)
     }
 
@@ -223,6 +325,21 @@ impl Rights {
             section.insert("calendars", Json::Arr(calendars));
             section.insert("changes_per_hour", Json::Int(self.changes_per_hour));
             config.insert("calendar", Json::Obj(section));
+        }
+        if !self.linked.is_empty() {
+            let accounts: Vec<Json> = self
+                .linked
+                .iter()
+                .map(|link| {
+                    let mut entry = Object::new();
+                    entry.insert("source", link.source.as_str());
+                    entry.insert("address", link.address.as_str());
+                    Json::Obj(entry)
+                })
+                .collect();
+            let mut section = Object::new();
+            section.insert("accounts", Json::Arr(accounts));
+            config.insert("cloud", Json::Obj(section));
         }
         config
     }
@@ -312,6 +429,121 @@ mod tests {
         custom.sends_per_hour = 9;
         assert_eq!(Rights::parse(&custom.to_config())?, custom);
         Ok(())
+    }
+
+    const CLOUD: &str = r#"{"version": 3,
+        "mail": {"accounts": [
+            {"id": "google:alice@gmail.example", "name": "alice@gmail.example", "type": "gmail", "addresses": ["alice@gmail.example"], "level": "read"},
+            {"id": "ACC-1", "name": "Privat", "level": "write"}]},
+        "calendar": {"calendars": [
+            {"id": "google:alice@gmail.example:alice@gmail.example", "name": "alice@gmail.example", "level": "read"},
+            {"id": "microsoft:bob@outlook.example:AQMk-_=", "name": "Calendar (bob@outlook.example)", "level": "write"}]},
+        "cloud": {"accounts": [
+            {"source": "google", "address": "alice@gmail.example"},
+            {"source": "microsoft", "address": "bob@outlook.example"}]}}"#;
+
+    #[test]
+    fn linked_cloud_accounts_are_read_and_written_back() -> TestResult {
+        let rights = parsed(CLOUD)?;
+        assert_eq!(
+            rights.linked,
+            [
+                Link {
+                    source: Source::Google,
+                    address: "alice@gmail.example".into()
+                },
+                Link {
+                    source: Source::Microsoft,
+                    address: "bob@outlook.example".into()
+                }
+            ]
+        );
+        assert_eq!(
+            rights.mail_level("google:alice@gmail.example"),
+            Some(Level::Read)
+        );
+        assert_eq!(Rights::parse(&rights.to_config())?, rights);
+        let linked_only = parsed(
+            r#"{"version": 3, "cloud": {"accounts": [{"source": "google", "address": "a@gmail.example"}]}}"#,
+        )?;
+        assert!(linked_only.mail.is_empty());
+        assert_eq!(linked_only.linked.len(), 1);
+        assert_eq!(Rights::parse(&linked_only.to_config())?, linked_only);
+        Ok(())
+    }
+
+    #[test]
+    fn grants_for_cloud_accounts_need_a_link_and_a_valid_id() {
+        let link = r#""cloud": {"accounts": [{"source": "google", "address": "a@gmail.example"}]}"#;
+        for (text, place) in [
+            (
+                r#"{"version": 3, "mail": {"accounts": [{"id": "google:a@gmail.example", "level": "read"}]}}"#.to_string(),
+                "mail.accounts[0] belongs to an account that is not linked",
+            ),
+            (
+                format!(r#"{{"version": 3, "mail": {{"accounts": [{{"id": "microsoft:a@gmail.example", "level": "read"}}]}}, {link}}}"#),
+                "mail.accounts[0] belongs to an account that is not linked",
+            ),
+            (
+                format!(r#"{{"version": 3, "mail": {{"accounts": [{{"id": "google:nonsense", "level": "read"}}]}}, {link}}}"#),
+                "mail.accounts[0].id is not a valid cloud account",
+            ),
+            (
+                format!(r#"{{"version": 3, "calendar": {{"calendars": [{{"id": "google:b@gmail.example:x", "level": "read"}}]}}, {link}}}"#),
+                "calendar.calendars[0] belongs to an account that is not linked",
+            ),
+            (
+                format!(r#"{{"version": 3, "calendar": {{"calendars": [{{"id": "google:a@gmail.example", "level": "read"}}]}}, {link}}}"#),
+                "calendar.calendars[0].id is not a valid cloud calendar",
+            ),
+        ] {
+            assert_eq!(parsed(&text).err().as_deref(), Some(place), "{text}");
+        }
+    }
+
+    #[test]
+    fn malformed_cloud_sections_are_rejected() {
+        let many: Vec<String> = (0..=MAX_LINKS)
+            .map(|n| format!(r#"{{"source": "google", "address": "a{n}@gmail.example"}}"#))
+            .collect();
+        let too_many = format!(
+            r#"{{"version": 3, "cloud": {{"accounts": [{}]}}}}"#,
+            many.join(",")
+        );
+        for (text, place) in [
+            (r#"{"version": 3, "cloud": []}"#.to_string(), "cloud must be an object"),
+            (r#"{"version": 3, "cloud": {"keys": []}}"#.to_string(), "cloud has the unknown key"),
+            (r#"{"version": 3, "cloud": {"accounts": {}}}"#.to_string(), "cloud.accounts must be a list"),
+            (r#"{"version": 3, "cloud": {"accounts": [5]}}"#.to_string(), "cloud.accounts[0] must be an object"),
+            (
+                r#"{"version": 3, "cloud": {"accounts": [{"source": "apple", "address": "a@gmail.example"}]}}"#.to_string(),
+                "cloud.accounts[0].source must be",
+            ),
+            (
+                r#"{"version": 3, "cloud": {"accounts": [{"address": "a@gmail.example"}]}}"#.to_string(),
+                "cloud.accounts[0].source must be",
+            ),
+            (
+                r#"{"version": 3, "cloud": {"accounts": [{"source": "google", "address": "A@Gmail.example"}]}}"#.to_string(),
+                "cloud.accounts[0].address must be a plain lower-case mail address",
+            ),
+            (
+                r#"{"version": 3, "cloud": {"accounts": [{"source": "google", "address": "nonsense"}]}}"#.to_string(),
+                "cloud.accounts[0].address must be",
+            ),
+            (
+                r#"{"version": 3, "cloud": {"accounts": [{"source": "google", "address": "a@gmail.example", "x": 1}]}}"#.to_string(),
+                "cloud.accounts[0] has the unknown key",
+            ),
+            (
+                r#"{"version": 3, "cloud": {"accounts": [{"source": "google", "address": "a@gmail.example"}, {"source": "google", "address": "a@gmail.example"}]}}"#.to_string(),
+                "cloud.accounts[1] appears twice",
+            ),
+            (too_many, "more than 16 entries"),
+        ] {
+            let error = parsed(&text).err().unwrap_or_default();
+            assert!(error.contains(place), "{text}: {error}");
+        }
     }
 
     #[test]

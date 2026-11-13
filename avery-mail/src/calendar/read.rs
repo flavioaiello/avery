@@ -409,6 +409,7 @@ pub(crate) fn get_event(ctx: &Context, args: &Object) -> ToolResult<String> {
 mod tests {
     use super::*;
     use crate::calendar::{CalendarBackend, CalendarInfo};
+    use crate::cloud::CloudAdmin;
     use crate::fake::FakeOptions;
     use crate::testutil::{args, settings_at, TempDir, TestResult};
 
@@ -648,6 +649,7 @@ mod tests {
             settings,
             Box::new(crate::fake::FakeBackend::new(FakeOptions::default())),
             Box::new(Stub(events)),
+            CloudAdmin::inert(),
         )
     }
 

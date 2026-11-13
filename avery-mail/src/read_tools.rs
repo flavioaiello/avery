@@ -511,6 +511,7 @@ mod tests {
             settings,
             Box::new(LongBody),
             Box::new(FakeCalendar::new(FakeOptions::default())),
+            crate::cloud::CloudAdmin::inert(),
         );
         let text = read_message(
             &ctx,

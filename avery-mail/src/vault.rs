@@ -148,7 +148,7 @@ impl Vault for Keychain {
 pub(crate) mod memory {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     pub(crate) struct Memory {
@@ -187,6 +187,22 @@ pub(crate) mod memory {
 
         pub(crate) fn count(&self) -> usize {
             self.entries.lock().map_or(0, |entries| entries.len())
+        }
+    }
+
+    pub(crate) struct Shared(pub(crate) Arc<Memory>);
+
+    impl Vault for Shared {
+        fn load(&self, name: &str) -> Result<Option<String>, VaultError> {
+            self.0.load(name)
+        }
+
+        fn store(&self, name: &str, secret: &str) -> Result<(), VaultError> {
+            self.0.store(name, secret)
+        }
+
+        fn delete(&self, name: &str) -> Result<(), VaultError> {
+            self.0.delete(name)
         }
     }
 
