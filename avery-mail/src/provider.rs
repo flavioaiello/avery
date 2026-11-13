@@ -76,7 +76,7 @@ static GOOGLE: OAuth = OAuth {
     registration: &[
         "Gmail und Google Kalender direkt verbinden. Du brauchst eine eigene OAuth-Client-ID",
         "(Google Cloud Console, Typ 'Desktop-App', Gmail API und Google Calendar API aktiviert).",
-        "Nur persoenliche Gmail-Konten, keine Google-Workspace- oder Organisationskonten.",
+        "Nur persoenliche Gmail-Konten (Adressen auf gmail.com oder googlemail.com), keine Google-Workspace-Konten und keine eigenen Domains.",
     ],
     identify: google_address,
 };
@@ -111,17 +111,24 @@ fn first_address(candidates: &[Option<&Json>]) -> Result<String, String> {
         .ok_or_else(|| "The account has no usable mail address.".to_string())
 }
 
+const GMAIL_DOMAINS: [&str; 2] = ["gmail.com", "googlemail.com"];
+
 fn google_address(userinfo: &Object) -> Result<String, String> {
-    if !matches!(userinfo.get("hd"), None | Some(Json::Null)) {
-        return Err(
-            "Avery verbindet nur persoenliche Gmail-Konten, keine Organisationskonten (Google Workspace)."
-                .to_string(),
-        );
-    }
-    if userinfo.get("email_verified") == Some(&Json::Bool(false)) {
+    if !matches!(
+        userinfo.get("email_verified"),
+        None | Some(Json::Bool(true))
+    ) {
         return Err("Google says that this address is not verified.".to_string());
     }
-    first_address(&[userinfo.get("email")])
+    let address = first_address(&[userinfo.get("email")])?;
+    let domain = address.rsplit_once('@').map_or("", |(_, domain)| domain);
+    if !GMAIL_DOMAINS.contains(&domain) {
+        return Err(format!(
+            "Avery verbindet nur persoenliche Gmail-Konten (Adressen auf gmail.com oder googlemail.com), keine Google-Workspace-Konten und keine eigenen Domains. Dieses Konto hat die Domain {}.",
+            one_line_str(domain, 60)
+        ));
+    }
+    Ok(address)
 }
 
 fn microsoft_address(userinfo: &Object) -> Result<String, String> {

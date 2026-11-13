@@ -81,9 +81,11 @@ Avery talks to **Gmail and Google Calendar** and to **Outlook.com** (personal Mi
 directly. Every account and calendar has its own level, and the model sees the same tools for all of them
 (`list_messages`, `send_message`, `list_events`, ...).
 
-**Personal accounts only.** Google Workspace and other organisation accounts are refused on purpose: `avery mail link
-google` stops when Google reports a hosted domain for the account. Outlook.com signs in on Microsoft's *consumers*
-tenant, so work or school accounts cannot sign in. Other mail providers (IMAP, iCloud, Exchange) are not supported.
+**Personal accounts only.** `avery mail link google` accepts a Google account only if its address ends in `@gmail.com`
+or `@googlemail.com` (and Google reports it as verified): Gmail means those two domains. Google Workspace accounts and
+Google accounts with a custom domain are refused on purpose, and nothing is stored for them. Outlook.com signs in on
+Microsoft's *consumers* tenant, so work or school accounts cannot sign in. Other mail providers (IMAP, iCloud, Exchange)
+are not supported.
 
 **What it means for trust.** Avery keeps the sign-in itself: a refresh token per account in the macOS Keychain (service
 `avery-mail`, written and read through `/usr/bin/security`, never in a file, never on a command line; requests go
@@ -278,8 +280,9 @@ section is optional and only present while Apple Mail and Calendar are switched 
   against real accounts. Run `avery mail selftest` and `selftest-write` after linking and look at the result.
 - Google lets the unverified app of a personal project expire its refresh token after 7 days while the consent screen is
   in *Testing*; publish it (still unverified) to avoid signing in again every week.
-- Personal accounts only: Google Workspace and organisation accounts are refused, work and school Microsoft accounts
-  cannot sign in, and there is no IMAP, iCloud or Exchange access.
+- Personal accounts only: Google accounts must have a gmail.com or googlemail.com address (Google Workspace and custom
+  domains are refused), work and school Microsoft accounts cannot sign in, and there is no IMAP, iCloud or Exchange
+  access.
 - Mail search covers subject and sender, not the message body.
 - Single events without attendees can be changed; links on events (`url`) are not supported.
 - Apple bridge (optional): macOS asks for permission to control Mail and Calendar for the app that starts the server

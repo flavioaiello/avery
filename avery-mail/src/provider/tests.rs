@@ -1074,47 +1074,130 @@ fn the_host_allowlist_is_the_union_of_the_provider_hosts() {
     assert!(Request::new(Method::Get, "https://example.org/x", READ_TIMEOUT).refused());
 }
 
+fn object(text: &str) -> Result<Object, String> {
+    crate::testutil::args(text)
+}
+
 #[test]
-fn userinfo_answers_are_turned_into_lower_case_addresses() -> TestResult {
+fn google_accepts_only_gmail_and_googlemail_addresses() -> TestResult {
     let google = Provider::Google.oauth().ok_or("google")?;
-    let microsoft = Provider::Microsoft.oauth().ok_or("microsoft")?;
-    let object = |text: &str| -> Result<Object, String> { crate::testutil::args(text) };
-    assert_eq!(
-        (google.identify)(&object(
-            r#"{"email": "Alice@Gmail.example", "email_verified": true}"#
-        )?),
-        Ok("alice@gmail.example".to_string())
-    );
-    assert_eq!(
-        (google.identify)(&object(r#"{"email": "alice@gmail.example"}"#)?),
-        Ok("alice@gmail.example".to_string())
-    );
+    for (answer, address) in [
+        (
+            r#"{"email": "Alice@Gmail.com", "email_verified": true}"#,
+            "alice@gmail.com",
+        ),
+        (r#"{"email": "alice@gmail.com"}"#, "alice@gmail.com"),
+        (
+            r#"{"email": "bob@googlemail.com", "email_verified": true}"#,
+            "bob@googlemail.com",
+        ),
+        (r#"{"email": "BOB@GOOGLEMAIL.COM"}"#, "bob@googlemail.com"),
+        (r#"{"email": "A.B+c@GMail.Com"}"#, "a.b+c@gmail.com"),
+    ] {
+        assert_eq!(
+            (google.identify)(&object(answer)?),
+            Ok(address.to_string()),
+            "{answer}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn google_refuses_every_other_domain_and_names_the_reason() -> TestResult {
+    let google = Provider::Google.oauth().ok_or("google")?;
+    for (email, domain) in [
+        ("alice@firma.example", "firma.example"),
+        ("alice@example.org", "example.org"),
+        ("x@gmail.com.evil.example", "gmail.com.evil.example"),
+        ("x@evilgmail.com", "evilgmail.com"),
+        (
+            "x@googlemail.com.evil.example",
+            "googlemail.com.evil.example",
+        ),
+        ("x@notgooglemail.com", "notgooglemail.com"),
+        ("x@mail.gmail.com", "mail.gmail.com"),
+        ("x@gmail.co", "gmail.co"),
+        ("x@gmail.de", "gmail.de"),
+        ("x@gmaill.com", "gmaill.com"),
+        ("x@gmail-com.example", "gmail-com.example"),
+        ("gmail.com@firma.example", "firma.example"),
+    ] {
+        for extra in ["", r#", "email_verified": true"#] {
+            let answer = format!(r#"{{"email": "{email}"{extra}}}"#);
+            let error = (google.identify)(&object(&answer)?)
+                .err()
+                .ok_or_else(|| format!("accepted: {answer}"))?;
+            assert!(
+                error.contains("nur persoenliche Gmail-Konten")
+                    && error.contains("gmail.com oder googlemail.com")
+                    && error.contains("Google-Workspace")
+                    && error.contains("eigenen Domains")
+                    && error.contains(&format!("Domain {domain}.")),
+                "{answer}: {error}"
+            );
+        }
+    }
+    let long = format!("x@{}.example", "a".repeat(200));
+    let error = (google.identify)(&object(&format!(r#"{{"email": "{long}"}}"#))?)
+        .err()
+        .ok_or("accepted")?;
+    assert!(error.len() < 400, "{error}");
+    Ok(())
+}
+
+#[test]
+fn google_refuses_an_address_that_is_not_verified_or_not_usable() -> TestResult {
+    let google = Provider::Google.oauth().ok_or("google")?;
     for bad in [
-        r#"{"email": "alice@gmail.example", "email_verified": false}"#,
+        r#"{"email": "alice@gmail.com", "email_verified": false}"#,
+        r#"{"email": "alice@gmail.com", "email_verified": "true"}"#,
+        r#"{"email": "alice@gmail.com", "email_verified": null}"#,
+        r#"{"email": "alice@gmail.com", "email_verified": 1}"#,
+        r#"{"email": "alice@gmail.com", "email_verified": []}"#,
         r#"{"email": "nonsense"}"#,
+        r#"{"email": "alice@gmail.com\u200b"}"#,
+        r#"{"email": " alice@gmail.com"}"#,
+        r#"{"email": "alice@gmail.com@evil.example"}"#,
+        r#"{"email": "alice@gmail.com."}"#,
+        r#"{"email": "\u00e4@gmail.com"}"#,
+        r#"{"email": ""}"#,
         r#"{"sub": "1"}"#,
         r#"{"email": 5}"#,
+        r#"{"email": ["alice@gmail.com"]}"#,
     ] {
         assert!((google.identify)(&object(bad)?).is_err(), "{bad}");
     }
-    assert_eq!(
-        (google.identify)(&object(r#"{"email": "alice@gmail.example", "hd": null}"#)?),
-        Ok("alice@gmail.example".to_string())
-    );
-    for organisation in [
-        r#"{"email": "alice@firma.example", "email_verified": true, "hd": "firma.example"}"#,
-        r#"{"email": "alice@gmail.example", "hd": ""}"#,
-        r#"{"email": "alice@gmail.example", "hd": false}"#,
-        r#"{"email": "alice@gmail.example", "hd": []}"#,
-    ] {
-        let error = (google.identify)(&object(organisation)?)
-            .err()
-            .unwrap_or_default();
-        assert!(
-            error.contains("nur persoenliche Gmail-Konten, keine Organisationskonten"),
-            "{organisation}: {error}"
-        );
+    let error = (google.identify)(&object(
+        r#"{"email": "alice@gmail.com", "email_verified": false}"#,
+    )?)
+    .err()
+    .ok_or("accepted")?;
+    assert!(error.contains("not verified"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn the_gmail_rule_is_stated_where_the_user_is_asked_to_register() -> TestResult {
+    let google = Provider::Google.oauth().ok_or("google")?;
+    let registration = google.registration.join(" ");
+    let refusal = (google.identify)(&object(r#"{"email": "alice@firma.example"}"#)?)
+        .err()
+        .ok_or("accepted")?;
+    for domain in GMAIL_DOMAINS {
+        assert!(registration.contains(domain), "{registration}");
+        assert!(refusal.contains(domain), "{refusal}");
     }
+    assert!(registration.contains("Google-Workspace"), "{registration}");
+    Ok(())
+}
+
+#[test]
+fn microsoft_addresses_come_from_the_profile_and_the_tenant_decides_who_may_sign_in() -> TestResult
+{
+    let microsoft = Provider::Microsoft.oauth().ok_or("microsoft")?;
+    assert!(microsoft.authorize.contains("/consumers/"));
+    assert!(microsoft.token.contains("/consumers/"));
     assert_eq!(
         (microsoft.identify)(&object(
             r#"{"mail": "Bob@Outlook.example", "userPrincipalName": "x"}"#

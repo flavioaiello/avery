@@ -605,7 +605,7 @@ pub(crate) mod fakes {
                 Method::Get,
                 "openidconnect.googleapis.com",
                 200,
-                r#"{"sub": "1", "email": "Alice@Gmail.example", "email_verified": true}"#,
+                r#"{"sub": "1", "email": "Alice@Gmail.com", "email_verified": true}"#,
             )
     }
     pub(crate) fn record(scope: &str) -> Record {
@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(
             linked,
             Linked {
-                address: "alice@gmail.example".to_string(),
+                address: "alice@gmail.com".to_string(),
                 write_mail: false,
                 write_calendar: false
             }
@@ -890,8 +890,8 @@ mod tests {
             .headers
             .iter()
             .any(|(name, value)| name == "Authorization" && value == "Bearer ya29.a"));
-        let stored = Record::parse(&vault.get("google:alice@gmail.example").ok_or("stored")?)
-            .ok_or("record")?;
+        let stored =
+            Record::parse(&vault.get("google:alice@gmail.com").ok_or("stored")?).ok_or("record")?;
         assert_eq!(stored.refresh_token, "1//r");
         assert_eq!(stored.client_id, "123-abc.apps.example");
         assert_eq!(stored.client_secret.as_deref(), Some("GOCSPX-secret_1"));
@@ -1213,35 +1213,43 @@ mod tests {
     }
 
     #[test]
-    fn a_google_workspace_account_is_refused_before_anything_is_stored() -> TestResult {
-        let transport = Scripted::new()
-            .json(Method::Post, "/token", 200, GOOGLE_TOKENS)
-            .json(
-                Method::Get,
-                "openidconnect",
-                200,
-                r#"{"sub": "1", "email": "alice@firma.example", "email_verified": true, "hd": "firma.example"}"#,
+    fn a_google_account_that_is_not_a_gmail_address_is_refused_before_anything_is_stored(
+    ) -> TestResult {
+        for email in [
+            "alice@firma.example",
+            "x@gmail.com.evil.example",
+            "x@evilgmail.com",
+        ] {
+            let transport = Scripted::new()
+                .json(Method::Post, "/token", 200, GOOGLE_TOKENS)
+                .json(
+                    Method::Get,
+                    "openidconnect",
+                    200,
+                    &format!(r#"{{"sub": "1", "email": "{email}", "email_verified": true}}"#),
+                );
+            let vault = Arc::new(Memory::new());
+            let browser = Visitor {
+                visit: Visit::Good("x"),
+                seen: Arc::new(Mutex::new(Vec::new())),
+            };
+            let admin = Linker::new(
+                Box::new(transport),
+                Box::new(crate::vault::memory::Shared(Arc::clone(&vault))),
+                Box::new(browser),
+            )
+            .within(Duration::from_secs(10));
+            let Err(error) = admin.link(Provider::Google, &google()?, false, &mut |_| {}) else {
+                return Err(format!("{email}: expected an error").into());
+            };
+            assert!(
+                error.contains("nur persoenliche Gmail-Konten")
+                    && error.contains("gmail.com oder googlemail.com")
+                    && error.contains("keine eigenen Domains"),
+                "{error}"
             );
-        let vault = Arc::new(Memory::new());
-        let browser = Visitor {
-            visit: Visit::Good("x"),
-            seen: Arc::new(Mutex::new(Vec::new())),
-        };
-        let admin = Linker::new(
-            Box::new(transport),
-            Box::new(crate::vault::memory::Shared(Arc::clone(&vault))),
-            Box::new(browser),
-        )
-        .within(Duration::from_secs(10));
-        let Err(error) = admin.link(Provider::Google, &google()?, false, &mut |_| {}) else {
-            return Err("expected an error".into());
-        };
-        assert!(
-            error.contains("nur persoenliche Gmail-Konten, keine Organisationskonten"),
-            "{error}"
-        );
-        assert_eq!(vault.get("google:alice@firma.example"), None);
-        assert_eq!(vault.get("google:alice@gmail.example"), None);
+            assert_eq!(vault.count(), 0, "{email}");
+        }
         Ok(())
     }
 
