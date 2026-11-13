@@ -12,6 +12,44 @@ pub(crate) const TEN_MINUTES: i64 = 600;
 pub(crate) const COOL_DOWN: i64 = 20;
 const TAIL_BYTES: u64 = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum By {
+    Model,
+    Human,
+}
+
+impl By {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            By::Model => "model",
+            By::Human => "human",
+        }
+    }
+
+    pub(crate) fn parse(text: &str) -> Option<By> {
+        match text {
+            "model" => Some(By::Model),
+            "human" => Some(By::Human),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Model { max_per_hour: i64 },
+    Human,
+}
+
+impl Origin {
+    pub(crate) fn by(self) -> By {
+        match self {
+            Origin::Model { .. } => By::Model,
+            Origin::Human => By::Human,
+        }
+    }
+}
+
 pub(crate) struct Messages {
     pub(crate) blocked: &'static str,
     pub(crate) unreadable: &'static str,

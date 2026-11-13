@@ -482,13 +482,15 @@ fn first_period(rule: &Rule, origin: Date, from: Date) -> i64 {
     (elapsed.div_euclid(rule.interval) - 1).max(0)
 }
 
+const DST_SLACK_MINUTES: i64 = 60;
+
 fn after_until(rule: &Rule, occurrence: DateTime, utc_offset_minutes: i64) -> bool {
     match rule.until {
         None => false,
         Some(Until::Date(last)) => occurrence.date() > last,
         Some(Until::Local(last)) => occurrence > last,
         Some(Until::Utc(last)) => last
-            .add_minutes(utc_offset_minutes)
+            .add_minutes(utc_offset_minutes + DST_SLACK_MINUTES)
             .is_some_and(|local| occurrence > local),
     }
 }
@@ -893,8 +895,33 @@ mod tests {
         let window = (day("2026-11-01")?, day("2026-12-01")?);
         let in_winter = expand_all(&rule, start, 60, &[], window, 100).map_err(|_| "exceeded")?;
         assert_eq!(in_winter.dates.len(), 3);
-        let shifted = expand_all(&rule, start, 0, &[], window, 100).map_err(|_| "exceeded")?;
-        assert_eq!(shifted.dates.len(), 2);
+        let without_offset =
+            expand_all(&rule, start, 0, &[], window, 100).map_err(|_| "exceeded")?;
+        assert_eq!(without_offset.dates.len(), 3);
+        let offset_too_low =
+            expand_all(&rule, start, -60, &[], window, 100).map_err(|_| "exceeded")?;
+        assert_eq!(offset_too_low.dates.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_utc_until_at_the_last_occurrence_survives_a_change_of_the_utc_offset() -> TestResult {
+        let rule = rule("FREQ=DAILY;UNTIL=20260701T070000Z")?;
+        let start = DateTime::parse("2026-03-02 09:00").ok_or("start")?;
+        let window = (day("2026-06-29")?, day("2026-07-04")?);
+        let summer = expand_all(&rule, start, 60, &[], window, 100).map_err(|_| "exceeded")?;
+        let dates: Vec<String> = summer.dates.iter().map(|date| date.to_string()).collect();
+        assert_eq!(dates, ["2026-06-29", "2026-06-30", "2026-07-01"]);
+        let earlier = self::rule("FREQ=DAILY;UNTIL=20260701T053000Z")?;
+        let cut = expand_all(&earlier, start, 60, &[], window, 100).map_err(|_| "exceeded")?;
+        assert_eq!(cut.dates.len(), 2);
+        let winter_start = DateTime::parse("2026-10-05 09:00").ok_or("start")?;
+        let until_in_winter = self::rule("FREQ=DAILY;UNTIL=20261110T080000Z")?;
+        let window = (day("2026-11-08")?, day("2026-11-13")?);
+        let kept = expand_all(&until_in_winter, winter_start, 120, &[], window, 100)
+            .map_err(|_| "exceeded")?;
+        let dates: Vec<String> = kept.dates.iter().map(|date| date.to_string()).collect();
+        assert_eq!(dates, ["2026-11-08", "2026-11-09", "2026-11-10"]);
         Ok(())
     }
 
@@ -989,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn rules_that_never_match_stop_with_an_error() -> TestResult {
+    fn rules_that_never_match_produce_only_the_first_occurrence() -> TestResult {
         let counted = rule("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30;COUNT=5")?;
         let start = DateTime::parse("2026-02-10 09:00").ok_or("start")?;
         let outcome = expand_all(
@@ -1000,7 +1027,7 @@ mod tests {
             (day("2026-01-01")?, day("2400-01-01")?),
             10,
         );
-        assert!(outcome.is_ok() || outcome == Err(Exceeded));
+        assert_eq!(outcome.map_err(|_| "exceeded")?.dates, [day("2026-02-10")?]);
         let open = rule("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30")?;
         let outcome = expand_all(
             &open,

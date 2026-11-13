@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::calendar::{Action, EventFields};
 use crate::config::Settings;
 use crate::error::{ToolError, ToolResult};
-use crate::journal::{Journal, Messages, View, COOL_DOWN, HOUR, TEN_MINUTES};
+use crate::journal::{By, Journal, Messages, View, COOL_DOWN, HOUR, TEN_MINUTES};
 use crate::json::{Json, Object};
 use crate::texts::{
     CHANGES_BLOCKED, CHANGES_TOO_LARGE, CHANGES_UNREADABLE, MAX_ATTEMPTS_PER_10_MIN,
@@ -55,6 +55,7 @@ pub(crate) struct ChangeEntry {
     pub(crate) id: String,
     pub(crate) action: Action,
     pub(crate) outcome: Outcome,
+    pub(crate) by: By,
     pub(crate) calendar_id: String,
     pub(crate) calendar: String,
     pub(crate) uid: Option<String>,
@@ -86,6 +87,7 @@ impl ChangeEntry {
         object.insert("id", Json::from(&self.id));
         object.insert("action", Json::from(self.action.as_str()));
         object.insert("outcome", Json::from(self.outcome.as_str()));
+        object.insert("by", Json::from(self.by.as_str()));
         object.insert("calendar_id", Json::from(&self.calendar_id));
         object.insert("calendar", Json::from(&self.calendar));
         object.insert("uid", self.uid.as_ref().map_or(Json::Null, Json::from));
@@ -122,6 +124,7 @@ impl ChangeEntry {
             id,
             action: Action::parse(object.get("action")?.as_str()?)?,
             outcome: Outcome::parse(object.get("outcome")?.as_str()?)?,
+            by: By::parse(object.get("by")?.as_str()?)?,
             calendar_id: text("calendar_id")?,
             calendar: text("calendar")?,
             uid: optional_text(object.get("uid"))?,
@@ -169,7 +172,7 @@ pub(crate) fn attempts(entries: &[ChangeEntry]) -> Vec<&ChangeEntry> {
 pub(crate) fn check_limits(entries: &[ChangeEntry], now: i64, max_per_hour: i64) -> ToolResult<()> {
     let by_the_model: Vec<ChangeEntry> = entries
         .iter()
-        .filter(|entry| entry.undoes.is_none())
+        .filter(|entry| entry.by == By::Model)
         .cloned()
         .collect();
     let attempts = attempts(&by_the_model);
@@ -211,7 +214,9 @@ pub(crate) fn undoable(entries: &[ChangeEntry]) -> Vec<&ChangeEntry> {
         .collect();
     attempts(entries)
         .into_iter()
-        .filter(|entry| entry.outcome == Outcome::Done && entry.undoes.is_none())
+        .filter(|entry| {
+            entry.outcome == Outcome::Done && entry.by == By::Model && entry.undoes.is_none()
+        })
         .filter(|entry| !undone.contains(entry.id.as_str()))
         .collect()
 }
@@ -241,6 +246,7 @@ mod tests {
             id: id.to_string(),
             action: Action::Update,
             outcome,
+            by: By::Model,
             calendar_id: "CAL".to_string(),
             calendar: "Privat".to_string(),
             uid: Some("U".to_string()),
@@ -271,13 +277,16 @@ mod tests {
 
     #[test]
     fn unknown_versions_actions_and_shapes_are_not_read() -> TestResult {
-        let good = r#"{"v": 1, "ts": 5, "id": "a", "action": "create", "outcome": "done", "calendar_id": "C", "calendar": "K", "uid": null, "before": null, "after": null, "undoes": null}"#;
+        let good = r#"{"v": 1, "ts": 5, "id": "a", "action": "create", "outcome": "done", "by": "model", "calendar_id": "C", "calendar": "K", "uid": null, "before": null, "after": null, "undoes": null}"#;
         assert!(ChangeEntry::from_json(&j(good)?).is_some());
         for bad in [
             good.replace(r#""v": 1"#, r#""v": 2"#),
             good.replace(r#""v": 1, "#, ""),
             good.replace(r#""create""#, r#""wipe""#),
             good.replace(r#""done""#, r#""vanished""#),
+            good.replace(r#""by": "model", "#, ""),
+            good.replace(r#""model""#, r#""robot""#),
+            good.replace(r#""model""#, "5"),
             good.replace(r#""ts": 5"#, r#""ts": "5""#),
             good.replace(r#""id": "a""#, r#""id": """#),
             good.replace(r#""uid": null"#, r#""uid": 5"#),
@@ -395,9 +404,28 @@ mod tests {
         for index in 0..5 {
             let mut undo = entry(now - 100 - index, &format!("u{index}"), Outcome::Done);
             undo.undoes = Some(format!("id{index}"));
+            undo.by = By::Human;
             entries.push(undo);
         }
         assert_eq!(check_limits(&entries, now, 10), Ok(()));
+    }
+
+    #[test]
+    fn human_attempts_never_count_for_the_model_and_cannot_be_undone_by_id() {
+        let now = 1_700_000_000;
+        let mut entries = many(9, 1000, Outcome::Done, now);
+        for index in 0..8 {
+            let mut test = entry(now - 100 - index, &format!("t{index}"), Outcome::Done);
+            test.by = By::Human;
+            entries.push(test);
+        }
+        let mut declined = entry(now - 1, "d", Outcome::Declined);
+        declined.by = By::Human;
+        entries.push(declined);
+        assert_eq!(check_limits(&entries, now, 10), Ok(()));
+        let open: Vec<&str> = undoable(&entries).iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(open.len(), 9);
+        assert!(!open.iter().any(|id| id.starts_with('t')));
     }
 
     #[test]

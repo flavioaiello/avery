@@ -78,6 +78,7 @@ pub(crate) fn log_entry(ts: i64, outcome: Outcome, id: Option<&str>) -> LogEntry
         ts,
         mode: Mode::Send,
         outcome,
+        by: crate::journal::By::Model,
         account: "A".into(),
         from: String::new(),
         to: vec![],

@@ -6,7 +6,7 @@ use crate::changelog::{self, ChangeEntry, Outcome};
 use crate::civil::{Date, DateTime};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
-use crate::journal;
+use crate::journal::{self, By, Origin};
 use crate::json::{Json, Object};
 use crate::text::{char_len, clean, clean_str, one_line, one_line_str, to_bool};
 use crate::texts::{APPROVAL_SECONDS, UNTRUSTED};
@@ -37,12 +37,6 @@ const LAST_YEAR: i64 = 2100;
 const DEFAULT_MINUTES: i64 = 60;
 const MAX_MINUTES: i64 = 1440;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Origin {
-    Model { max_per_hour: i64 },
-    Human,
-}
-
 fn guard(ctx: &Context, origin: Origin) -> ToolResult<()> {
     let now = journal::now_seconds();
     let history = changelog::read_window(&ctx.settings, now)?;
@@ -57,6 +51,7 @@ struct Attempt<'a> {
     calendar: &'a Calendar,
     change: &'a Change,
     id: &'a str,
+    by: By,
     undoes: Option<&'a str>,
 }
 
@@ -68,6 +63,7 @@ impl Attempt<'_> {
             id: self.id.to_string(),
             action: self.change.action(),
             outcome,
+            by: self.by,
             calendar_id: self.calendar.id.clone(),
             calendar: one_line_str(&self.calendar.label, 100),
             uid: result
@@ -101,6 +97,7 @@ pub(crate) fn perform(
         calendar,
         change,
         id: &id,
+        by: origin.by(),
         undoes,
     };
     attempt.log(Outcome::Pending, None, true)?;
@@ -1085,6 +1082,7 @@ mod tests {
                 id: format!("old{index}"),
                 action: crate::calendar::Action::Create,
                 outcome: Outcome::Done,
+                by: By::Model,
                 calendar_id: "FAKE-CAL-PRIVAT".into(),
                 calendar: "Demo Privat".into(),
                 uid: Some(format!("u{index}")),
@@ -1190,6 +1188,7 @@ mod tests {
                 id: format!("old{index}"),
                 action: crate::calendar::Action::Create,
                 outcome: Outcome::Done,
+                by: By::Model,
                 calendar_id: "FAKE-CAL-PRIVAT".into(),
                 calendar: "Demo Privat".into(),
                 uid: None,

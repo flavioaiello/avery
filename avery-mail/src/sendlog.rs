@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::backend::{ComposeRequest, MessageId, Mode, Preview};
 use crate::config::Settings;
 use crate::error::{ToolError, ToolResult};
-use crate::journal::{Journal, Messages, View, COOL_DOWN, HOUR, TEN_MINUTES};
+use crate::journal::{By, Journal, Messages, View, COOL_DOWN, HOUR, TEN_MINUTES};
 use crate::json::{Json, Object};
 use crate::sha256::sha256_hex;
 use crate::text::{char_len, one_line_str};
@@ -70,6 +70,7 @@ pub(crate) struct LogEntry {
     pub(crate) ts: i64,
     pub(crate) mode: Mode,
     pub(crate) outcome: Outcome,
+    pub(crate) by: By,
     pub(crate) account: String,
     pub(crate) from: String,
     pub(crate) to: Vec<String>,
@@ -96,6 +97,7 @@ impl LogEntry {
         account_label: &str,
         request: &ComposeRequest,
         outcome: Outcome,
+        by: By,
         preview: Option<&Preview>,
         id: Option<&str>,
     ) -> LogEntry {
@@ -125,6 +127,7 @@ impl LogEntry {
             ts,
             mode: request.mode,
             outcome,
+            by,
             account: account_label.to_string(),
             from: one_line_str(from, 120),
             to: logged(to),
@@ -147,6 +150,7 @@ impl LogEntry {
         object.insert("ts", Json::Int(self.ts));
         object.insert("mode", Json::from(self.mode.as_str()));
         object.insert("outcome", Json::from(self.outcome.as_str()));
+        object.insert("by", Json::from(self.by.as_str()));
         object.insert("account", Json::from(&self.account));
         object.insert("from", Json::from(&self.from));
         object.insert("to", Json::from(self.to.as_slice()));
@@ -193,6 +197,7 @@ impl LogEntry {
             ts: whole("ts")?,
             mode: Mode::parse(object.get("mode")?.as_str()?)?,
             outcome: Outcome::parse(object.get("outcome")?.as_str()?)?,
+            by: By::parse(object.get("by")?.as_str()?)?,
             account: text("account")?,
             from: text("from")?,
             to: strings("to")?,
@@ -255,7 +260,7 @@ pub(crate) fn attempts(entries: &[LogEntry]) -> Vec<&LogEntry> {
 pub(crate) fn check_draft_limit(entries: &[LogEntry], now: i64) -> ToolResult<()> {
     let recent = entries
         .iter()
-        .filter(|entry| entry.mode == Mode::Draft)
+        .filter(|entry| entry.mode == Mode::Draft && entry.by == By::Model)
         .filter(|entry| now.saturating_sub(entry.ts) < HOUR)
         .count();
     if recent >= MAX_DRAFTS_PER_HOUR {
@@ -273,7 +278,7 @@ pub(crate) fn check_send_limits(
 ) -> ToolResult<()> {
     let sends: Vec<LogEntry> = entries
         .iter()
-        .filter(|entry| entry.mode == Mode::Send)
+        .filter(|entry| entry.mode == Mode::Send && entry.by == By::Model)
         .cloned()
         .collect();
     let attempts = attempts(&sends);
@@ -340,6 +345,7 @@ mod tests {
             "Privat",
             &reply,
             Outcome::Pending,
+            By::Model,
             None,
             Some("abc"),
         );
@@ -373,6 +379,7 @@ mod tests {
             "A",
             &request(Mode::Send),
             Outcome::Sent,
+            By::Model,
             Some(&preview),
             None,
         );
@@ -389,6 +396,7 @@ mod tests {
             "A",
             &request(Mode::Send),
             Outcome::Sent,
+            By::Model,
             Some(&empty),
             None,
         );
@@ -398,7 +406,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_modes_and_shapes_are_not_read() -> TestResult {
-        let good = r#"{"v": 1, "ts": 5, "mode": "send", "outcome": "sent", "account": "A", "from": "", "to": [], "cc": [], "subject": "", "reply_to_id": null, "recipients": 0, "chars": 1, "sha256": "x"}"#;
+        let good = r#"{"v": 1, "ts": 5, "mode": "send", "outcome": "sent", "by": "model", "account": "A", "from": "", "to": [], "cc": [], "subject": "", "reply_to_id": null, "recipients": 0, "chars": 1, "sha256": "x"}"#;
         assert!(LogEntry::from_json(&j(good)?).is_some());
         assert!(LogEntry::from_json(&j(
             &good.replace(r#""reply_to_id": null"#, r#""reply_to_id": "AAMk-_=""#)
@@ -409,6 +417,8 @@ mod tests {
             good.replace(r#""v": 1, "#, ""),
             good.replace(r#""send""#, r#""wipe""#),
             good.replace(r#""sent""#, r#""vanished""#),
+            good.replace(r#""by": "model", "#, ""),
+            good.replace(r#""model""#, r#""robot""#),
             good.replace(r#""ts": 5"#, r#""ts": "5""#),
             good.replace(r#""to": []"#, r#""to": [1]"#),
             good.replace(r#""chars": 1"#, r#""chars": -1"#),
@@ -522,6 +532,7 @@ mod tests {
             "A",
             &request(Mode::Send),
             Outcome::Sent,
+            By::Model,
             Some(&preview),
             None,
         );

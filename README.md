@@ -59,7 +59,7 @@ Everything is off until you give it a level. `write` means: drafts and sending f
 and deleting single events for a calendar, each only after your click in a macOS dialog:
 
 ```sh
-avery mail selftest-write  # test the approval dialogs: a draft, a mail to yourself, a test event
+avery mail selftest-write  # test the approval dialogs: a draft, a mail to yourself, a test event, an all-day test event
 ```
 
 ### Upgrading from a release with config format 2

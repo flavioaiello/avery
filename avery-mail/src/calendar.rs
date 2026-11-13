@@ -11,10 +11,11 @@ use crate::localtime;
 use crate::source::Source;
 use crate::text::text_of;
 
+pub(crate) use crate::journal::Origin;
 pub(crate) use fake::FakeCalendar;
 pub(crate) use read::{get_event, list_calendars, list_events};
 pub(crate) use real::RealCalendar;
-pub(crate) use write::{create_event, delete_event, perform, update_event, Origin};
+pub(crate) use write::{create_event, delete_event, perform, update_event};
 
 pub(crate) const MAX_SCANNED_EVENTS: i64 = 20_000;
 pub(crate) const MAX_SELECTED_EVENTS: i64 = 500;

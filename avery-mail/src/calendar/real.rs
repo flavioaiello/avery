@@ -74,6 +74,13 @@ pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
         )
         .to_string();
     }
+    if has("calendar_too_large") {
+        return concat!(
+            "This calendar has too many events to be read safely, whatever the range. ",
+            "The user has to tidy it up or to choose another calendar."
+        )
+        .to_string();
+    }
     if has("too_many_events") {
         return concat!(
             "The calendar has too many events in this range to read safely. ",
@@ -365,7 +372,8 @@ mod tests {
             ("calendar_not_found", "no longer exists"),
             ("event_not_found", "Event not found"),
             ("ambiguous_event", "More than one event"),
-            ("too_many_events:25000", "too many events"),
+            ("too_many_events:25000", "in this range"),
+            ("calendar_too_large:25000", "whatever the range"),
             ("invalid_local_time", "does not exist"),
             ("bad_time", "does not exist"),
             ("Apple event timed out. (-1712)", "did not answer in time"),
@@ -402,7 +410,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     const MOCK_CALENDAR: &str = r#"
-var LOG = {dialog: null, title: null, button: null, created: 0, sets: [], deleted: 0};
+var LOG = {dialog: null, title: null, button: null, created: 0, otherCreated: 0, sets: [], deleted: 0};
 var DECISION = 'approve';
 var WRITABLE = true;
 var SCENARIO = {};
@@ -461,9 +469,18 @@ events.whose = function (query) {
 };
 var CAL = {events: events, writable: function () { return WRITABLE; }, name: function () { return 'Privat'; },
            calendarIdentifier: function () { return 'CAL-1'; }};
-var calendars = function () { return [CAL]; };
-calendars.calendarIdentifier = function () { return ['CAL-1']; };
-calendars[0] = CAL;
+var OTHER = {events: {push: function (e) { LOG.otherCreated++; }}, writable: function () { return true; },
+             name: function () { return 'Anderer'; }, calendarIdentifier: function () { return 'CAL-2'; }};
+var ORDER = [CAL, OTHER];
+function lazy(i) {
+  return {get events() { return ORDER[i].events; }, writable: function () { return ORDER[i].writable(); },
+          name: function () { return ORDER[i].name(); },
+          calendarIdentifier: function () { return ORDER[i].calendarIdentifier(); }};
+}
+var calendars = function () { return ORDER.map(function (c, i) { return lazy(i); }); };
+calendars.calendarIdentifier = function () { return ORDER.map(function (c) { return c.calendarIdentifier(); }); };
+calendars[0] = lazy(0);
+calendars[1] = lazy(1);
 var fakeCalendar = {
   calendars: calendars,
   Event: function (props) {
@@ -488,6 +505,7 @@ function run(argv) {
   });
   sync();
   if (input.mutate) { SCENARIO.afterDialog = function () { LIST[0].__o.summary = 'Hinterrücks geändert'; }; }
+  if (input.reorder) { SCENARIO.afterDialog = function () { ORDER = [OTHER, CAL]; }; }
   if (input.deleteThrows) { SCENARIO.deleteThrows = input.deleteThrows; }
   try { out = {ok: true, data: dispatch(input.req)}; }
   catch (e) { out = {ok: false, error: String((e && e.message) || e)}; }
@@ -547,6 +565,9 @@ function run(argv) {
             {{"uid": "series", "summary": "Series", "start": "{}", "end": "{}", "rec": "FREQ=WEEKLY", "excluded": ["{}"]}},
             {{"uid": "zero", "summary": "Zero", "start": "{}", "end": "{}"}},
             {{"uid": "straddle", "summary": "Straddle", "start": "{}", "end": "{}", "allDay": true, "people": [["A", "a@example.org", "accepted"]]}},
+            {{"uid": "ended", "summary": "Ended", "start": "{}", "end": "{}", "rec": "FREQ=DAILY;UNTIL=20250301T000000Z"}},
+            {{"uid": "ending", "summary": "Ending", "start": "{}", "end": "{}", "rec": "FREQ=DAILY;UNTIL=20261112T090000Z"}},
+            {{"uid": "counted", "summary": "Counted", "start": "{}", "end": "{}", "rec": "FREQ=DAILY;COUNT=5"}},
             {{"uid": "newseries", "summary": "Future series", "start": "{}", "end": "{}", "rec": "FREQ=DAILY"}}
             ]"#,
             local("2026-11-01 09:00"),
@@ -562,6 +583,12 @@ function run(argv) {
             local("2026-11-13 00:00"),
             local("2026-11-12 00:00"),
             local("2026-11-14 00:00"),
+            local("2025-01-01 09:00"),
+            local("2025-01-01 10:00"),
+            local("2026-01-01 09:00"),
+            local("2026-01-01 10:00"),
+            local("2024-01-01 09:00"),
+            local("2024-01-01 10:00"),
             local("2026-12-01 09:00"),
             local("2026-12-01 10:00"),
         );
@@ -577,7 +604,10 @@ function run(argv) {
             .filter_map(Json::as_object)
             .map(|item| text_of(item.get("uid")))
             .collect();
-        assert_eq!(uids, ["inside", "series", "zero", "straddle"]);
+        assert_eq!(
+            uids,
+            ["inside", "series", "zero", "straddle", "ending", "counted"]
+        );
         let inside = items[0].as_object().ok_or("inside")?;
         assert_eq!(text_of(inside.get("start")), "2026-11-14 09:00");
         assert_eq!(text_of(inside.get("location")), "L");
@@ -594,7 +624,7 @@ function run(argv) {
         assert_eq!(straddle.get("allDay"), Some(&Json::Bool(true)));
         assert_eq!(straddle.get("attendees"), Some(&Json::Int(1)));
         let decoded: Vec<RawEvent> = items.iter().filter_map(RawEvent::from_json).collect();
-        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded.len(), 6);
         Ok(())
     }
 
@@ -622,7 +652,7 @@ function run(argv) {
                 1,
                 100
             ))?,
-            "too_many_events:2"
+            "calendar_too_large:2"
         );
         assert_eq!(
             error_of(&events_request(
@@ -745,6 +775,7 @@ function run(argv) {
         dialog: Option<String>,
         button: String,
         created: i64,
+        other_created: i64,
         deleted: i64,
         sets: Vec<String>,
     }
@@ -774,6 +805,7 @@ function run(argv) {
             dialog: log.get("dialog").and_then(Json::as_str).map(str::to_string),
             button: text_of(log.get("button")),
             created: count("created"),
+            other_created: count("otherCreated"),
             deleted: count("deleted"),
             sets: log
                 .get("sets")
@@ -798,6 +830,21 @@ function run(argv) {
             "Alt",
         )
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_calendar_that_moves_in_the_list_while_the_dialog_is_open_still_gets_the_event(
+    ) -> TestResult {
+        let after = fields_json("Tennis", "2030-05-07 18:30", "2030-05-07 19:45", "", "");
+        let done = change(
+            "[]",
+            &change_request("create", "", "null", &after, false),
+            r#""reorder": true"#,
+        )?;
+        assert!(done.ok, "{}", done.error);
+        assert_eq!((done.created, done.other_created), (1, 0));
+        Ok(())
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

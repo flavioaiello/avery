@@ -66,15 +66,20 @@ function attendeeCount(ev) {
   try { return ev.attendees().length; } catch (e) { return -1; }
 }
 
+function seriesEnded(rule, from) {
+  var m = /(?:^|;)UNTIL=(\d{4})(\d{2})(\d{2})/.exec(rule);
+  return !!m && new Date(+m[1], +m[2] - 1, +m[3]).getTime() + 2 * 86400000 < from.getTime();
+}
+
 function listEvents(cal, req) {
   var from = localDate(req.from), to = localDate(req.to), evs = cal.events;
   var starts = evs.startDate();
-  if (starts.length > req.maxScan) { throw new Error('too_many_events:' + starts.length); }
-  var ends = evs.endDate(), recs = evs.recurrence(), picked = [], i;
+  if (starts.length > req.maxScan) { throw new Error('calendar_too_large:' + starts.length); }
+  var ends = evs.endDate(), recs = evs.recurrence(), picked = [], i, rule;
   for (i = 0; i < starts.length; i++) {
     if (starts[i] >= to) { continue; }
-    if (recurrenceOf(recs[i]) !== '' || ends[i] > from ||
-        (+starts[i] === +ends[i] && starts[i] >= from)) {
+    rule = recurrenceOf(recs[i]);
+    if (rule !== '' ? !seriesEnded(rule, from) : (ends[i] > from || (+starts[i] === +ends[i] && starts[i] >= from))) {
       picked.push(i);
     }
   }
@@ -174,6 +179,7 @@ function changeEvent(cal, req) {
   decision = changeDecision(req, before, after);
   if (decision === 'declined') { return {status: 'declined'}; }
   if (decision === 'timeout') { return {status: 'timeout'}; }
+  cal = calendarById(req.calendarId);
   if (!cal.writable()) { throw new Error('calendar_read_only'); }
   if (req.action !== 'create') { ev = verifiedEvent(cal, req); }
   var actual = null;

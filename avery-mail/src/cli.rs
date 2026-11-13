@@ -389,8 +389,8 @@ fn setup_calendars(
     console: &mut Console,
     rights: &mut Rights,
     required: bool,
+    listing: CalendarListing,
 ) -> Result<(), u8> {
-    let listing = list_calendars(ctx, console, rights)?;
     if listing.listed.is_empty() && listing.unreachable.is_empty() && listing.apple_ok {
         console.say("Kalender kennt noch keine Kalender.");
         return if required { Err(1) } else { Ok(()) };
@@ -490,13 +490,23 @@ fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
         Err(error) => return failed(console, &error),
     };
     let before = rights.clone();
+    let listing = if matches!(area, Area::All | Area::Calendar) {
+        match list_calendars(ctx, console, &rights) {
+            Ok(listing) => Some(listing),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
     if matches!(area, Area::All | Area::Mail) {
         if let Err(code) = setup_mail(ctx, console, &mut rights, area == Area::Mail) {
             return code;
         }
     }
-    if matches!(area, Area::All | Area::Calendar) {
-        if let Err(code) = setup_calendars(ctx, console, &mut rights, area == Area::Calendar) {
+    if let Some(listing) = listing {
+        if let Err(code) =
+            setup_calendars(ctx, console, &mut rights, area == Area::Calendar, listing)
+        {
             return code;
         }
     }
@@ -1302,7 +1312,7 @@ fn selftest_write_mail(
             "Testentwurf. Er wurde nicht gesendet.",
             None,
         );
-        match write_tools::perform_draft(ctx, account, &draft) {
+        match write_tools::perform_draft(ctx, account, &draft, Origin::Human) {
             Ok(preview) => console.say(&format!(
                 "PASS  Entwurf angelegt, Absender: {}{}",
                 one_line_str(&preview.from, 100),
@@ -1327,7 +1337,7 @@ fn selftest_write_mail(
                 "Test des Freigabedialogs. Du kannst diese Mail loeschen.",
                 None,
             );
-            match write_tools::perform_send(ctx, account, &send, settings.max_per_hour) {
+            match write_tools::perform_send(ctx, account, &send, Origin::Human) {
                 Err(error) => {
                     failures.push("send".into());
                     console.say(&format!("FAIL  Senden: {error}"));
@@ -1396,11 +1406,11 @@ fn selftest_write_mail(
                     console.say("   Jetzt erscheint der Freigabedialog fuer die Antwort (geht an dich selbst).");
                 }
                 let result = match mode {
-                    Mode::Draft => write_tools::perform_draft(ctx, account, &request),
-                    Mode::Send => {
-                        write_tools::perform_send(ctx, account, &request, settings.max_per_hour)
-                            .map(|(preview, _)| preview)
+                    Mode::Draft => {
+                        write_tools::perform_draft(ctx, account, &request, Origin::Human)
                     }
+                    Mode::Send => write_tools::perform_send(ctx, account, &request, Origin::Human)
+                        .map(|(preview, _)| preview),
                 };
                 match result {
                     Err(error) => {
@@ -1467,10 +1477,9 @@ fn selftest_write_calendar(
     ctx: &Context,
     console: &mut Console,
     calendar: &Calendar,
-    max_per_hour: i64,
     failures: &mut Vec<String>,
 ) {
-    let origin = Origin::Model { max_per_hour };
+    let origin = Origin::Human;
     let Some(start) = local_today()
         .and_then(|today| today.add_days(1))
         .and_then(|day| DateTime::new(day, 180))
@@ -1556,6 +1565,95 @@ fn selftest_write_calendar(
     console.say("INFO  Der Test-Termin bleibt in Calendar bestehen: bitte dort loeschen.");
 }
 
+fn selftest_write_all_day(
+    ctx: &Context,
+    console: &mut Console,
+    calendar: &Calendar,
+    failures: &mut Vec<String>,
+) {
+    let Some(first) = local_today().and_then(|today| today.add_days(3)) else {
+        failures.push("clock".to_string());
+        console.say("FAIL  Datum nicht lesbar");
+        return;
+    };
+    let Some(next) = first.add_days(1) else {
+        failures.push("clock".to_string());
+        console.say("FAIL  Datum ausserhalb des Bereichs");
+        return;
+    };
+    if !console.confirm(
+        "Ganztaegigen Test-Termin anlegen? Das prueft, wie Calendar das Ende von Ganztagsterminen speichert. [j/N] ",
+    ) {
+        return;
+    }
+    let fields = EventFields {
+        summary: "Scout Selbsttest - Ganztag (bitte loeschen)".to_string(),
+        start: DateTime::midnight(first),
+        end: DateTime::midnight(next),
+        all_day: true,
+        location: String::new(),
+        notes: String::new(),
+        url: String::new(),
+    };
+    let created = perform(
+        ctx,
+        calendar,
+        &Change::Create {
+            after: fields.clone(),
+        },
+        Origin::Human,
+        None,
+    );
+    let Some(created) = change_line(console, failures, "Ganztagstermin angelegt", created) else {
+        return;
+    };
+    let Some(uid) = created.uid.clone() else {
+        failures.push("uid".to_string());
+        console.say("FAIL  Calendar nannte keine Termin-ID");
+        return;
+    };
+    let stored = ctx
+        .calendar
+        .event(calendar, &uid)
+        .map(|detail| EventFields::of(&detail));
+    match stored {
+        Ok(stored)
+            if stored.all_day && stored.start == fields.start && stored.end == fields.end =>
+        {
+            console.say("PASS  Ganztags-Ende wie erwartet (00:00 des Folgetags)");
+        }
+        Ok(stored) => {
+            failures.push("all-day".to_string());
+            console.say(&format!(
+                "FAIL  Ganztagstermin gespeichert als {} bis {} (ganztaegig: {}), erwartet {} bis {}",
+                stored.start, stored.end, stored.all_day, fields.start, fields.end
+            ));
+        }
+        Err(error) => {
+            failures.push("all-day".to_string());
+            console.say(&format!("FAIL  Ganztagstermin nicht lesbar: {error}"));
+        }
+    }
+    let current = created.after.clone().unwrap_or(fields);
+    if console.confirm("Ganztaegigen Test-Termin loeschen? Der Freigabedialog erscheint. [j/N] ") {
+        let change = Change::Delete {
+            uid,
+            before: current,
+        };
+        if change_line(
+            console,
+            failures,
+            "Ganztagstermin geloescht",
+            perform(ctx, calendar, &change, Origin::Human, None),
+        )
+        .is_some()
+        {
+            return;
+        }
+    }
+    console.say("INFO  Der Ganztags-Test-Termin bleibt bestehen: bitte im Kalender loeschen.");
+}
+
 fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
     let settings = (|| {
         let mail = ctx.settings.write_settings()?;
@@ -1579,13 +1677,8 @@ fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
         selftest_write_mail(ctx, console, &mail, &mut failures);
     }
     for calendar in &calendars.calendars {
-        selftest_write_calendar(
-            ctx,
-            console,
-            calendar,
-            calendars.max_per_hour,
-            &mut failures,
-        );
+        selftest_write_calendar(ctx, console, calendar, &mut failures);
+        selftest_write_all_day(ctx, console, calendar, &mut failures);
     }
     console.say("");
     if !failures.is_empty() {
@@ -2312,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn selftest_write_respects_the_send_limits() -> TestResult {
+    fn selftest_write_neither_uses_nor_obeys_the_limits_of_the_model() -> TestResult {
         let dir = TempDir::new()?;
         let options = FakeOptions {
             approve: "yes".into(),
@@ -2325,12 +2418,39 @@ mod tests {
             let entry = log_entry(now - 1000 - index, Outcome::Sent, None);
             sendlog::append(&ctx.settings, &entry, true)?;
         }
-        let (code, out) = run(&ctx, &["selftest-write"], "j\n");
-        assert_eq!(code, 1, "{out}");
-        assert!(out.contains("FAIL  Senden: Send limit reached (5 per hour)"));
-        assert!(!fs::read_to_string(dir.path("outbox.jsonl"))
-            .unwrap_or_default()
-            .contains("\"status\": \"sent\""));
+        let (code, out) = run(&ctx, &["selftest-write"], "j\nn\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("an Mail uebergeben"), "{out}");
+        assert!(fs::read_to_string(dir.path("outbox.jsonl"))?.contains("\"status\": \"sent\""));
+        let view = sendlog::read_entries(&ctx.settings, 50)?;
+        let human = view
+            .entries
+            .iter()
+            .filter(|entry| entry.by == crate::journal::By::Human)
+            .count();
+        assert!(human >= 3, "{human}");
+        let blocked = sendlog::check_send_limits(&view.entries, now + 10, 5);
+        assert!(
+            matches!(blocked, Err(ToolError::Msg(m)) if m.starts_with("Send limit reached (5"))
+        );
+        let fresh = TempDir::new()?;
+        let options = FakeOptions {
+            approve: "yes".into(),
+            outbox: Some(fresh.path("outbox.jsonl")),
+            ..FakeOptions::default()
+        };
+        let clean = context(&fresh, true, "FAKE-GMAIL", None, options)?;
+        let (code, out) = run(&clean, &["selftest-write"], "j\nn\n");
+        assert_eq!(code, 0, "{out}");
+        let after = sendlog::read_entries(&clean.settings, 50)?;
+        assert_eq!(
+            sendlog::check_send_limits(&after.entries, journal::now_seconds(), 5),
+            Ok(())
+        );
+        assert_eq!(
+            sendlog::check_draft_limit(&after.entries, journal::now_seconds()),
+            Ok(())
+        );
         Ok(())
     }
 
@@ -2666,6 +2786,7 @@ mod tests {
                 id: format!("old{index}"),
                 action: crate::calendar::Action::Create,
                 outcome: crate::changelog::Outcome::Done,
+                by: crate::journal::By::Model,
                 calendar_id: "FAKE-CAL-PRIVAT".into(),
                 calendar: "Demo Privat".into(),
                 uid: None,
@@ -2703,12 +2824,15 @@ mod tests {
     fn selftest_write_walks_through_create_change_and_delete_of_a_test_event() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = writer(&dir, "yes")?;
-        let (code, out) = run(&ctx, &["selftest-write"], "j\nj\nj\n");
+        let (code, out) = run(&ctx, &["selftest-write"], "j\nj\nj\nj\nj\n");
         assert_eq!(code, 0, "{out}");
         assert!(!out.contains("Freigabedialog funktioniert"), "{out}");
         assert!(out.contains("PASS  Termin angelegt"));
         assert!(out.contains("PASS  Termin geaendert"));
         assert!(out.contains("PASS  Termin geloescht"));
+        assert!(out.contains("PASS  Ganztagstermin angelegt"));
+        assert!(out.contains("PASS  Ganztags-Ende wie erwartet (00:00 des Folgetags)"));
+        assert!(out.contains("PASS  Ganztagstermin geloescht"));
         assert!(out.contains("Fertig."));
         assert!(found(&ctx, "fake-new-1").is_err());
         let log = crate::changelog::read_entries(&ctx.settings, 20)?;
@@ -2726,6 +2850,10 @@ mod tests {
                 ("update", "done"),
                 ("delete", "pending"),
                 ("delete", "done"),
+                ("create", "pending"),
+                ("create", "done"),
+                ("delete", "pending"),
+                ("delete", "done"),
             ]
         );
         let (code, out) = run(&ctx, &["selftest-write"], "n\n");
@@ -2736,6 +2864,45 @@ mod tests {
         let (code, out) = run(&declining, &["selftest-write"], "j\n");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("INFO  Termin angelegt: im Dialog abgelehnt, nichts geaendert"));
+        Ok(())
+    }
+
+    #[test]
+    fn selftest_write_of_several_calendars_leaves_the_budget_of_the_model_alone() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = context(
+            &dir,
+            true,
+            "FAKE-CAL-PRIVAT,FAKE-CAL-FAMILIE",
+            None,
+            FakeOptions {
+                approve: "yes".to_string(),
+                ..FakeOptions::default()
+            },
+        )?;
+        let (code, out) = run(&ctx, &["selftest-write"], &"j\n".repeat(10));
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(out.matches("PASS  Termin angelegt").count(), 2, "{out}");
+        let log = crate::changelog::read_entries(&ctx.settings, 50)?;
+        assert_eq!(log.entries.len(), 20);
+        assert!(log
+            .entries
+            .iter()
+            .all(|entry| entry.by == crate::journal::By::Human));
+        let now = journal::now_seconds();
+        assert_eq!(
+            crate::changelog::check_limits(&log.entries, now, 10),
+            Ok(())
+        );
+        assert!(crate::changelog::undoable(&log.entries).is_empty());
+        let declining = TempDir::new()?;
+        let ctx = writer(&declining, "no")?;
+        run(&ctx, &["selftest-write"], "j\n");
+        let log = crate::changelog::read_entries(&ctx.settings, 50)?;
+        assert_eq!(
+            crate::changelog::check_limits(&log.entries, journal::now_seconds(), 10),
+            Ok(())
+        );
         Ok(())
     }
 
@@ -3290,6 +3457,33 @@ mod tests {
             .map_err(|e| e.message())?;
         assert_eq!(rights.calendar_level("APPLE-1"), Some(Level::Write));
         assert_eq!(rights.mail_level("ACC-1"), Some(Level::Read));
+        Ok(())
+    }
+
+    #[test]
+    fn setup_fails_before_the_first_question_when_the_calendars_cannot_be_listed() -> TestResult {
+        let dir = TempDir::new()?;
+        let calendars = CloudCalendars {
+            apple: Err(ToolError::msg("Calendar is closed")),
+            cloud: Vec::new(),
+        };
+        let cloud = cloudy(
+            &dir,
+            r#"{"version": 3}"#,
+            &[],
+            calendars,
+            crate::cloud::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["setup"], "1\n1\n1\n1\nj\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Fehler: Calendar is closed"), "{out}");
+        assert!(!out.contains("Mail-Konten."), "{out}");
+        assert!(!out.contains("Stufe 0=aus"), "{out}");
+        assert_eq!(
+            fs::read_to_string(&cloud.ctx.settings.config_path)?,
+            r#"{"version": 3}"#
+        );
         Ok(())
     }
 

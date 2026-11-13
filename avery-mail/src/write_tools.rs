@@ -2,7 +2,7 @@ use crate::account::Account;
 use crate::backend::{ComposeRequest, MessageId, Mode, Preview, ReplySpec};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
-use crate::journal;
+use crate::journal::{self, By, Origin};
 use crate::json::{Json, Object};
 use crate::sendlog::{self, LogEntry, Outcome};
 use crate::text::{bracketed, char_len, clean, clean_str, one_line, one_line_str, to_bool};
@@ -212,24 +212,32 @@ pub(crate) fn compose_request(
     ))
 }
 
-fn log_attempt(
-    ctx: &Context,
-    account: &Account,
-    request: &ComposeRequest,
-    outcome: Outcome,
-    preview: Option<&Preview>,
-    id: Option<&str>,
-    strict: bool,
-) -> ToolResult<()> {
-    let entry = LogEntry::for_attempt(
-        journal::now_seconds(),
-        &account.label,
-        request,
-        outcome,
-        preview,
-        id,
-    );
-    sendlog::append(&ctx.settings, &entry, strict)
+struct Attempt<'a> {
+    ctx: &'a Context,
+    account: &'a Account,
+    request: &'a ComposeRequest,
+    by: By,
+}
+
+impl Attempt<'_> {
+    fn log(
+        &self,
+        outcome: Outcome,
+        preview: Option<&Preview>,
+        id: Option<&str>,
+        strict: bool,
+    ) -> ToolResult<()> {
+        let entry = LogEntry::for_attempt(
+            journal::now_seconds(),
+            &self.account.label,
+            self.request,
+            outcome,
+            self.by,
+            preview,
+            id,
+        );
+        sendlog::append(&self.ctx.settings, &entry, strict)
+    }
 }
 
 fn summary(preview: &Preview) -> String {
@@ -256,12 +264,14 @@ fn summary(preview: &Preview) -> String {
     lines.join("\n")
 }
 
-fn guard(ctx: &Context, mode: Mode, max_per_hour: i64) -> ToolResult<()> {
+fn guard(ctx: &Context, mode: Mode, origin: Origin) -> ToolResult<()> {
     let now = journal::now_seconds();
     let history = sendlog::read_window(&ctx.settings, now)?;
-    match mode {
-        Mode::Send => sendlog::check_send_limits(&history.entries, now, max_per_hour)?,
-        Mode::Draft => sendlog::check_draft_limit(&history.entries, now)?,
+    if let Origin::Model { max_per_hour } = origin {
+        match mode {
+            Mode::Send => sendlog::check_send_limits(&history.entries, now, max_per_hour)?,
+            Mode::Draft => sendlog::check_draft_limit(&history.entries, now)?,
+        }
     }
     sendlog::ensure_writable(&ctx.settings)
 }
@@ -270,24 +280,23 @@ pub(crate) fn perform_draft(
     ctx: &Context,
     account: &Account,
     request: &ComposeRequest,
+    origin: Origin,
 ) -> ToolResult<Preview> {
-    guard(ctx, Mode::Draft, 0)?;
+    guard(ctx, Mode::Draft, origin)?;
+    let attempt = Attempt {
+        ctx,
+        account,
+        request,
+        by: origin.by(),
+    };
     match ctx.backend.compose(account, request) {
         Ok(preview) => {
-            log_attempt(
-                ctx,
-                account,
-                request,
-                Outcome::Drafted,
-                Some(&preview),
-                None,
-                false,
-            )?;
+            attempt.log(Outcome::Drafted, Some(&preview), None, false)?;
             Ok(preview)
         }
         Err(error) => {
             if error.is_tool_error() {
-                log_attempt(ctx, account, request, Outcome::Error, None, None, false)?;
+                attempt.log(Outcome::Error, None, None, false)?;
             }
             Err(error)
         }
@@ -298,51 +307,33 @@ pub(crate) fn perform_send(
     ctx: &Context,
     account: &Account,
     request: &ComposeRequest,
-    max_per_hour: i64,
+    origin: Origin,
 ) -> ToolResult<(Preview, Outcome)> {
-    guard(ctx, Mode::Send, max_per_hour)?;
+    guard(ctx, Mode::Send, origin)?;
     let id = journal::attempt_id()?;
-    log_attempt(
+    let attempt = Attempt {
         ctx,
         account,
         request,
-        Outcome::Pending,
-        None,
-        Some(&id),
-        true,
-    )?;
+        by: origin.by(),
+    };
+    attempt.log(Outcome::Pending, None, Some(&id), true)?;
     let preview = match ctx.backend.compose(account, request) {
         Ok(preview) => preview,
         Err(ToolError::Msg(message)) => {
-            log_attempt(
-                ctx,
-                account,
-                request,
-                Outcome::Error,
-                None,
-                Some(&id),
-                false,
-            )?;
+            attempt.log(Outcome::Error, None, Some(&id), false)?;
             return Err(ToolError::Msg(message));
         }
         Err(other) => return Err(other),
     };
     let outcome = Outcome::from_status(&preview.status);
-    log_attempt(
-        ctx,
-        account,
-        request,
-        outcome,
-        Some(&preview),
-        Some(&id),
-        false,
-    )?;
+    attempt.log(outcome, Some(&preview), Some(&id), false)?;
     Ok((preview, outcome))
 }
 
 pub(crate) fn create_draft(ctx: &Context, args: &Object) -> ToolResult<String> {
-    let (account, _, request) = compose_request(ctx, args, Mode::Draft)?;
-    let preview = perform_draft(ctx, &account, &request)?;
+    let (account, max_per_hour, request) = compose_request(ctx, args, Mode::Draft)?;
+    let preview = perform_draft(ctx, &account, &request, Origin::Model { max_per_hour })?;
     let note = if preview.saved.unwrap_or(true) {
         ""
     } else {
@@ -356,7 +347,7 @@ pub(crate) fn create_draft(ctx: &Context, args: &Object) -> ToolResult<String> {
 
 pub(crate) fn send_message(ctx: &Context, args: &Object) -> ToolResult<String> {
     let (account, max_per_hour, request) = compose_request(ctx, args, Mode::Send)?;
-    let (preview, outcome) = perform_send(ctx, &account, &request, max_per_hour)?;
+    let (preview, outcome) = perform_send(ctx, &account, &request, Origin::Model { max_per_hour })?;
     Ok(match outcome {
         Outcome::Sent => format!(
             "Sent: the user approved and Mail took the message for delivery.\n{UNTRUSTED}\n{}",
