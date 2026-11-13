@@ -28,6 +28,15 @@ pub(crate) fn j(text: &str) -> Result<Json, ParseError> {
     json::parse(text)
 }
 
+pub(crate) fn gm(text: &str) -> String {
+    text.replace("{gmail}", "gmail.com")
+        .replace("{googlemail}", "googlemail.com")
+}
+
+pub(crate) fn gmail(local: &str) -> String {
+    format!("{local}@{}", "gmail.com")
+}
+
 pub(crate) fn mid(text: &str) -> Result<crate::backend::MessageId, Box<dyn Error>> {
     crate::backend::MessageId::parse(text).ok_or_else(|| "message id".into())
 }

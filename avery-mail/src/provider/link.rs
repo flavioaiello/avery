@@ -605,7 +605,9 @@ pub(crate) mod fakes {
                 Method::Get,
                 "openidconnect.googleapis.com",
                 200,
-                r#"{"sub": "1", "email": "Alice@Gmail.com", "email_verified": true}"#,
+                &crate::testutil::gm(
+                    r#"{"sub": "1", "email": "Alice@{gmail}", "email_verified": true}"#,
+                ),
             )
     }
     pub(crate) fn record(scope: &str) -> Record {
@@ -632,7 +634,7 @@ mod tests {
     use super::*;
     use crate::http::scripted::Scripted;
     use crate::http::HttpError;
-    use crate::testutil::TestResult;
+    use crate::testutil::{gm, TestResult};
     use crate::vault::memory::Memory;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -817,7 +819,7 @@ mod tests {
         assert_eq!(
             linked,
             Linked {
-                address: "alice@gmail.com".to_string(),
+                address: gm("alice@{gmail}"),
                 write_mail: false,
                 write_calendar: false
             }
@@ -890,8 +892,8 @@ mod tests {
             .headers
             .iter()
             .any(|(name, value)| name == "Authorization" && value == "Bearer ya29.a"));
-        let stored =
-            Record::parse(&vault.get("google:alice@gmail.com").ok_or("stored")?).ok_or("record")?;
+        let stored = Record::parse(&vault.get(&gm("google:alice@{gmail}")).ok_or("stored")?)
+            .ok_or("record")?;
         assert_eq!(stored.refresh_token, "1//r");
         assert_eq!(stored.client_id, "123-abc.apps.example");
         assert_eq!(stored.client_secret.as_deref(), Some("GOCSPX-secret_1"));
@@ -1217,9 +1219,11 @@ mod tests {
     ) -> TestResult {
         for email in [
             "alice@firma.example",
-            "x@gmail.com.evil.example",
-            "x@evilgmail.com",
-        ] {
+            "x@{gmail}.evil.example",
+            "x@evil{gmail}",
+        ]
+        .map(gm)
+        {
             let transport = Scripted::new()
                 .json(Method::Post, "/token", 200, GOOGLE_TOKENS)
                 .json(

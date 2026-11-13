@@ -3,7 +3,7 @@ use super::*;
 use crate::context::Context;
 use crate::http::scripted::{Scripted, Shared};
 use crate::osascript::clicks::Clicks;
-use crate::testutil::{args, settings_at, TempDir, TestResult, Untouchable};
+use crate::testutil::{args, gmail, settings_at, TempDir, TestResult, Untouchable};
 use crate::vault::memory::{Memory, Shared as SharedVault};
 use std::error::Error;
 use std::fs;
@@ -1078,25 +1078,28 @@ fn object(text: &str) -> Result<Object, String> {
     crate::testutil::args(text)
 }
 
+fn userinfo(email: &str, extra: &str) -> String {
+    format!(r#"{{"email": "{email}"{extra}}}"#)
+}
+
 #[test]
 fn google_accepts_only_gmail_and_googlemail_addresses() -> TestResult {
     let google = Provider::Google.oauth().ok_or("google")?;
-    for (answer, address) in [
+    let verified = r#", "email_verified": true"#;
+    for ((local, domain, extra), (wanted_local, wanted_domain)) in [
+        (("Alice", "Gmail.com", verified), ("alice", "gmail.com")),
+        (("alice", "gmail.com", ""), ("alice", "gmail.com")),
         (
-            r#"{"email": "Alice@Gmail.com", "email_verified": true}"#,
-            "alice@gmail.com",
+            ("bob", "googlemail.com", verified),
+            ("bob", "googlemail.com"),
         ),
-        (r#"{"email": "alice@gmail.com"}"#, "alice@gmail.com"),
-        (
-            r#"{"email": "bob@googlemail.com", "email_verified": true}"#,
-            "bob@googlemail.com",
-        ),
-        (r#"{"email": "BOB@GOOGLEMAIL.COM"}"#, "bob@googlemail.com"),
-        (r#"{"email": "A.B+c@GMail.Com"}"#, "a.b+c@gmail.com"),
+        (("BOB", "GOOGLEMAIL.COM", ""), ("bob", "googlemail.com")),
+        (("A.B+c", "GMail.Com", ""), ("a.b+c", "gmail.com")),
     ] {
+        let answer = userinfo(&format!("{local}@{domain}"), extra);
         assert_eq!(
-            (google.identify)(&object(answer)?),
-            Ok(address.to_string()),
+            (google.identify)(&object(&answer)?),
+            Ok(format!("{wanted_local}@{wanted_domain}")),
             "{answer}"
         );
     }
@@ -1106,25 +1109,22 @@ fn google_accepts_only_gmail_and_googlemail_addresses() -> TestResult {
 #[test]
 fn google_refuses_every_other_domain_and_names_the_reason() -> TestResult {
     let google = Provider::Google.oauth().ok_or("google")?;
-    for (email, domain) in [
-        ("alice@firma.example", "firma.example"),
-        ("alice@example.org", "example.org"),
-        ("x@gmail.com.evil.example", "gmail.com.evil.example"),
-        ("x@evilgmail.com", "evilgmail.com"),
-        (
-            "x@googlemail.com.evil.example",
-            "googlemail.com.evil.example",
-        ),
-        ("x@notgooglemail.com", "notgooglemail.com"),
-        ("x@mail.gmail.com", "mail.gmail.com"),
-        ("x@gmail.co", "gmail.co"),
-        ("x@gmail.de", "gmail.de"),
-        ("x@gmaill.com", "gmaill.com"),
-        ("x@gmail-com.example", "gmail-com.example"),
-        ("gmail.com@firma.example", "firma.example"),
+    for (local, domain) in [
+        ("alice", "firma.example"),
+        ("alice", "example.org"),
+        ("x", "gmail.com.evil.example"),
+        ("x", "evilgmail.com"),
+        ("x", "googlemail.com.evil.example"),
+        ("x", "notgooglemail.com"),
+        ("x", "mail.gmail.com"),
+        ("x", "gmail.co"),
+        ("x", "gmail.de"),
+        ("x", "gmaill.com"),
+        ("x", "gmail-com.example"),
+        ("gmail.com", "firma.example"),
     ] {
         for extra in ["", r#", "email_verified": true"#] {
-            let answer = format!(r#"{{"email": "{email}"{extra}}}"#);
+            let answer = userinfo(&format!("{local}@{domain}"), extra);
             let error = (google.identify)(&object(&answer)?)
                 .err()
                 .ok_or_else(|| format!("accepted: {answer}"))?;
@@ -1139,7 +1139,7 @@ fn google_refuses_every_other_domain_and_names_the_reason() -> TestResult {
         }
     }
     let long = format!("x@{}.example", "a".repeat(200));
-    let error = (google.identify)(&object(&format!(r#"{{"email": "{long}"}}"#))?)
+    let error = (google.identify)(&object(&userinfo(&long, ""))?)
         .err()
         .ok_or("accepted")?;
     assert!(error.len() < 400, "{error}");
@@ -1149,30 +1149,30 @@ fn google_refuses_every_other_domain_and_names_the_reason() -> TestResult {
 #[test]
 fn google_refuses_an_address_that_is_not_verified_or_not_usable() -> TestResult {
     let google = Provider::Google.oauth().ok_or("google")?;
+    let alice = gmail("alice");
+    let domain = "gmail.com";
     for bad in [
-        r#"{"email": "alice@gmail.com", "email_verified": false}"#,
-        r#"{"email": "alice@gmail.com", "email_verified": "true"}"#,
-        r#"{"email": "alice@gmail.com", "email_verified": null}"#,
-        r#"{"email": "alice@gmail.com", "email_verified": 1}"#,
-        r#"{"email": "alice@gmail.com", "email_verified": []}"#,
-        r#"{"email": "nonsense"}"#,
-        r#"{"email": "alice@gmail.com\u200b"}"#,
-        r#"{"email": " alice@gmail.com"}"#,
-        r#"{"email": "alice@gmail.com@evil.example"}"#,
-        r#"{"email": "alice@gmail.com."}"#,
-        r#"{"email": "\u00e4@gmail.com"}"#,
-        r#"{"email": ""}"#,
-        r#"{"sub": "1"}"#,
-        r#"{"email": 5}"#,
-        r#"{"email": ["alice@gmail.com"]}"#,
+        userinfo(&alice, r#", "email_verified": false"#),
+        userinfo(&alice, r#", "email_verified": "true""#),
+        userinfo(&alice, r#", "email_verified": null"#),
+        userinfo(&alice, r#", "email_verified": 1"#),
+        userinfo(&alice, r#", "email_verified": []"#),
+        userinfo("nonsense", ""),
+        userinfo(&format!("{alice}\\u200b"), ""),
+        userinfo(&format!(" {alice}"), ""),
+        userinfo(&format!("{alice}@evil.example"), ""),
+        userinfo(&format!("{alice}."), ""),
+        userinfo(&format!("\\u00e4@{domain}"), ""),
+        userinfo("", ""),
+        r#"{"sub": "1"}"#.to_string(),
+        r#"{"email": 5}"#.to_string(),
+        format!(r#"{{"email": ["{alice}"]}}"#),
     ] {
-        assert!((google.identify)(&object(bad)?).is_err(), "{bad}");
+        assert!((google.identify)(&object(&bad)?).is_err(), "{bad}");
     }
-    let error = (google.identify)(&object(
-        r#"{"email": "alice@gmail.com", "email_verified": false}"#,
-    )?)
-    .err()
-    .ok_or("accepted")?;
+    let error = (google.identify)(&object(&userinfo(&alice, r#", "email_verified": false"#))?)
+        .err()
+        .ok_or("accepted")?;
     assert!(error.contains("not verified"), "{error}");
     Ok(())
 }
@@ -1565,9 +1565,9 @@ fn ids_without_a_provider_prefix_are_apple_ids() {
         );
     }
     for id in [
-        "google:alice@gmail.com",
+        "google:alice@gmail.example",
         "microsoft:bob@outlook.example",
-        "google:alice@gmail.com:primary",
+        "google:alice@gmail.example:primary",
         "microsoft:x",
     ] {
         assert!(!Provider::is_apple_id(id), "{id}");

@@ -2066,7 +2066,7 @@ mod tests {
     use crate::journal;
     use crate::json::Json;
     use crate::provider::Linker;
-    use crate::testutil::{j, log_entry, settings_at, TempDir, TestResult, Untouchable};
+    use crate::testutil::{gm, j, log_entry, settings_at, TempDir, TestResult, Untouchable};
     use std::fs;
     use std::io::{BufRead, Cursor, Read};
 
@@ -3411,8 +3411,8 @@ mod tests {
          "calendars": [{"id": "AQMk", "name": "Calendar (bob@outlook.example)", "level": "read"}]}]}"#;
 
     const LINKED_GMAIL: &str = r#"{"version": 3, "accounts": [
-        {"provider": "google", "address": "alice@gmail.com", "mail": "write",
-         "calendars": [{"id": "alice@gmail.com", "name": "alice@gmail.com", "level": "write"}]},
+        {"provider": "google", "address": "alice@{gmail}", "mail": "write",
+         "calendars": [{"id": "alice@{gmail}", "name": "alice@{gmail}", "level": "write"}]},
         {"provider": "microsoft", "address": "bob@outlook.example",
          "calendars": [{"id": "AQMk", "name": "Calendar (bob@outlook.example)", "level": "read"}]}]}"#;
 
@@ -3454,7 +3454,7 @@ mod tests {
         );
         assert_eq!(code, 0, "{out}");
         assert!(
-            out.contains("Verbunden: alice@gmail.com (gmail). Mail: lesen."),
+            out.contains(&gm("Verbunden: alice@{gmail} (gmail). Mail: lesen.")),
             "{out}"
         );
         assert!(out.contains("https://accounts.google.com/o/oauth2/v2/auth?"));
@@ -3462,12 +3462,12 @@ mod tests {
         let config = saved(&cloud.ctx)?;
         assert_eq!(
             section(&config, "accounts"),
-            Some(&j(
-                r#"[{"provider": "google", "address": "alice@gmail.com", "mail": "read"}]"#
-            )?)
+            Some(&j(&gm(
+                r#"[{"provider": "google", "address": "alice@{gmail}", "mail": "read"}]"#
+            ))?)
         );
         assert!(section(&config, "apple").is_none());
-        assert!(cloud.vault.get("google:alice@gmail.com").is_some());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_some());
         assert!(!fs::read_to_string(&cloud.ctx.settings.config_path)?.contains("GOCSPX"));
         assert!(!out.contains("ya29"));
         assert_eq!(cloud.apple.calls(), 0);
@@ -3489,7 +3489,7 @@ mod tests {
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Mail: schreiben."), "{out}");
         assert_eq!(
-            stored(&cloud)?.mail_level("google:alice@gmail.com"),
+            stored(&cloud)?.mail_level(&gm("google:alice@{gmail}")),
             Some(Level::Write)
         );
         let second = TempDir::new()?;
@@ -3508,7 +3508,7 @@ mod tests {
             fs::read_to_string(&again.ctx.settings.config_path)?,
             r#"{"version": 3}"#
         );
-        assert!(again.vault.get("google:alice@gmail.com").is_none());
+        assert!(again.vault.get(&gm("google:alice@{gmail}")).is_none());
         Ok(())
     }
 
@@ -3517,8 +3517,8 @@ mod tests {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
-            LINKED_GMAIL,
-            &[("google:alice@gmail.com", WRITE_SCOPE)],
+            &gm(LINKED_GMAIL),
+            &[(gm("google:alice@{gmail}").as_str(), WRITE_SCOPE)],
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(false)),
@@ -3526,31 +3526,33 @@ mod tests {
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 0, "{out}");
         assert!(
-            out.contains("Erneut verbunden: alice@gmail.com (gmail)"),
+            out.contains(&gm("Erneut verbunden: alice@{gmail} (gmail)")),
             "{out}"
         );
         let rights = stored(&cloud)?;
         assert_eq!(rights.accounts.len(), 2);
         assert_eq!(
-            rights.mail_level("google:alice@gmail.com"),
+            rights.mail_level(&gm("google:alice@{gmail}")),
             Some(Level::Read)
         );
         assert_eq!(
-            rights.calendar_level("google:alice@gmail.com:alice@gmail.com"),
+            rights.calendar_level(&gm("google:alice@{gmail}:alice@{gmail}")),
             Some(Level::Read)
         );
         assert_eq!(
             rights.calendar_level("microsoft:bob@outlook.example:AQMk"),
             Some(Level::Read)
         );
-        let kept = crate::provider::fakes::stored_scope(&cloud.vault, "google:alice@gmail.com");
+        let kept = crate::provider::fakes::stored_scope(&cloud.vault, &gm("google:alice@{gmail}"));
         assert!(!kept.contains("gmail.compose"), "{kept}");
 
         let second = TempDir::new()?;
-        let off = r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.com", "calendars": [{"id": "alice@gmail.com", "level": "read"}]}]}"#;
+        let off = gm(
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@{gmail}", "calendars": [{"id": "alice@{gmail}", "level": "read"}]}]}"#,
+        );
         let again = cloudy(
             &second,
-            off,
+            &off,
             &[],
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
@@ -3559,12 +3561,12 @@ mod tests {
         let (code, out) = run(&again.ctx, &["link", "google"], "id1\nsecret1\n2\n");
         assert_eq!(code, 0, "{out}");
         let rights = stored(&again)?;
-        assert_eq!(rights.mail_level("google:alice@gmail.com"), None);
+        assert_eq!(rights.mail_level(&gm("google:alice@{gmail}")), None);
         assert_eq!(
-            rights.calendar_level("google:alice@gmail.com:alice@gmail.com"),
+            rights.calendar_level(&gm("google:alice@{gmail}:alice@{gmail}")),
             Some(Level::Read)
         );
-        assert!(again.vault.get("google:alice@gmail.com").is_some());
+        assert!(again.vault.get(&gm("google:alice@{gmail}")).is_some());
         Ok(())
     }
 
@@ -3635,9 +3637,11 @@ mod tests {
     {
         for email in [
             "alice@firma.example",
-            "x@gmail.com.evil.example",
-            "x@evilgmail.com",
-        ] {
+            "x@{gmail}.evil.example",
+            "x@evil{gmail}",
+        ]
+        .map(gm)
+        {
             let dir = TempDir::new()?;
             let transport = crate::http::scripted::Scripted::new()
                 .json(
@@ -3811,11 +3815,13 @@ mod tests {
     fn an_address_that_is_linked_at_another_provider_is_refused_and_the_new_sign_in_removed(
     ) -> TestResult {
         let dir = TempDir::new()?;
-        let config = r#"{"version": 3, "accounts": [{"provider": "microsoft", "address": "alice@gmail.com", "mail": "read"}]}"#;
+        let config = gm(
+            r#"{"version": 3, "accounts": [{"provider": "microsoft", "address": "alice@{gmail}", "mail": "read"}]}"#,
+        );
         let cloud = cloudy(
             &dir,
-            config,
-            &[("microsoft:alice@gmail.com", "Mail.Read")],
+            &config,
+            &[(gm("microsoft:alice@{gmail}").as_str(), "Mail.Read")],
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(false)),
@@ -3823,12 +3829,12 @@ mod tests {
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 1, "{out}");
         assert!(
-            out.contains("Die Adresse alice@gmail.com ist schon bei Outlook.com verbunden. Eine Adresse kann nur einmal verbunden werden. Zuerst trennen: avery mail unlink microsoft:alice@gmail.com"),
+            out.contains(&gm("Die Adresse alice@{gmail} ist schon bei Outlook.com verbunden. Eine Adresse kann nur einmal verbunden werden. Zuerst trennen: avery mail unlink microsoft:alice@{gmail}")),
             "{out}"
         );
         assert!(out.contains("wieder entfernt"), "{out}");
-        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
-        assert!(cloud.vault.get("microsoft:alice@gmail.com").is_some());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
+        assert!(cloud.vault.get(&gm("microsoft:alice@{gmail}")).is_some());
         assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, config);
         Ok(())
     }
@@ -3851,8 +3857,8 @@ mod tests {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
-            &sixteen(Some("alice@gmail.com")),
-            &[("google:alice@gmail.com", WRITE_SCOPE)],
+            &sixteen(Some(&gm("alice@{gmail}"))),
+            &[(gm("google:alice@{gmail}").as_str(), WRITE_SCOPE)],
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(false)),
@@ -3865,20 +3871,20 @@ mod tests {
         );
         assert!(out.contains("Client-ID:"), "{out}");
         assert!(
-            out.contains("Erneut verbunden: alice@gmail.com (gmail). Mail: lesen."),
+            out.contains(&gm("Erneut verbunden: alice@{gmail} (gmail). Mail: lesen.")),
             "{out}"
         );
         let rights = stored(&cloud)?;
         assert_eq!(rights.accounts.len(), 16);
         assert_eq!(
-            rights.mail_level("google:alice@gmail.com"),
+            rights.mail_level(&gm("google:alice@{gmail}")),
             Some(Level::Read)
         );
         assert_eq!(
-            rights.calendar_level("google:alice@gmail.com:primary"),
+            rights.calendar_level(&gm("google:alice@{gmail}:primary")),
             Some(Level::Read)
         );
-        assert!(cloud.vault.get("google:alice@gmail.com").is_some());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_some());
         Ok(())
     }
 
@@ -3907,7 +3913,7 @@ mod tests {
         );
         assert!(out.contains("wieder entfernt"), "{out}");
         assert!(!out.contains("Verbunden:"), "{out}");
-        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
         assert_eq!(fs::read_to_string(&cloud.ctx.settings.config_path)?, full);
         Ok(())
     }
@@ -4378,8 +4384,8 @@ mod tests {
         let other = second_terminal(&dir);
         let cloud = meddled(
             &dir,
-            LINKED_GMAIL,
-            &[("google:alice@gmail.com", WRITE_SCOPE)],
+            &gm(LINKED_GMAIL),
+            &[(gm("google:alice@{gmail}").as_str(), WRITE_SCOPE)],
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(true)),
@@ -4390,7 +4396,7 @@ mod tests {
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n2\n");
         assert_eq!(code, 0, "{out}");
         assert!(
-            out.contains("Erneut verbunden: alice@gmail.com (gmail). Mail: aus."),
+            out.contains(&gm("Erneut verbunden: alice@{gmail} (gmail). Mail: aus.")),
             "{out}"
         );
         let rights = stored(&cloud)?;
@@ -4444,9 +4450,9 @@ mod tests {
         assert!(out.contains("Es sind schon 16 Konten verbunden"), "{out}");
         assert_eq!(stored(&cloud)?.accounts.len(), 16);
         assert!(stored(&cloud)?
-            .account(Provider::Google, "alice@gmail.com")
+            .account(Provider::Google, &gm("alice@{gmail}"))
             .is_none());
-        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
         Ok(())
     }
 
@@ -4725,7 +4731,7 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("Verbunden:"), "{out}");
-        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
         assert_eq!(
             fs::read_to_string(&cloud.ctx.settings.config_path)?,
             r#"{"version": 3}"#
@@ -4733,7 +4739,7 @@ mod tests {
         held.unlock()?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 0, "{out}");
-        assert!(cloud.vault.get("google:alice@gmail.com").is_some());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_some());
         Ok(())
     }
 
@@ -4775,13 +4781,14 @@ mod tests {
             if undeletable {
                 assert!(
                     out.contains("Die eben im Schluesselbund gespeicherte Anmeldung blieb")
-                        && out.contains("Entfernen mit: avery mail unlink google:alice@gmail.com"),
+                        && out
+                            .contains(&gm("Entfernen mit: avery mail unlink google:alice@{gmail}")),
                     "{out}"
                 );
-                assert!(cloud.vault.get("google:alice@gmail.com").is_some());
+                assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_some());
             } else {
                 assert!(out.contains("wieder entfernt"), "{out}");
-                assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+                assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
             }
         }
         Ok(())
@@ -4793,8 +4800,8 @@ mod tests {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
-            LINKED_GMAIL,
-            &[("google:alice@gmail.com", WRITE_SCOPE)],
+            &gm(LINKED_GMAIL),
+            &[(gm("google:alice@{gmail}").as_str(), WRITE_SCOPE)],
             quiet(),
             crate::provider::fakes::Visit::Good("c"),
             crate::provider::fakes::google_transport(&google_tokens(false)),
@@ -4802,16 +4809,16 @@ mod tests {
         let held = lock_held(&cloud.ctx)?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 1, "{out}");
-        assert!(cloud.vault.get("google:alice@gmail.com").is_none());
+        assert!(cloud.vault.get(&gm("google:alice@{gmail}")).is_none());
         held.unlock()?;
         assert_eq!(
             fs::read_to_string(&cloud.ctx.settings.config_path)?,
-            LINKED_GMAIL
+            gm(LINKED_GMAIL)
         );
         let (code, out) = run(&cloud.ctx, &["accounts"], "");
         assert_eq!(code, 0, "{out}");
         assert!(
-            out.contains("alice@gmail.com  [gmail]  alice@gmail.com  [schreiben]  [Anmeldung fehlt, neu verbinden mit: avery mail link]"),
+            out.contains(&gm("alice@{gmail}  [gmail]  alice@{gmail}  [schreiben]  [Anmeldung fehlt, neu verbinden mit: avery mail link]")),
             "{out}"
         );
         Ok(())
@@ -4846,12 +4853,12 @@ mod tests {
                 id: format!("CAL-{index}"),
                 name: one_line_str(&name, MAX_NAME),
             };
-            let remote = calendar_name(&name, "alice@gmail.com");
+            let remote = calendar_name(&name, &gm("alice@{gmail}"));
             let mut rights = Rights::empty();
             rights.apple.mail.push((account.clone(), Level::Read));
             rights.apple.calendars.push((calendar, Level::Read));
             let mut linked =
-                RemoteAccount::new(Provider::Google, "alice@gmail.com").ok_or("account")?;
+                RemoteAccount::new(Provider::Google, &gm("alice@{gmail}")).ok_or("account")?;
             linked.calendars.push(CalendarGrant {
                 id: "primary".to_string(),
                 name: remote.clone(),
