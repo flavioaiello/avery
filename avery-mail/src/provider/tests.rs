@@ -335,16 +335,13 @@ fn the_calendar_dispatcher_sends_apple_calendars_to_apple_and_the_rest_to_the_pr
 }
 
 const GOOGLE_READ: &str = r#"{"version": 3,
-    "mail": {"accounts": [{"id": "google:alice@gmail.example", "name": "alice@gmail.example", "type": "gmail", "addresses": ["alice@gmail.example"], "level": "read"}]},
-    "cloud": {"accounts": [{"source": "google", "address": "alice@gmail.example"}]}}"#;
+    "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "read"}]}"#;
 const GOOGLE_WRITE: &str = r#"{"version": 3,
-    "mail": {"accounts": [{"id": "google:alice@gmail.example", "name": "alice@gmail.example", "type": "gmail", "addresses": ["alice@gmail.example"], "level": "write"}]},
-    "calendar": {"calendars": [{"id": "google:alice@gmail.example:alice@gmail.example", "name": "alice@gmail.example", "level": "write"}]},
-    "cloud": {"accounts": [{"source": "google", "address": "alice@gmail.example"}]}}"#;
+    "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write",
+        "calendars": [{"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "write"}]}]}"#;
 const MICROSOFT_WRITE: &str = r#"{"version": 3,
-    "mail": {"accounts": [{"id": "microsoft:bob@outlook.example", "name": "bob@outlook.example", "type": "outlook", "addresses": ["bob@outlook.example"], "level": "write"}]},
-    "calendar": {"calendars": [{"id": "microsoft:bob@outlook.example:AQMkCAL", "name": "Calendar (bob@outlook.example)", "level": "read"}]},
-    "cloud": {"accounts": [{"source": "microsoft", "address": "bob@outlook.example"}]}}"#;
+    "accounts": [{"provider": "microsoft", "address": "bob@outlook.example", "mail": "write",
+        "calendars": [{"id": "AQMkCAL", "name": "Calendar (bob@outlook.example)", "level": "read"}]}]}"#;
 const GOOGLE_SCOPES: &str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events";
 const MICROSOFT_SCOPES: &str =
     "Mail.Read Calendars.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite";
@@ -657,8 +654,8 @@ fn a_failing_gmail_send_call_is_unclear_and_counts_against_the_limit() -> TestRe
         )
         .json(Method::Post, "/messages/send", 503, "{}");
     let config = GOOGLE_WRITE.replacen(
-        r#""level": "write"}]},"#,
-        r#""level": "write"}], "sends_per_hour": 1},"#,
+        r#"{"version": 3,"#,
+        r#"{"version": 3, "sends_per_hour": 1,"#,
         1,
     );
     assert_ne!(config, GOOGLE_WRITE);

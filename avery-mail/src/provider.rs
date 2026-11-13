@@ -237,6 +237,13 @@ pub(crate) fn calendar_id(provider: Provider, address: &str, calendar: &str) -> 
         .then(|| format!("{}:{address}:{calendar}", provider.as_str()))
 }
 
+pub(crate) fn calendar_origin(id: &str) -> Option<(Provider, &str, &str)> {
+    match Provider::of_id(id) {
+        Provider::Apple => Some((Provider::Apple, "", id)),
+        _ => calendar_parts(id),
+    }
+}
+
 pub(crate) fn calendar_parts(id: &str) -> Option<(Provider, &str, &str)> {
     let provider = Provider::of_id(id);
     provider.oauth()?;
@@ -634,12 +641,7 @@ impl Calendars {
         let found = self.remote(provider, address, list)?;
         Ok(found
             .into_iter()
-            .filter_map(|info| {
-                Some(CalendarInfo {
-                    id: calendar_id(provider, address, &info.id)?,
-                    ..info
-                })
-            })
+            .filter(|info| calendar_id(provider, address, &info.id).is_some())
             .collect())
     }
 

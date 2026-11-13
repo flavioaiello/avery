@@ -15,10 +15,11 @@ use crate::console::{ask_levels, failed, level_word, Choice, Console};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::localtime;
-use crate::provider::Client;
-use crate::provider::{account_address, account_id, calendar_parts, Provider};
+use crate::provider::{calendar_origin, Client, Provider};
 use crate::recurrence;
-use crate::rights::{Level, Link, Rights, MAX_LINKS, MAX_NAME};
+use crate::rights::{
+    Apple, CalendarGrant, Level, RemoteAccount, Rights, MAX_ACCOUNTS, MAX_APPLE, MAX_NAME,
+};
 use crate::sendlog::{self, Outcome};
 use crate::server;
 use crate::text::{bracketed, clean_str, one_line_str};
@@ -35,12 +36,8 @@ const CHANGES_SHOWN: usize = 20;
 const SUGGESTION_CUTOFF: f64 = 0.6;
 const MAX_COMMAND_CHARS: usize = 100;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Area {
-    All,
-    Mail,
-    Calendar,
-}
+const LINK_HINT: &str = "Gmail oder Outlook.com verbinden: avery mail link google | microsoft";
+const APPLE_HINT: &str = "Apple Mail und Kalender einbeziehen (optional): avery mail setup apple";
 
 fn sent_by(sender: &str, address: &str) -> bool {
     bracketed(sender)
@@ -105,41 +102,29 @@ fn granted(entries: &[(String, Level)]) -> String {
 
 fn mail_grants(rights: &Rights) -> Vec<(String, Level)> {
     rights
-        .mail
-        .iter()
-        .map(|(account, level)| (account.name.clone(), *level))
+        .mail_entries()
+        .into_iter()
+        .map(|(account, level)| (account.name, level))
         .collect()
 }
 
 fn calendar_grants(rights: &Rights) -> Vec<(String, Level)> {
     rights
-        .calendars
-        .iter()
-        .map(|(calendar, level)| (calendar.name.clone(), *level))
+        .calendar_entries()
+        .into_iter()
+        .map(|(calendar, level)| (calendar.name, level))
         .collect()
 }
 
-fn cloud_accounts(rights: &Rights) -> Vec<MailAccount> {
-    rights
-        .linked
-        .iter()
-        .filter_map(|link| {
-            Some(MailAccount {
-                id: account_id(link.source, &link.address)?,
-                name: link.address.clone(),
-                kind: link.source.kind().to_string(),
-                addresses: vec![link.address.clone()],
-            })
-        })
-        .collect()
-}
-
-fn link_note(ctx: &Context, account: &MailAccount) -> &'static str {
-    match account_address(&account.id) {
-        Some((source, address)) if ctx.linker.capability(source, address).is_none() => {
-            "  [Anmeldung fehlt, neu verbinden mit: avery mail link]"
-        }
-        _ => "",
+fn link_note(ctx: &Context, account: &RemoteAccount) -> &'static str {
+    if ctx
+        .linker
+        .capability(account.provider(), account.address())
+        .is_some()
+    {
+        ""
+    } else {
+        "  [Anmeldung fehlt, neu verbinden mit: avery mail link]"
     }
 }
 
@@ -148,33 +133,38 @@ fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
-    let cloud = cloud_accounts(&rights);
-    let apple = match ctx.backend.all_accounts() {
-        Ok(accounts) => accounts.into_iter().map(sanitized).collect(),
-        Err(error) if cloud.is_empty() => return failed(console, &error),
-        Err(error) => {
-            console.say(&format!("Hinweis: Apple Mail ist nicht lesbar ({error})"));
-            Vec::new()
+    if rights.accounts.is_empty() && rights.apple.mail.is_empty() {
+        console.say("Noch kein Konto verbunden.");
+        console.say(LINK_HINT);
+        if !rights.apple.enabled() {
+            console.say(APPLE_HINT);
         }
-    };
-    if apple.is_empty() && cloud.is_empty() {
-        console.say("Mail kennt noch keine Konten (Systemeinstellungen > Internetaccounts).");
-        console.say("Gmail oder Outlook.com direkt verbinden: avery mail link google | microsoft");
         return 0;
     }
-    for (index, account) in apple.iter().chain(cloud.iter()).enumerate() {
-        let level = rights.mail_level(&account.id);
-        let mark = if level.is_some() { '*' } else { ' ' };
+    let mut number = 0usize;
+    for account in &rights.accounts {
+        number += 1;
+        let mark = if account.mail.is_some() { '*' } else { ' ' };
         console.say(&format!(
-            "{mark} {}) {}  [{}]{}",
-            index + 1,
-            describe(account),
-            level_word(level),
+            "{mark} {number}) {}  [{}]{}",
+            describe(&account.mail_account()),
+            level_word(account.mail),
             link_note(ctx, account)
+        ));
+    }
+    for (account, level) in &rights.apple.mail {
+        number += 1;
+        console.say(&format!(
+            "* {number}) {}  [{}]",
+            describe(account),
+            level_word(Some(*level))
         ));
     }
     console.say("\n* = fuer den Agenten freigegeben, Stufe in Klammern: lesen oder schreiben");
     console.say("(schreiben = Entwuerfe und Senden, jede Mail nur nach deinem Klick)");
+    if !rights.apple.enabled() {
+        console.say(APPLE_HINT);
+    }
     0
 }
 
@@ -192,63 +182,40 @@ struct Listed {
     write_capable: bool,
 }
 
-struct CalendarListing {
-    listed: Vec<Listed>,
-    unreachable: Vec<String>,
-    apple_ok: bool,
-}
-
-fn list_calendars(
-    ctx: &Context,
-    console: &mut Console,
-    rights: &Rights,
-) -> Result<CalendarListing, u8> {
-    let mut listing = CalendarListing {
-        listed: Vec::new(),
-        unreachable: Vec::new(),
-        apple_ok: true,
-    };
-    match ctx.calendar.calendars(Provider::Apple, "") {
-        Ok(found) => listing.listed.extend(found.into_iter().map(|info| Listed {
+fn list_account_calendars(ctx: &Context, account: &RemoteAccount) -> ToolResult<Vec<Listed>> {
+    let found = ctx
+        .calendar
+        .calendars(account.provider(), account.address())?;
+    let write_capable = ctx
+        .linker
+        .capability(account.provider(), account.address())
+        .is_some_and(|capability| capability.write_calendar);
+    Ok(found
+        .into_iter()
+        .map(|info| Listed {
             info: CalendarInfo {
-                name: one_line_str(&info.name, MAX_NAME),
+                name: calendar_name(&info.name, account.address()),
                 ..info
             },
-            write_capable: true,
-        })),
-        Err(error) if rights.linked.is_empty() => return Err(failed(console, &error)),
-        Err(error) => {
-            listing.apple_ok = false;
-            console.say(&format!(
-                "Hinweis: Apple Kalender ist nicht lesbar ({error})"
-            ));
-        }
-    }
-    for link in &rights.linked {
-        match ctx.calendar.calendars(link.source, &link.address) {
-            Ok(found) => {
-                let write_capable = ctx
-                    .linker
-                    .capability(link.source, &link.address)
-                    .is_some_and(|capability| capability.write_calendar);
-                listing.listed.extend(found.into_iter().map(|info| Listed {
-                    info: CalendarInfo {
-                        name: calendar_name(&info.name, &link.address),
-                        ..info
-                    },
-                    write_capable,
-                }));
-            }
-            Err(error) => {
-                console.say(&format!(
-                    "Hinweis: Kalender von {} nicht lesbar ({error})",
-                    link.address
-                ));
-                listing.unreachable.push(link.address.clone());
-            }
-        }
-    }
-    Ok(listing)
+            write_capable,
+        })
+        .collect())
+}
+
+fn calendar_line(
+    console: &mut Console,
+    number: usize,
+    name: &str,
+    writable: bool,
+    level: Option<Level>,
+) {
+    let mark = if level.is_some() { '*' } else { ' ' };
+    console.say(&format!(
+        "{mark} {number}) {}{}  [{}]",
+        one_line_str(name, 120),
+        if writable { "" } else { " [schreibgeschuetzt]" },
+        level_word(level)
+    ));
 }
 
 fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
@@ -256,275 +223,78 @@ fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
-    let listing = match list_calendars(ctx, console, &rights) {
-        Ok(listing) => listing,
-        Err(code) => return code,
-    };
-    if listing.listed.is_empty() {
-        console.say("Kalender kennt noch keine Kalender.");
+    if rights.accounts.is_empty() && rights.apple.calendars.is_empty() {
+        console.say("Noch kein Kalender verfuegbar.");
+        console.say(LINK_HINT);
+        if !rights.apple.enabled() {
+            console.say(APPLE_HINT);
+        }
         return 0;
     }
-    for (index, entry) in listing.listed.iter().enumerate() {
-        let calendar = &entry.info;
-        let level = rights.calendar_level(&calendar.id);
-        let mark = if level.is_some() { '*' } else { ' ' };
-        console.say(&format!(
-            "{mark} {}) {}{}  [{}]",
-            index + 1,
-            one_line_str(&calendar.name, 120),
-            if calendar.writable {
-                ""
-            } else {
-                " [schreibgeschuetzt]"
-            },
-            level_word(level)
-        ));
+    let mut number = 0usize;
+    let mut unreachable = 0usize;
+    for account in &rights.accounts {
+        match list_account_calendars(ctx, account) {
+            Ok(listed) => {
+                for entry in &listed {
+                    number += 1;
+                    let level = account
+                        .calendars
+                        .iter()
+                        .find(|grant| grant.id == entry.info.id)
+                        .map(|grant| grant.level);
+                    calendar_line(
+                        console,
+                        number,
+                        &entry.info.name,
+                        entry.info.writable,
+                        level,
+                    );
+                }
+            }
+            Err(error) => {
+                unreachable += 1;
+                console.say(&format!(
+                    "Hinweis: Kalender von {} nicht lesbar ({error})",
+                    account.address()
+                ));
+            }
+        }
+    }
+    for (calendar, level) in &rights.apple.calendars {
+        number += 1;
+        calendar_line(console, number, &calendar.name, true, Some(*level));
+    }
+    if number == 0 {
+        console.say("Keine Kalender gefunden.");
+        return u8::from(unreachable > 0);
     }
     console.say("\n* = fuer den Agenten freigegeben, Stufe in Klammern: lesen oder schreiben");
     console.say(
         "(schreiben = Termine anlegen, aendern, loeschen, jede Aenderung nur nach deinem Klick)",
     );
+    if !rights.apple.enabled() {
+        console.say(APPLE_HINT);
+    }
     0
 }
 
-fn setup_mail(
-    ctx: &Context,
-    console: &mut Console,
-    rights: &mut Rights,
-    required: bool,
-) -> Result<(), u8> {
-    let cloud = cloud_accounts(rights);
-    let (apple, apple_ok) = match ctx.backend.all_accounts() {
-        Ok(accounts) => (accounts.into_iter().map(sanitized).collect(), true),
-        Err(error) if cloud.is_empty() => return Err(failed(console, &error)),
-        Err(error) => {
-            console.say(&format!(
-                "Hinweis: Apple Mail ist nicht lesbar ({error}); dessen Freigaben bleiben unveraendert."
-            ));
-            (Vec::new(), false)
-        }
-    };
-    if apple.is_empty() && cloud.is_empty() {
-        console.say("Mail kennt noch keine Konten. Zuerst in den Systemeinstellungen unter Internetaccounts anmelden oder Gmail/Outlook.com verbinden: avery mail link google | microsoft");
-        return if required { Err(1) } else { Ok(()) };
-    }
-    console.say("Mail-Konten. Nur PRIVATE Konten freigeben, niemals geschaeftliche.");
-    console.say("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Entwuerfe anlegen und Mails senden,");
-    console.say("jede Mail erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
-    console.say(&format!(
-        "Grenzen: Klartext, kein Bcc, keine Anhaenge, max. {MAX_RECIPIENTS} Empfaenger, max. {MAX_SEND_CHARS} Zeichen pro gesendeter Mail,"
-    ));
-    console.say(&format!(
-        "         max. {MAX_SEND_LINES} Zeilen, max. {} gesendete Mails und max. {MAX_DRAFTS_PER_HOUR} Entwuerfe pro Stunde. Jeder Versuch steht in {}",
-        rights.sends_per_hour,
-        ctx.settings.sendlog_path()
-    ));
-    if !cloud.is_empty() {
-        console.say("Gmail/Outlook.com (direkt verbunden): Stufe 0 entzieht nur die Freigabe, die Verbindung bleibt (trennen: avery mail unlink <adresse>).");
-    }
-    let accounts: Vec<MailAccount> = apple.iter().chain(cloud.iter()).cloned().collect();
-    let choices: Vec<Choice> = accounts
-        .iter()
-        .map(|account| {
-            let highest = match account_address(&account.id) {
-                Some((source, address)) => {
-                    if ctx
-                        .linker
-                        .capability(source, address)
-                        .is_some_and(|capability| capability.write_mail)
-                    {
-                        Level::Write
-                    } else {
-                        Level::Read
-                    }
-                }
-                None => Level::Write,
-            };
-            Choice {
-                title: format!("{}{}", describe(account), link_note(ctx, account)),
-                current: rights
-                    .mail_level(&account.id)
-                    .map(|level| level.min(highest)),
-                highest,
-            }
-        })
-        .collect();
-    let levels = ask_levels(console, &choices)?;
-    let gone: Vec<String> = rights
-        .mail
-        .iter()
-        .filter(|(known, _)| {
-            apple_ok
-                && Provider::of_id(&known.id) == Provider::Apple
-                && !accounts.iter().any(|account| account.id == known.id)
-        })
-        .map(|(known, _)| known.name.clone())
-        .collect();
-    if !gone.is_empty() {
-        console.say(&format!(
-            "Nicht mehr in Mail vorhanden, wird entfernt: {}",
-            gone.join(", ")
-        ));
-    }
-    let kept: Vec<(MailAccount, Level)> = rights
-        .mail
-        .iter()
-        .filter(|(known, _)| !apple_ok && Provider::of_id(&known.id) == Provider::Apple)
-        .cloned()
-        .collect();
-    rights.mail = kept
-        .into_iter()
-        .chain(
-            accounts
-                .into_iter()
-                .zip(levels)
-                .filter_map(|(account, level)| level.map(|level| (account, level))),
-        )
-        .collect();
-    Ok(())
-}
-
-fn setup_calendars(
-    ctx: &Context,
-    console: &mut Console,
-    rights: &mut Rights,
-    required: bool,
-    listing: CalendarListing,
-) -> Result<(), u8> {
-    if listing.listed.is_empty() && listing.unreachable.is_empty() && listing.apple_ok {
-        console.say("Kalender kennt noch keine Kalender.");
-        return if required { Err(1) } else { Ok(()) };
-    }
-    console.say("\nKalender. Nur PRIVATE Kalender freigeben, niemals geschaeftliche.");
-    console
-        .say("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Termine anlegen, aendern und loeschen,");
-    console.say("jede Aenderung erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
-    console.say(&format!(
-        "Grenzen: nur einzelne Termine ohne Teilnehmer und ohne Wiederholung, max. {} Aenderungen pro Stunde. Jeder Versuch steht in {}",
-        rights.changes_per_hour,
-        ctx.settings.changes_path()
-    ));
-    let choices: Vec<Choice> = listing
-        .listed
-        .iter()
-        .map(|entry| {
-            let calendar = &entry.info;
-            let writable = calendar.writable && entry.write_capable;
-            let highest = if writable { Level::Write } else { Level::Read };
-            Choice {
-                title: if writable {
-                    one_line_str(&calendar.name, 120)
-                } else {
-                    format!("{} [schreibgeschuetzt]", one_line_str(&calendar.name, 120))
-                },
-                current: rights
-                    .calendar_level(&calendar.id)
-                    .map(|level| level.min(highest)),
-                highest,
-            }
-        })
-        .collect();
-    let levels = ask_levels(console, &choices)?;
-    let unchanged = |known: &CalendarEntry| match calendar_parts(&known.id) {
-        Some((_, address, _)) => listing.unreachable.iter().any(|name| name == address),
-        None => !listing.apple_ok,
-    };
-    let gone: Vec<String> = rights
-        .calendars
-        .iter()
-        .filter(|(known, _)| {
-            !unchanged(known) && !listing.listed.iter().any(|entry| entry.info.id == known.id)
-        })
-        .map(|(known, _)| known.name.clone())
-        .collect();
-    if !gone.is_empty() {
-        console.say(&format!(
-            "Nicht mehr vorhanden, wird entfernt: {}",
-            gone.join(", ")
-        ));
-    }
-    let kept: Vec<(CalendarEntry, Level)> = rights
-        .calendars
-        .iter()
-        .filter(|(known, _)| unchanged(known))
-        .cloned()
-        .collect();
-    rights.calendars = kept
-        .into_iter()
-        .chain(
-            listing
-                .listed
-                .into_iter()
-                .zip(levels)
-                .filter_map(|(entry, level)| {
-                    level.map(|level| {
-                        (
-                            CalendarEntry {
-                                id: entry.info.id,
-                                name: entry.info.name,
-                            },
-                            level,
-                        )
-                    })
-                }),
-        )
-        .collect();
-    Ok(())
-}
-
-fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
-    let area = match word {
-        None => Area::All,
-        Some("mail") => Area::Mail,
-        Some("calendar") => Area::Calendar,
-        Some(other) => {
-            console.say(&format!(
-                "Unbekannter Bereich: {} (mail oder calendar)",
-                clean_str(other, Some(30))
-            ));
-            return 2;
-        }
-    };
-    let mut rights = match ctx.settings.stored_rights() {
-        Ok(rights) => rights,
-        Err(error) => return failed(console, &error),
-    };
-    let before = rights.clone();
-    let listing = if matches!(area, Area::All | Area::Calendar) {
-        match list_calendars(ctx, console, &rights) {
-            Ok(listing) => Some(listing),
-            Err(code) => return code,
-        }
-    } else {
-        None
-    };
-    if matches!(area, Area::All | Area::Mail) {
-        if let Err(code) = setup_mail(ctx, console, &mut rights, area == Area::Mail) {
-            return code;
-        }
-    }
-    if let Some(listing) = listing {
-        if let Err(code) =
-            setup_calendars(ctx, console, &mut rights, area == Area::Calendar, listing)
-        {
-            return code;
-        }
-    }
+fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights) -> u8 {
     if rights == before {
         console.say("Unveraendert.");
         return 0;
     }
     console.say("\nNeue Freigaben:");
-    console.say(&format!("  Mail:     {}", granted(&mail_grants(&rights))));
+    console.say(&format!("  Mail:     {}", granted(&mail_grants(rights))));
     console.say(&format!(
         "  Kalender: {}",
-        granted(&calendar_grants(&rights))
+        granted(&calendar_grants(rights))
     ));
     if !console.confirm("Korrekt? [j/N] ") {
         console.say("Abgebrochen.");
         return 1;
     }
-    let code = save_rights(ctx, console, &rights);
+    let code = save_rights(ctx, console, rights);
     if code == 0 {
         console.say(&format!("Gespeichert in {}", ctx.settings.config_path));
         console.say("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
@@ -532,19 +302,361 @@ fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
     code
 }
 
+fn explain_levels(ctx: &Context, console: &mut Console, rights: &Rights) {
+    console.say("Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.");
+    console
+        .say("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Entwuerfe, Senden und Termine aendern,");
+    console.say("jedes Mal erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
+    console.say(&format!(
+        "Mail-Grenzen: Klartext, kein Bcc, keine Anhaenge, max. {MAX_RECIPIENTS} Empfaenger, max. {MAX_SEND_CHARS} Zeichen pro gesendeter Mail,"
+    ));
+    console.say(&format!(
+        "         max. {MAX_SEND_LINES} Zeilen, max. {} gesendete Mails und max. {MAX_DRAFTS_PER_HOUR} Entwuerfe pro Stunde. Jeder Versuch steht in {}",
+        rights.sends_per_hour,
+        ctx.settings.sendlog_path()
+    ));
+    console.say(&format!(
+        "Kalender-Grenzen: nur einzelne Termine ohne Teilnehmer und ohne Wiederholung, max. {} Aenderungen pro Stunde. Jeder Versuch steht in {}",
+        rights.changes_per_hour,
+        ctx.settings.changes_path()
+    ));
+}
+
+fn setup_account(
+    ctx: &Context,
+    console: &mut Console,
+    account: &mut RemoteAccount,
+    listing: ToolResult<Vec<Listed>>,
+) -> Result<(), u8> {
+    console.say(&format!(
+        "\n{} ({})",
+        account.address(),
+        account.provider().kind()
+    ));
+    let capability = ctx.linker.capability(account.provider(), account.address());
+    let mail_highest = if capability.is_some_and(|found| found.write_mail) {
+        Level::Write
+    } else {
+        Level::Read
+    };
+    let mut choices = vec![Choice {
+        title: format!("Mail{}", link_note(ctx, account)),
+        current: account.mail.map(|level| level.min(mail_highest)),
+        highest: mail_highest,
+    }];
+    let listed = match listing {
+        Ok(listed) => Some(listed),
+        Err(error) => {
+            console.say(&format!(
+                "Hinweis: Kalender von {} nicht lesbar ({error}); deren Freigaben bleiben unveraendert.",
+                account.address()
+            ));
+            None
+        }
+    };
+    if let Some(listed) = &listed {
+        choices.extend(listed.iter().map(|entry| {
+            let writable = entry.info.writable && entry.write_capable;
+            let highest = if writable { Level::Write } else { Level::Read };
+            Choice {
+                title: if writable {
+                    one_line_str(&entry.info.name, 120)
+                } else {
+                    format!(
+                        "{} [schreibgeschuetzt]",
+                        one_line_str(&entry.info.name, 120)
+                    )
+                },
+                current: account
+                    .calendars
+                    .iter()
+                    .find(|grant| grant.id == entry.info.id)
+                    .map(|grant| grant.level.min(highest)),
+                highest,
+            }
+        }));
+    }
+    let mut levels = ask_levels(console, &choices)?.into_iter();
+    account.mail = levels.next().flatten();
+    if let Some(listed) = listed {
+        let gone: Vec<String> = account
+            .calendars
+            .iter()
+            .filter(|grant| !listed.iter().any(|entry| entry.info.id == grant.id))
+            .map(|grant| grant.name.clone())
+            .collect();
+        if !gone.is_empty() {
+            console.say(&format!(
+                "Nicht mehr vorhanden, wird entfernt: {}",
+                gone.join(", ")
+            ));
+        }
+        account.calendars = listed
+            .into_iter()
+            .zip(levels)
+            .filter_map(|(entry, level)| {
+                level.map(|level| CalendarGrant {
+                    id: entry.info.id,
+                    name: entry.info.name,
+                    level,
+                })
+            })
+            .collect();
+    }
+    Ok(())
+}
+
+fn setup_apple_entries(console: &mut Console, apple: &mut Apple) -> Result<(), u8> {
+    console.say("\nApple Mail und Kalender (einbezogen; neu auflisten: avery mail setup apple)");
+    let choices: Vec<Choice> = apple
+        .mail
+        .iter()
+        .map(|(account, level)| Choice {
+            title: describe(account),
+            current: Some(*level),
+            highest: Level::Write,
+        })
+        .chain(apple.calendars.iter().map(|(calendar, level)| Choice {
+            title: one_line_str(&calendar.name, 120),
+            current: Some(*level),
+            highest: Level::Write,
+        }))
+        .collect();
+    let mut levels = ask_levels(console, &choices)?.into_iter();
+    apple.mail = apple
+        .mail
+        .drain(..)
+        .zip(levels.by_ref())
+        .filter_map(|((account, _), level)| level.map(|level| (account, level)))
+        .collect();
+    apple.calendars = apple
+        .calendars
+        .drain(..)
+        .zip(levels)
+        .filter_map(|((calendar, _), level)| level.map(|level| (calendar, level)))
+        .collect();
+    Ok(())
+}
+
+fn setup_accounts(ctx: &Context, console: &mut Console) -> u8 {
+    let mut rights = match ctx.settings.stored_rights() {
+        Ok(rights) => rights,
+        Err(error) => return failed(console, &error),
+    };
+    let before = rights.clone();
+    if rights.accounts.is_empty() && !rights.apple.enabled() {
+        console.say("Noch kein Konto verbunden, es gibt nichts einzurichten.");
+        console.say(LINK_HINT);
+        console.say(APPLE_HINT);
+        return 1;
+    }
+    explain_levels(ctx, console, &rights);
+    if !rights.accounts.is_empty() {
+        console.say("Stufe 0 entzieht nur die Freigabe, das Konto bleibt verbunden (trennen: avery mail unlink <adresse>).");
+    }
+    let listings: Vec<ToolResult<Vec<Listed>>> = rights
+        .accounts
+        .iter()
+        .map(|account| list_account_calendars(ctx, account))
+        .collect();
+    for (account, listing) in rights.accounts.iter_mut().zip(listings) {
+        if let Err(code) = setup_account(ctx, console, account, listing) {
+            return code;
+        }
+    }
+    if rights.apple.enabled() {
+        if let Err(code) = setup_apple_entries(console, &mut rights.apple) {
+            return code;
+        }
+    }
+    let code = finish(ctx, console, &before, &rights);
+    if code == 0 && !rights.apple.enabled() {
+        console.say(APPLE_HINT);
+    }
+    code
+}
+
+fn unique<T>(items: Vec<T>, id: impl Fn(&T) -> &str) -> Vec<T> {
+    let mut kept: Vec<T> = Vec::new();
+    for item in items {
+        let name = id(&item);
+        if !name.is_empty()
+            && Provider::of_id(name) == Provider::Apple
+            && !kept.iter().any(|known| id(known) == name)
+        {
+            kept.push(item);
+        }
+    }
+    kept
+}
+
+fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
+    let mut rights = match ctx.settings.stored_rights() {
+        Ok(rights) => rights,
+        Err(error) => return failed(console, &error),
+    };
+    let before = rights.clone();
+    console.say(
+        "Apple Mail und Kalender einbeziehen (optional). Dazu startet Avery Mail und Kalender;",
+    );
+    console.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
+    let mail = match ctx.backend.all_accounts() {
+        Ok(found) => unique(found.into_iter().map(sanitized).collect(), |account| {
+            account.id.as_str()
+        }),
+        Err(error) => {
+            console.say(&format!("Fehler: Apple Mail ist nicht lesbar ({error})"));
+            return 1;
+        }
+    };
+    let calendars = match ctx.calendar.calendars(Provider::Apple, "") {
+        Ok(found) => unique(
+            found
+                .into_iter()
+                .map(|info| CalendarInfo {
+                    name: one_line_str(&info.name, MAX_NAME),
+                    ..info
+                })
+                .collect(),
+            |info| info.id.as_str(),
+        ),
+        Err(error) => {
+            console.say(&format!(
+                "Fehler: Apple Kalender ist nicht lesbar ({error})"
+            ));
+            return 1;
+        }
+    };
+    if mail.len() > MAX_APPLE || calendars.len() > MAX_APPLE {
+        console.say(&format!(
+            "Fehler: Mail oder Kalender melden mehr als {MAX_APPLE} Eintraege."
+        ));
+        return 1;
+    }
+    explain_levels(ctx, console, &rights);
+    let choices: Vec<Choice> = mail
+        .iter()
+        .map(|account| Choice {
+            title: describe(account),
+            current: rights
+                .apple
+                .mail
+                .iter()
+                .find(|(known, _)| known.id == account.id)
+                .map(|(_, level)| *level),
+            highest: Level::Write,
+        })
+        .chain(calendars.iter().map(|info| {
+            let highest = if info.writable {
+                Level::Write
+            } else {
+                Level::Read
+            };
+            Choice {
+                title: if info.writable {
+                    one_line_str(&info.name, 120)
+                } else {
+                    format!("{} [schreibgeschuetzt]", one_line_str(&info.name, 120))
+                },
+                current: rights
+                    .apple
+                    .calendars
+                    .iter()
+                    .find(|(known, _)| known.id == info.id)
+                    .map(|(_, level)| (*level).min(highest)),
+                highest,
+            }
+        }))
+        .collect();
+    let levels = match ask_levels(console, &choices) {
+        Ok(levels) => levels,
+        Err(code) => return code,
+    };
+    let mut levels = levels.into_iter();
+    let gone: Vec<String> = rights
+        .apple
+        .mail
+        .iter()
+        .map(|(known, _)| (known.id.as_str(), known.name.as_str()))
+        .chain(
+            rights
+                .apple
+                .calendars
+                .iter()
+                .map(|(known, _)| (known.id.as_str(), known.name.as_str())),
+        )
+        .filter(|(id, _)| {
+            !mail.iter().any(|account| account.id == *id)
+                && !calendars.iter().any(|info| info.id == *id)
+        })
+        .map(|(_, name)| name.to_string())
+        .collect();
+    if !gone.is_empty() {
+        console.say(&format!(
+            "Nicht mehr vorhanden, wird entfernt: {}",
+            gone.join(", ")
+        ));
+    }
+    let apple = Apple {
+        mail: mail
+            .into_iter()
+            .zip(levels.by_ref())
+            .filter_map(|(account, level)| level.map(|level| (account, level)))
+            .collect(),
+        calendars: calendars
+            .into_iter()
+            .zip(levels)
+            .filter_map(|(info, level)| {
+                level.map(|level| {
+                    (
+                        CalendarEntry {
+                            id: info.id,
+                            name: info.name,
+                        },
+                        level,
+                    )
+                })
+            })
+            .collect(),
+    };
+    rights.apple = apple;
+    let code = finish(ctx, console, &before, &rights);
+    if code == 0 && before.apple.enabled() && !rights.apple.enabled() {
+        console.say("Apple Mail und Kalender sind wieder aus: Avery startet sie nicht mehr.");
+    }
+    code
+}
+
+fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
+    match word {
+        None => setup_accounts(ctx, console),
+        Some("apple") => setup_apple(ctx, console),
+        Some(other) => {
+            console.say(&format!(
+                "Unbekannter Bereich: {} (nur: apple)",
+                clean_str(other, Some(30))
+            ));
+            2
+        }
+    }
+}
+
 fn cmd_revoke(ctx: &Context, console: &mut Console) -> u8 {
     let mut rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
-    rights.mail.clear();
-    rights.calendars.clear();
+    let had_apple = rights.apple.enabled();
+    rights.revoke();
     let code = save_rights(ctx, console, &rights);
     if code == 0 {
         console.say("Alle Freigaben entfernt (Mail und Kalender, auch Schreiben). Der Agent sieht keine Konten und Kalender mehr.");
-        if !rights.linked.is_empty() {
+        if !rights.accounts.is_empty() {
             console.say("Direkt verbundene Konten (Gmail/Outlook.com) bleiben verbunden; ihre Anmeldung liegt im Schluesselbund.");
             console.say("Verbindung ganz loesen: avery mail unlink <adresse>");
+        }
+        if had_apple {
+            console.say("Apple Mail und Kalender sind wieder aus. Wieder einbeziehen: avery mail setup apple");
         }
     }
     code
@@ -564,26 +676,28 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         console.say("Im Demo-Modus (MAIL_MCP_FAKE=1) nicht moeglich.");
         return 1;
     }
-    let Some(source) = provider.and_then(Provider::parse_remote) else {
+    let Some(provider) = provider.and_then(Provider::parse_remote) else {
         console.say("Benutzung: avery mail link google | microsoft");
+        return 2;
+    };
+    let Some(oauth) = provider.oauth() else {
+        console.say("Dieser Anbieter braucht keine Anmeldung.");
         return 2;
     };
     let mut rights = match ctx.settings.stored_rights() {
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
-    if rights.linked.len() >= MAX_LINKS {
-        console.say(&format!("Es sind schon {MAX_LINKS} Konten verbunden."));
+    if rights.accounts.len() >= MAX_ACCOUNTS {
+        console.say(&format!(
+            "Es sind schon {MAX_ACCOUNTS} Konten verbunden. Zuerst eines trennen: avery mail unlink <adresse>"
+        ));
         return 1;
     }
-    let Some(oauth) = source.oauth() else {
-        console.say("Dieses Konto braucht keine Anmeldung.");
-        return 2;
-    };
     for line in oauth.registration {
         console.say(line);
     }
-    console.say("Details: README, Abschnitt 'Gmail und Outlook.com direkt'.");
+    console.say("Details: README, Abschnitt 'Gmail und Outlook.com'.");
     console.say("Avery speichert die Anmeldung im macOS-Schluesselbund (Dienst avery-mail), nie in einer Datei.");
     console.say(
         "Der Agent bekommt nur das, was du danach mit 'avery mail setup' oder hier freigibst.",
@@ -601,7 +715,7 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     } else {
         String::new()
     };
-    let client = match Client::new(source, &id, &secret) {
+    let client = match Client::new(provider, &id, &secret) {
         Ok(client) => client,
         Err(error) => {
             console.say(&format!("Fehler: {error}"));
@@ -614,63 +728,62 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     };
     console.say("\nDer Browser oeffnet sich. Melde dich an und erlaube den Zugriff. Falls nicht, oeffne diese Adresse:");
     let mut announce = |url: &str| console.say(&format!("  {url}"));
-    let linked = match ctx.linker.link(source, &client, write, &mut announce) {
+    let linked = match ctx.linker.link(provider, &client, write, &mut announce) {
         Ok(linked) => linked,
         Err(error) => {
             console.say(&format!("Fehler: {error}"));
             return 1;
         }
     };
-    let id = match account_id(source, &linked.address) {
-        Some(id) => id,
+    let Some(mut fresh) = RemoteAccount::new(provider, &linked.address) else {
+        console.say("Fehler: Die Adresse des Kontos ist nicht verwendbar.");
+        return 1;
+    };
+    let relinked = rights.account(provider, &linked.address).is_some();
+    let level = match rights.account_mut(provider, &linked.address) {
+        Some(known) => {
+            known.mail = known.mail.map(|level| {
+                if linked.write_mail {
+                    level
+                } else {
+                    Level::Read
+                }
+            });
+            if !linked.write_calendar {
+                for grant in &mut known.calendars {
+                    grant.level = Level::Read;
+                }
+            }
+            known.mail
+        }
         None => {
-            console.say("Fehler: Die Adresse des Kontos ist nicht verwendbar.");
-            return 1;
+            let level = if write && linked.write_mail {
+                Level::Write
+            } else {
+                Level::Read
+            };
+            fresh.mail = Some(level);
+            rights.accounts.push(fresh);
+            Some(level)
         }
     };
-    if !rights
-        .linked
-        .iter()
-        .any(|link| link.source == source && link.address == linked.address)
-    {
-        rights.linked.push(Link {
-            source,
-            address: linked.address.clone(),
-        });
-    }
-    let level = if write && linked.write_mail {
-        Level::Write
-    } else {
-        Level::Read
-    };
-    let account = MailAccount {
-        id: id.clone(),
-        name: linked.address.clone(),
-        kind: source.kind().to_string(),
-        addresses: vec![linked.address.clone()],
-    };
-    match rights.mail.iter_mut().find(|(known, _)| known.id == id) {
-        Some(entry) => *entry = (account, level),
-        None => rights.mail.push((account, level)),
-    }
-    for (calendar, granted) in rights.calendars.iter_mut() {
-        if calendar_parts(&calendar.id)
-            .is_some_and(|(found, address, _)| found == source && address == linked.address)
-            && *granted == Level::Write
-            && !linked.write_calendar
-        {
-            *granted = Level::Read;
-        }
-    }
     let code = save_rights(ctx, console, &rights);
     if code == 0 {
         console.say(&format!(
-            "\nVerbunden: {} ({}). Mail: {}.",
+            "\n{}: {} ({}). Mail: {}.",
+            if relinked {
+                "Erneut verbunden"
+            } else {
+                "Verbunden"
+            },
             linked.address,
-            source.kind(),
-            level_word(Some(level))
+            provider.kind(),
+            level_word(level)
         ));
-        console.say("Kalender freigeben: avery mail setup calendar. Pruefen: avery mail selftest");
+        if relinked {
+            console.say("Freigaben bleiben wie sie waren, hoechstens abgesenkt auf das, was die neue Anmeldung erlaubt.");
+        }
+        console.say("Kalender freigeben: avery mail setup. Pruefen: avery mail selftest");
         console.say("Goose danach neu starten.");
     }
     code
@@ -681,50 +794,63 @@ fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 
         Ok(rights) => rights,
         Err(error) => return failed(console, &error),
     };
-    let wanted = wanted.map(|text| text.trim().to_lowercase());
-    let found = match wanted.as_deref() {
-        Some(address) if !address.is_empty() => rights
-            .linked
-            .iter()
-            .position(|link| link.address == address),
-        _ => None,
+    let wanted = wanted
+        .map(|text| text.trim().to_lowercase())
+        .unwrap_or_default();
+    let target = match wanted.split_once(':') {
+        Some((name, address)) => Provider::parse_remote(name).map(|named| (Some(named), address)),
+        None => Some((None, wanted.as_str())),
     };
-    let Some(index) = found else {
-        if rights.linked.is_empty() {
-            console.say("Es ist kein Konto direkt verbunden.");
-        } else {
-            console.say("Benutzung: avery mail unlink <adresse>. Verbunden:");
-            for link in &rights.linked {
-                console.say(&format!("  {} ({})", link.address, link.source.kind()));
+    let hits: Vec<usize> = rights
+        .accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| {
+            target.is_some_and(|(named, address)| {
+                !address.is_empty()
+                    && account.address() == address
+                    && named.is_none_or(|provider| account.provider() == provider)
+            })
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let index = match hits.as_slice() {
+        [only] => *only,
+        [] => {
+            if rights.accounts.is_empty() {
+                console.say("Es ist kein Konto direkt verbunden.");
+            } else {
+                console.say("Benutzung: avery mail unlink <adresse>. Verbunden:");
+                for account in &rights.accounts {
+                    console.say(&format!(
+                        "  {} ({})",
+                        account.address(),
+                        account.provider().kind()
+                    ));
+                }
             }
+            return 1;
         }
-        return 1;
+        _ => {
+            console.say("Die Adresse ist mehrfach verbunden. Benutzung: avery mail unlink google:<adresse> | microsoft:<adresse>");
+            return 1;
+        }
     };
-    let link = rights.linked.remove(index);
+    let account = rights.accounts.remove(index);
     if !console.confirm(&format!(
         "{} trennen? Freigaben und die gespeicherte Anmeldung werden geloescht. [j/N] ",
-        link.address
+        account.address()
     )) {
         console.say("Abgebrochen.");
         return 1;
     }
-    let owned = |id: &str| match (account_address(id), calendar_parts(id)) {
-        (Some((source, address)), _) | (_, Some((source, address, _))) => {
-            source == link.source && address == link.address
-        }
-        _ => false,
-    };
-    rights.mail.retain(|(account, _)| !owned(&account.id));
-    rights
-        .calendars
-        .retain(|(calendar, _)| !owned(&calendar.id));
     let code = save_rights(ctx, console, &rights);
     if code != 0 {
         return code;
     }
-    match ctx.linker.unlink(link.source, &link.address) {
+    match ctx.linker.unlink(account.provider(), account.address()) {
         Ok(()) => {
-            console.say(&format!("{} getrennt.", link.address));
+            console.say(&format!("{} getrennt.", account.address()));
             console.say("Zugriff der App auch im Konto widerrufen (Google: myaccount.google.com/permissions, Microsoft: account.live.com/consent/Manage).");
             0
         }
@@ -933,7 +1059,9 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         .rights()
         .is_ok_and(|rights| rights.calendar_level(&entry.calendar_id) == Some(Level::Write));
     if !writable {
-        console.say("Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup calendar");
+        console.say(
+            "Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup",
+        );
         return 1;
     }
     console.say(&format!(
@@ -988,13 +1116,22 @@ fn cmd_status(ctx: &Context, console: &mut Console) -> u8 {
     ));
     console.say(&format!("Mail: {}", granted(&mail_grants(&rights))));
     console.say(&format!("Kalender: {}", granted(&calendar_grants(&rights))));
-    if !rights.linked.is_empty() {
+    if !rights.accounts.is_empty() {
         let linked: Vec<String> = rights
-            .linked
+            .accounts
             .iter()
-            .map(|link| format!("{} ({})", link.address, link.source.kind()))
+            .map(|account| format!("{} ({})", account.address(), account.provider().kind()))
             .collect();
         console.say(&format!("Direkt verbunden: {}", linked.join(", ")));
+    }
+    if rights.apple.enabled() {
+        console.say(&format!(
+            "Apple Mail und Kalender: an ({} Konten, {} Kalender)",
+            rights.apple.mail.len(),
+            rights.apple.calendars.len()
+        ));
+    } else {
+        console.say(&format!("Apple Mail und Kalender: aus. {APPLE_HINT}"));
     }
     console.say(&format!(
         "Grenzen pro Stunde: {} gesendete Mails, {MAX_DRAFTS_PER_HOUR} Entwuerfe, {} Kalenderaenderungen",
@@ -1113,14 +1250,12 @@ fn selftest_calendar(
     calendar: &Calendar,
 ) {
     let reachable = timed(|| {
-        let (source, address) = match calendar_parts(&calendar.id) {
-            Some((source, address, _)) => (source, address),
-            None => (Provider::Apple, ""),
-        };
-        let known = ctx.calendar.calendars(source, address)?;
+        let (provider, address, own) = calendar_origin(&calendar.id)
+            .ok_or_else(|| ToolError::msg("Kalender-ID ist ungueltig"))?;
+        let known = ctx.calendar.calendars(provider, address)?;
         let info = known
             .iter()
-            .find(|info| info.id == calendar.id)
+            .find(|info| info.id == own)
             .ok_or_else(|| ToolError::msg("Kalender nicht mehr vorhanden"))?;
         Ok(if info.writable {
             "beschreibbar".to_string()
@@ -1154,6 +1289,9 @@ fn selftest_calendar(
         ))
     });
     if !step(console, failures, tag, "Termine lesen", reading) {
+        return;
+    }
+    if Provider::of_id(&calendar.id) != Provider::Apple {
         return;
     }
     let unreadable: Vec<&String> = rules
@@ -1781,22 +1919,25 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Backend;
     use crate::calendar::{CalendarBackend, CalendarInfo};
     use crate::error::ToolResult;
     use crate::fake::FakeOptions;
     use crate::journal;
     use crate::json::Json;
     use crate::provider::Linker;
-    use crate::testutil::{j, log_entry, settings_at, TempDir, TestResult};
+    use crate::testutil::{j, log_entry, settings_at, TempDir, TestResult, Untouchable};
     use std::fs;
     use std::io::Cursor;
 
     const ACCOUNT_1: &str = r#"{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"}"#;
     const ACCOUNT_2: &str = r#"{"id": "ACC-2", "name": "Outlook", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"}"#;
 
+    fn apple_only(entries: &str) -> String {
+        format!(r#"{{"version": 3, "apple": {{{entries}}}}}"#)
+    }
+
     fn base() -> String {
-        format!(r#"{{"version": 3, "mail": {{"accounts": [{ACCOUNT_1}, {ACCOUNT_2}]}}}}"#)
+        apple_only(&format!(r#""mail": [{ACCOUNT_1}, {ACCOUNT_2}]"#))
     }
 
     fn context(
@@ -1839,85 +1980,13 @@ mod tests {
         config.as_object().and_then(|object| object.get(name))
     }
 
-    struct Untouchable;
-
-    impl Backend for Untouchable {
-        fn all_accounts(&self) -> ToolResult<Vec<MailAccount>> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn account_info(&self, _: &crate::account::Account) -> ToolResult<MailAccount> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn mailboxes(
-            &self,
-            _: &crate::account::Account,
-        ) -> ToolResult<Vec<crate::backend::Mailbox>> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn messages(
-            &self,
-            _: &crate::account::Account,
-            _: &MessageQuery,
-        ) -> ToolResult<crate::backend::MessageList> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn read(
-            &self,
-            _: &crate::account::Account,
-            _: Option<&str>,
-            _: &MessageId,
-            _: usize,
-        ) -> ToolResult<crate::backend::MessageBody> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn compose(
-            &self,
-            _: &crate::account::Account,
-            _: &ComposeRequest,
-        ) -> ToolResult<crate::backend::Preview> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn approval_test(&self, _: u64) -> ToolResult<String> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-    }
-
-    struct UntouchableCalendar;
-
-    impl CalendarBackend for UntouchableCalendar {
-        fn calendars(&self, _: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn events(
-            &self,
-            _: &crate::calendar::Calendar,
-            _: crate::calendar::Window,
-        ) -> ToolResult<Vec<crate::calendar::RawEvent>> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn event(
-            &self,
-            _: &crate::calendar::Calendar,
-            _: &str,
-        ) -> ToolResult<crate::calendar::EventDetail> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-        fn change(
-            &self,
-            _: &crate::calendar::Calendar,
-            _: &crate::calendar::Change,
-            _: &crate::calendar::Approval,
-        ) -> ToolResult<crate::calendar::ChangeResult> {
-            Err(ToolError::msg("BACKEND TOUCHED"))
-        }
-    }
-
     #[test]
     fn a_broken_config_is_reported_before_mail_or_calendar_is_touched() -> TestResult {
         for config in [
             "{\"version\": 2, \"allowed_accounts\": []}",
             "{\"version\": 3, \"allowed_accounts\": []}",
-            "{\"version\": 3, \"mail\": 5}",
+            "{\"version\": 3, \"apple\": 5}",
+            "{\"version\": 3, \"mail\": {\"accounts\": []}}",
             "not json",
             "[]",
             "{\"allowed_accounts\": []}",
@@ -1926,22 +1995,23 @@ mod tests {
             let mut settings = settings_at(&dir.path("config.json"));
             fs::write(&settings.config_path, config)?;
             settings.fake = false;
+            let apple = Untouchable::default();
             let ctx = Context::new(
                 settings,
-                Box::new(Untouchable),
-                Box::new(UntouchableCalendar),
+                Box::new(apple.clone()),
+                Box::new(apple.clone()),
                 Linker::inert(),
             );
             for args in [
                 vec!["accounts"],
                 vec!["calendars"],
                 vec!["setup"],
-                vec!["setup", "mail"],
-                vec!["setup", "calendar"],
+                vec!["setup", "apple"],
                 vec!["revoke"],
                 vec!["status"],
                 vec!["selftest"],
                 vec!["selftest-write"],
+                vec!["unlink", "alice@gmail.example"],
             ] {
                 let (code, out) = run(&ctx, &args, "1\nj\n");
                 assert_eq!(code, 1, "{config:?} {args:?}: {out}");
@@ -1951,24 +2021,29 @@ mod tests {
                 );
                 assert_eq!(fs::read_to_string(&ctx.settings.config_path)?, config);
             }
+            assert_eq!(apple.calls(), 0, "{config:?}");
         }
         Ok(())
     }
 
     #[test]
-    fn setup_asks_a_level_per_account_and_saves_levels_and_details() -> TestResult {
+    fn setup_apple_asks_a_level_per_item_and_saves_the_apple_section() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, None)?;
-        let (code, out) = run(&ctx, &["setup", "mail"], "2\n1\n\nj\n");
+        let (code, out) = run(&ctx, &["setup", "apple"], "2\n1\n\n2\n1\n\n\nj\n");
         assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Automation-Berechtigung"), "{out}");
         assert!(out.contains("Neue Freigaben:"));
         assert!(out.contains("Mail:     Demo Gmail (schreiben), Demo Outlook (lesen)"));
-        assert!(out.contains("Kalender: keine"));
+        assert!(out.contains("Kalender: Demo Privat (schreiben), Demo Familie (lesen)"));
         assert!(out.contains("Gespeichert in"));
         let config = saved(&ctx)?;
-        let accounts = section(&config, "mail")
+        assert!(section(&config, "accounts").is_none());
+        let apple = section(&config, "apple")
             .and_then(Json::as_object)
-            .and_then(|mail| mail.get("accounts"))
+            .ok_or("apple")?;
+        let accounts = apple
+            .get("mail")
             .and_then(Json::as_array)
             .ok_or("accounts")?;
         assert_eq!(accounts.len(), 2);
@@ -1978,22 +2053,8 @@ mod tests {
                 r#"{"id": "FAKE-GMAIL", "name": "Demo Gmail", "type": "imap", "addresses": ["demo.privat@gmail.example"], "level": "write"}"#
             )?
         );
-        assert!(section(&config, "calendar").is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn setup_for_all_areas_asks_mail_first_then_calendars() -> TestResult {
-        let dir = TempDir::new()?;
-        let ctx = real(&dir, None)?;
-        let (code, out) = run(&ctx, &["setup"], "1\n\n\n2\n1\n\n\nj\n");
-        assert_eq!(code, 0, "{out}");
-        assert!(out.contains("Mail:     Demo Gmail (lesen)"));
-        assert!(out.contains("Kalender: Demo Privat (schreiben), Demo Familie (lesen)"));
-        let config = saved(&ctx)?;
-        let calendars = section(&config, "calendar")
-            .and_then(Json::as_object)
-            .and_then(|calendar| calendar.get("calendars"))
+        let calendars = apple
+            .get("calendars")
             .and_then(Json::as_array)
             .ok_or("calendars")?;
         assert_eq!(calendars.len(), 2);
@@ -2005,50 +2066,86 @@ mod tests {
     }
 
     #[test]
-    fn setup_for_one_area_keeps_the_other_area_and_the_limits() -> TestResult {
+    fn plain_setup_asks_for_the_apple_entries_that_exist_without_listing_the_apps() -> TestResult {
         let dir = TempDir::new()?;
-        let start = r#"{"version": 3,
-            "mail": {"accounts": [{"id": "FAKE-GMAIL", "name": "Demo Gmail", "level": "write"}], "sends_per_hour": 3},
-            "calendar": {"calendars": [{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "read"}], "changes_per_hour": 4}}"#;
-        let ctx = real(&dir, Some(start))?;
-        let (code, out) = run(&ctx, &["setup", "calendar"], "\n2\n\n\nj\n");
-        assert_eq!(code, 0, "{out}");
-        let config = saved(&ctx)?;
-        let mail = section(&config, "mail")
-            .and_then(Json::as_object)
-            .ok_or("mail")?;
-        assert_eq!(mail.get("sends_per_hour"), Some(&Json::Int(3)));
-        assert_eq!(
-            mail.get("accounts").and_then(Json::as_array).map(Vec::len),
-            Some(1)
+        let config = apple_only(&format!(
+            r#""mail": [{ACCOUNT_1}, {ACCOUNT_2}], "calendars": [{{"id": "CAL-1", "name": "Privat", "level": "write"}}]"#
+        ));
+        let mut settings = settings_at(&dir.path("config.json"));
+        fs::write(&settings.config_path, &config)?;
+        settings.fake = false;
+        let apple = Untouchable::default();
+        let ctx = Context::new(
+            settings,
+            Box::new(apple.clone()),
+            Box::new(apple.clone()),
+            Linker::inert(),
         );
-        let calendar = section(&config, "calendar")
-            .and_then(Json::as_object)
-            .ok_or("calendar")?;
-        assert_eq!(calendar.get("changes_per_hour"), Some(&Json::Int(4)));
-        let ids: Vec<String> = calendar
-            .get("calendars")
-            .and_then(Json::as_array)
-            .ok_or("list")?
-            .iter()
-            .filter_map(Json::as_object)
-            .map(|entry| {
-                format!(
-                    "{}:{}",
-                    crate::text::text_of(entry.get("id")),
-                    crate::text::text_of(entry.get("level"))
-                )
-            })
-            .collect();
-        assert_eq!(ids, ["FAKE-CAL-PRIVAT:read", "FAKE-CAL-FAMILIE:write"]);
+        let (code, out) = run(&ctx, &["setup"], "2\n0\n1\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("avery mail setup apple"), "{out}");
+        assert!(out.contains("Mail:     Privat Gmail (schreiben)"), "{out}");
+        assert!(out.contains("Kalender: Privat (lesen)"), "{out}");
+        let rights = ctx.settings.stored_rights().map_err(|e| e.message())?;
+        assert_eq!(rights.mail_level("ACC-1"), Some(Level::Write));
+        assert_eq!(rights.mail_level("ACC-2"), None);
+        assert_eq!(rights.calendar_level("CAL-1"), Some(Level::Read));
+        assert_eq!(apple.calls(), 0);
+        let (code, out) = run(&ctx, &["setup"], "0\n0\nj\n");
+        assert_eq!(code, 0, "{out}");
+        assert!(saved(&ctx)?
+            .as_object()
+            .ok_or("object")?
+            .get("apple")
+            .is_none());
+        let (code, out) = run(&ctx, &["setup"], "");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Noch kein Konto verbunden"), "{out}");
+        assert!(out.contains("avery mail setup apple"), "{out}");
+        assert_eq!(apple.calls(), 0);
         Ok(())
     }
 
     #[test]
-    fn setup_without_changes_says_so_and_writes_nothing() -> TestResult {
+    fn setup_apple_keeps_the_accounts_and_the_limits() -> TestResult {
+        let dir = TempDir::new()?;
+        let start = r#"{"version": 3,
+            "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write"}],
+            "apple": {"mail": [{"id": "FAKE-GMAIL", "name": "Demo Gmail", "level": "write"}],
+                      "calendars": [{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "read"}]},
+            "sends_per_hour": 3, "changes_per_hour": 4}"#;
+        let ctx = real(&dir, Some(start))?;
+        let (code, out) = run(&ctx, &["setup", "apple"], "\n\n\n\n2\n\n\nj\n");
+        assert_eq!(code, 0, "{out}");
+        let config = saved(&ctx)?;
+        let object = config.as_object().ok_or("object")?;
+        assert_eq!(object.get("sends_per_hour"), Some(&Json::Int(3)));
+        assert_eq!(object.get("changes_per_hour"), Some(&Json::Int(4)));
+        assert_eq!(
+            object.get("accounts"),
+            Some(&j(
+                r#"[{"provider": "google", "address": "alice@gmail.example", "mail": "write"}]"#
+            )?)
+        );
+        let rights = ctx.settings.stored_rights().map_err(|e| e.message())?;
+        assert_eq!(
+            rights.mail_level("google:alice@gmail.example"),
+            Some(Level::Write)
+        );
+        assert_eq!(rights.mail_level("FAKE-GMAIL"), Some(Level::Write));
+        assert_eq!(rights.calendar_level("FAKE-CAL-PRIVAT"), Some(Level::Read));
+        assert_eq!(
+            rights.calendar_level("FAKE-CAL-FAMILIE"),
+            Some(Level::Write)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn setup_apple_without_changes_says_so_and_writes_nothing() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, None)?;
-        let (code, out) = run(&ctx, &["setup"], "\n\n\n\n\n\n\n");
+        let (code, out) = run(&ctx, &["setup", "apple"], "\n\n\n\n\n\n\n");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Unveraendert."));
         assert!(!std::path::Path::new(&ctx.settings.config_path).exists());
@@ -2056,10 +2153,10 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_calendar_cannot_get_the_write_level() -> TestResult {
+    fn a_read_only_apple_calendar_cannot_get_the_write_level() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, None)?;
-        let (code, out) = run(&ctx, &["setup", "calendar"], "\n\n2\n1\n\nj\n");
+        let (code, out) = run(&ctx, &["setup", "apple"], "\n\n\n\n\n2\n1\n\nj\n");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Demo Feiertage [schreibgeschuetzt]"));
         assert!(out.contains("Dieser Eintrag ist schreibgeschuetzt (hoechstens Stufe 1)."));
@@ -2068,14 +2165,25 @@ mod tests {
     }
 
     #[test]
-    fn entries_that_vanished_from_mail_are_removed_with_a_note() -> TestResult {
+    fn apple_entries_that_vanished_are_removed_with_a_note_and_all_off_switches_apple_off(
+    ) -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, Some(&base()))?;
-        let (code, out) = run(&ctx, &["setup", "mail"], "\n\n\nj\n");
+        let (code, out) = run(&ctx, &["setup", "apple"], "\n\n\n\n\n\n\nj\n");
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("Nicht mehr in Mail vorhanden, wird entfernt: Privat Gmail, Outlook"));
+        assert!(out.contains("Nicht mehr vorhanden, wird entfernt: Privat Gmail, Outlook"));
+        assert!(
+            out.contains("Apple Mail und Kalender sind wieder aus"),
+            "{out}"
+        );
         let config = saved(&ctx)?;
-        assert!(section(&config, "mail").is_none());
+        assert!(section(&config, "apple").is_none());
+        assert!(!ctx
+            .settings
+            .stored_rights()
+            .map_err(|e| e.message())?
+            .apple
+            .enabled());
         Ok(())
     }
 
@@ -2084,14 +2192,14 @@ mod tests {
         let dir = TempDir::new()?;
         let ctx = real(&dir, Some(&base()))?;
         for (input, expected) in [
-            ("1\n\n\nn\n", "Abgebrochen."),
-            ("1\n\n\n", "Abgebrochen."),
+            ("1\n\n\n\n\n\n\nn\n", "Abgebrochen."),
+            ("1\n\n\n\n\n\n\n", "Abgebrochen."),
             ("", "Ungueltige Eingabe."),
             ("1\n", "Ungueltige Eingabe."),
             ("x\nx\nx\n", "Zu viele ungueltige Eingaben."),
             ("3\n9\n-1\n", "Zu viele ungueltige Eingaben."),
         ] {
-            let (code, out) = run(&ctx, &["setup", "mail"], input);
+            let (code, out) = run(&ctx, &["setup", "apple"], input);
             assert_eq!(code, 1, "{input:?}: {out}");
             assert!(out.contains(expected), "{input:?}: {out}");
             assert_eq!(saved(&ctx)?, j(&base())?, "{input:?}");
@@ -2100,12 +2208,20 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_area_is_refused() -> TestResult {
+    fn an_unknown_setup_area_is_refused() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, None)?;
-        let (code, out) = run(&ctx, &["setup", "notes\u{b}"], "");
-        assert_eq!(code, 2);
-        assert!(out.contains("Unbekannter Bereich: notes (mail oder calendar)"));
+        for area in ["notes\u{b}", "mail", "calendar"] {
+            let (code, out) = run(&ctx, &["setup", area], "");
+            assert_eq!(code, 2);
+            assert!(out.contains("Unbekannter Bereich:"), "{out}");
+            assert!(out.contains("(nur: apple)"), "{out}");
+        }
+        let (_, out) = run(&ctx, &["setup", "notes\u{b}"], "");
+        assert!(
+            out.contains("Unbekannter Bereich: notes (nur: apple)"),
+            "{out}"
+        );
         Ok(())
     }
 
@@ -2114,25 +2230,42 @@ mod tests {
         let dir = TempDir::new()?;
         let ctx = real(&dir, Some(&base()))?;
         let long = format!("{}\n", "1".repeat(20_000));
-        let (code, out) = run(&ctx, &["setup", "mail"], &long);
+        let (code, out) = run(&ctx, &["setup", "apple"], &long);
         assert_eq!(code, 1);
         assert!(out.contains("Ungueltige Eingabe."));
         Ok(())
     }
 
     #[test]
-    fn revoke_removes_all_grants_and_keeps_the_limits() -> TestResult {
+    fn revoke_removes_all_grants_and_the_apple_section_and_keeps_accounts_and_limits() -> TestResult
+    {
         let dir = TempDir::new()?;
         let config = r#"{"version": 3,
-            "mail": {"accounts": [{"id": "A", "name": "A", "level": "write"}], "sends_per_hour": 3},
-            "calendar": {"calendars": [{"id": "C", "name": "C", "level": "write"}]}}"#;
+            "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write",
+                          "calendars": [{"id": "c", "name": "C", "level": "write"}]}],
+            "apple": {"mail": [{"id": "A", "name": "A", "level": "write"}],
+                      "calendars": [{"id": "C", "name": "C", "level": "write"}]},
+            "sends_per_hour": 3}"#;
         let ctx = real(&dir, Some(config))?;
         let (code, out) = run(&ctx, &["revoke"], "");
         assert_eq!(code, 0);
         assert!(out.contains("Alle Freigaben entfernt"));
+        assert!(out.contains("avery mail unlink <adresse>"), "{out}");
+        assert!(
+            out.contains("Apple Mail und Kalender sind wieder aus"),
+            "{out}"
+        );
         assert_eq!(
             saved(&ctx)?,
-            j(r#"{"version": 3, "mail": {"accounts": [], "sends_per_hour": 3}}"#)?
+            j(
+                r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example"}], "sends_per_hour": 3, "changes_per_hour": 10}"#
+            )?
+        );
+        let (code, out) = run(&ctx, &["revoke"], "");
+        assert_eq!(code, 0);
+        assert!(
+            !out.contains("Apple Mail und Kalender sind wieder aus"),
+            "{out}"
         );
         Ok(())
     }
@@ -2149,8 +2282,10 @@ mod tests {
             let ctx = real(&dir, Some(text))?;
             for (args, input) in [
                 (vec!["setup"], "1\nj\n"),
-                (vec!["setup", "mail"], "1\nj\n"),
+                (vec!["setup", "apple"], "1\nj\n"),
                 (vec!["revoke"], ""),
+                (vec!["unlink", "alice@gmail.example"], "j\n"),
+                (vec!["link", "google"], "id\nsecret\n1\n"),
             ] {
                 let (code, out) = run(&ctx, &args, input);
                 assert_eq!(code, 1, "{text:?} {args:?}: {out}");
@@ -2228,16 +2363,31 @@ mod tests {
     }
 
     #[test]
-    fn status_shows_the_levels_per_area_and_the_limits() -> TestResult {
+    fn status_shows_the_levels_per_area_the_accounts_apple_and_the_limits() -> TestResult {
         let dir = TempDir::new()?;
         let config = r#"{"version": 3,
-            "mail": {"accounts": [{"id": "A", "name": "Privat Gmail", "level": "write"}, {"id": "B", "name": "Outlook", "level": "read"}], "sends_per_hour": 2},
-            "calendar": {"calendars": [{"id": "C", "name": "Familie", "level": "read"}], "changes_per_hour": 6}}"#;
+            "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write"}],
+            "apple": {"mail": [{"id": "A", "name": "Privat Gmail", "level": "write"}, {"id": "B", "name": "Outlook", "level": "read"}],
+                      "calendars": [{"id": "C", "name": "Familie", "level": "read"}]},
+            "sends_per_hour": 2, "changes_per_hour": 6}"#;
         let ctx = real(&dir, Some(config))?;
         let (code, out) = run(&ctx, &["status"], "");
         assert_eq!(code, 0);
-        assert!(out.contains("Mail: Privat Gmail (schreiben), Outlook (lesen)"));
+        assert!(
+            out.contains(
+                "Mail: alice@gmail.example (schreiben), Privat Gmail (schreiben), Outlook (lesen)"
+            ),
+            "{out}"
+        );
         assert!(out.contains("Kalender: Familie (lesen)"));
+        assert!(
+            out.contains("Direkt verbunden: alice@gmail.example (gmail)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Apple Mail und Kalender: an (2 Konten, 1 Kalender)"),
+            "{out}"
+        );
         assert!(out.contains(
             "Grenzen pro Stunde: 2 gesendete Mails, 30 Entwuerfe, 6 Kalenderaenderungen"
         ));
@@ -2250,6 +2400,11 @@ mod tests {
                 && out.contains("Mail: keine")
                 && out.contains("Kalender: keine")
         );
+        assert!(
+            out.contains("Apple Mail und Kalender: aus. Apple Mail und Kalender einbeziehen (optional): avery mail setup apple"),
+            "{out}"
+        );
+        assert!(!out.contains("Direkt verbunden"), "{out}");
         Ok(())
     }
 
@@ -2264,7 +2419,7 @@ mod tests {
     }
 
     #[test]
-    fn accounts_marks_the_level_of_every_account() -> TestResult {
+    fn accounts_marks_the_level_of_every_configured_account() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = context(&dir, true, "FAKE-GMAIL", None, FakeOptions::default())?;
         let (code, out) = run(&ctx, &["accounts,"], "");
@@ -2275,8 +2430,8 @@ mod tests {
         );
         assert!(out.contains("* 2) Demo Outlook  [exchange]"));
         assert!(out.contains("[lesen]"));
-        assert!(out.contains("  3) Demo Firma  [exchange]  demo@firma.example  [aus]"));
-        assert!(!out.contains("* 3)"));
+        assert!(!out.contains("Demo Firma"), "{out}");
+        assert!(!out.contains("avery mail setup apple"), "{out}");
         Ok(())
     }
 
@@ -2296,15 +2451,15 @@ mod tests {
     }
 
     #[test]
-    fn calendars_marks_the_level_and_the_read_only_ones() -> TestResult {
+    fn calendars_marks_the_level_of_every_configured_calendar() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = context(&dir, true, "FAKE-CAL-PRIVAT", None, FakeOptions::default())?;
         let (code, out) = run(&ctx, &["calendars"], "");
         assert_eq!(code, 0);
         assert!(out.contains("* 1) Demo Privat  [schreiben]"), "{out}");
         assert!(out.contains("* 2) Demo Familie  [lesen]"));
-        assert!(out.contains("* 3) Demo Feiertage [schreibgeschuetzt]  [lesen]"));
-        assert!(out.contains("  4) Demo Firma  [aus]"));
+        assert!(out.contains("* 3) Demo Feiertage  [lesen]"));
+        assert!(!out.contains("Demo Firma"), "{out}");
         Ok(())
     }
 
@@ -2321,13 +2476,15 @@ mod tests {
             out.contains("INFO  Kalender 2  Wiederholungen: 1 von 1 Serien lassen sich entfalten")
         );
         assert!(!out.contains("Zahnarzt") && !out.contains("Familienessen"));
-        let only = r#"{"version": 3, "calendar": {"calendars": [{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "read"}]}}"#;
-        let ctx = context(&dir, false, "", Some(only), FakeOptions::default())?;
+        let only = apple_only(
+            r#""calendars": [{"id": "FAKE-CAL-PRIVAT", "name": "Demo Privat", "level": "read"}]"#,
+        );
+        let ctx = context(&dir, false, "", Some(&only), FakeOptions::default())?;
         let (code, out) = run(&ctx, &["selftest"], "");
         assert_eq!(code, 0, "{out}");
         assert!(!out.contains("Konto 1") && out.contains("Kalender 1"));
-        let gone = r#"{"version": 3, "calendar": {"calendars": [{"id": "GONE", "name": "Weg", "level": "read"}]}}"#;
-        let ctx = context(&dir, false, "", Some(gone), FakeOptions::default())?;
+        let gone = apple_only(r#""calendars": [{"id": "GONE", "name": "Weg", "level": "read"}]"#);
+        let ctx = context(&dir, false, "", Some(&gone), FakeOptions::default())?;
         let (code, out) = run(&ctx, &["selftest"], "");
         assert_eq!(code, 1);
         assert!(
@@ -2929,27 +3086,30 @@ mod tests {
         );
         Ok(())
     }
-    struct CloudCalendars {
-        apple: ToolResult<Vec<CalendarInfo>>,
-        cloud: Vec<(&'static str, ToolResult<Vec<CalendarInfo>>)>,
+    struct Listings {
+        apple: Untouchable,
+        remote: Vec<(&'static str, ToolResult<Vec<CalendarInfo>>)>,
     }
 
-    impl CalendarBackend for CloudCalendars {
-        fn calendars(&self, source: Provider, address: &str) -> ToolResult<Vec<CalendarInfo>> {
-            if source == Provider::Apple {
-                return self.apple.clone();
+    impl CalendarBackend for Listings {
+        fn calendars(&self, provider: Provider, address: &str) -> ToolResult<Vec<CalendarInfo>> {
+            if provider == Provider::Apple {
+                return self.apple.calendars(provider, address);
             }
-            self.cloud
+            self.remote
                 .iter()
                 .find(|(known, _)| *known == address)
                 .map_or_else(|| Ok(Vec::new()), |(_, result)| result.clone())
         }
         fn events(
             &self,
-            _: &crate::calendar::Calendar,
-            _: crate::calendar::Window,
+            calendar: &crate::calendar::Calendar,
+            window: crate::calendar::Window,
         ) -> ToolResult<Vec<crate::calendar::RawEvent>> {
-            Err(ToolError::msg("not used"))
+            if Provider::of_id(&calendar.id) == Provider::Apple {
+                return self.apple.events(calendar, window);
+            }
+            Ok(Vec::new())
         }
         fn event(
             &self,
@@ -2976,16 +3136,19 @@ mod tests {
         }
     }
 
+    type Remote = Vec<(&'static str, ToolResult<Vec<CalendarInfo>>)>;
+
     struct Cloudy {
         ctx: Context,
         vault: std::sync::Arc<crate::vault::memory::Memory>,
+        apple: Untouchable,
     }
 
     fn cloudy(
         dir: &TempDir,
         config: &str,
         records: &[(&str, &str)],
-        calendars: CloudCalendars,
+        remote: Remote,
         visit: crate::provider::fakes::Visit,
         transport: crate::http::scripted::Scripted,
     ) -> Result<Cloudy, Box<dyn std::error::Error>> {
@@ -2996,7 +3159,7 @@ mod tests {
             memory = memory.with(name, &crate::provider::fakes::record(scope).to_json());
         }
         let vault = std::sync::Arc::new(memory);
-        let admin = Linker::new(
+        let linker = Linker::new(
             Box::new(transport),
             Box::new(crate::vault::memory::Shared(std::sync::Arc::clone(&vault))),
             Box::new(crate::provider::fakes::Visitor {
@@ -3005,35 +3168,34 @@ mod tests {
             }),
         )
         .within(Duration::from_millis(700));
+        let apple = Untouchable::default();
         Ok(Cloudy {
             ctx: Context::new(
                 settings,
-                Box::new(crate::fake::FakeBackend::new(FakeOptions::default())),
-                Box::new(calendars),
-                admin,
+                Box::new(apple.clone()),
+                Box::new(Listings {
+                    apple: apple.clone(),
+                    remote,
+                }),
+                linker,
             ),
             vault,
+            apple,
         })
     }
 
-    fn quiet() -> CloudCalendars {
-        CloudCalendars {
-            apple: Ok(Vec::new()),
-            cloud: Vec::new(),
-        }
+    fn quiet() -> Remote {
+        Vec::new()
     }
 
     const READ_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly";
     const WRITE_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events";
 
-    const LINKED: &str = r#"{"version": 3,
-        "mail": {"accounts": [{"id": "google:alice@gmail.example", "name": "alice@gmail.example", "type": "gmail", "addresses": ["alice@gmail.example"], "level": "write"}]},
-        "calendar": {"calendars": [
-            {"id": "google:alice@gmail.example:alice@gmail.example", "name": "alice@gmail.example", "level": "write"},
-            {"id": "microsoft:bob@outlook.example:AQMk", "name": "Calendar (bob@outlook.example)", "level": "read"}]},
-        "cloud": {"accounts": [
-            {"source": "google", "address": "alice@gmail.example"},
-            {"source": "microsoft", "address": "bob@outlook.example"}]}}"#;
+    const LINKED: &str = r#"{"version": 3, "accounts": [
+        {"provider": "google", "address": "alice@gmail.example", "mail": "write",
+         "calendars": [{"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "write"}]},
+        {"provider": "microsoft", "address": "bob@outlook.example",
+         "calendars": [{"id": "AQMk", "name": "Calendar (bob@outlook.example)", "level": "read"}]}]}"#;
 
     fn google_tokens(write: bool) -> String {
         let extra = if write {
@@ -3047,8 +3209,16 @@ mod tests {
         )
     }
 
+    fn stored(cloud: &Cloudy) -> Result<Rights, String> {
+        cloud
+            .ctx
+            .settings
+            .stored_rights()
+            .map_err(|error| error.message())
+    }
+
     #[test]
-    fn linking_a_google_account_stores_the_link_and_a_read_grant() -> TestResult {
+    fn linking_a_google_account_adds_an_entry_with_a_read_grant() -> TestResult {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
@@ -3069,25 +3239,19 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(out.contains("Nur persoenliche Gmail-Konten"), "{out}");
         let config = saved(&cloud.ctx)?;
         assert_eq!(
-            section(&config, "cloud"),
+            section(&config, "accounts"),
             Some(&j(
-                r#"{"accounts": [{"source": "google", "address": "alice@gmail.example"}]}"#
+                r#"[{"provider": "google", "address": "alice@gmail.example", "mail": "read"}]"#
             )?)
         );
-        let mail = section(&config, "mail")
-            .and_then(Json::as_object)
-            .ok_or("mail")?;
-        assert_eq!(
-            mail.get("accounts"),
-            Some(&j(
-                r#"[{"id": "google:alice@gmail.example", "name": "alice@gmail.example", "type": "gmail", "addresses": ["alice@gmail.example"], "level": "read"}]"#
-            )?)
-        );
+        assert!(section(&config, "apple").is_none());
         assert!(cloud.vault.get("google:alice@gmail.example").is_some());
         assert!(!fs::read_to_string(&cloud.ctx.settings.config_path)?.contains("GOCSPX"));
         assert!(!out.contains("ya29"));
+        assert_eq!(cloud.apple.calls(), 0);
         Ok(())
     }
 
@@ -3105,6 +3269,10 @@ mod tests {
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n2\n");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Mail: schreiben."), "{out}");
+        assert_eq!(
+            stored(&cloud)?.mail_level("google:alice@gmail.example"),
+            Some(Level::Write)
+        );
         let second = TempDir::new()?;
         let again = cloudy(
             &second,
@@ -3126,7 +3294,7 @@ mod tests {
     }
 
     #[test]
-    fn linking_again_with_less_rights_lowers_the_grants_of_that_account() -> TestResult {
+    fn linking_again_may_only_lower_the_rights_of_that_account() -> TestResult {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
@@ -3138,12 +3306,12 @@ mod tests {
         )?;
         let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
         assert_eq!(code, 0, "{out}");
-        let rights = cloud
-            .ctx
-            .settings
-            .stored_rights()
-            .map_err(|e| e.message())?;
-        assert_eq!(rights.linked.len(), 2);
+        assert!(
+            out.contains("Erneut verbunden: alice@gmail.example (gmail)"),
+            "{out}"
+        );
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 2);
         assert_eq!(
             rights.mail_level("google:alice@gmail.example"),
             Some(Level::Read)
@@ -3156,14 +3324,33 @@ mod tests {
             rights.calendar_level("microsoft:bob@outlook.example:AQMk"),
             Some(Level::Read)
         );
-        let stored =
-            crate::provider::fakes::stored_scope(&cloud.vault, "google:alice@gmail.example");
-        assert!(!stored.contains("gmail.compose"), "{stored}");
+        let kept = crate::provider::fakes::stored_scope(&cloud.vault, "google:alice@gmail.example");
+        assert!(!kept.contains("gmail.compose"), "{kept}");
+
+        let second = TempDir::new()?;
+        let off = r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example", "calendars": [{"id": "alice@gmail.example", "level": "read"}]}]}"#;
+        let again = cloudy(
+            &second,
+            off,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            crate::provider::fakes::google_transport(&google_tokens(true)),
+        )?;
+        let (code, out) = run(&again.ctx, &["link", "google"], "id1\nsecret1\n2\n");
+        assert_eq!(code, 0, "{out}");
+        let rights = stored(&again)?;
+        assert_eq!(rights.mail_level("google:alice@gmail.example"), None);
+        assert_eq!(
+            rights.calendar_level("google:alice@gmail.example:alice@gmail.example"),
+            Some(Level::Read)
+        );
+        assert!(again.vault.get("google:alice@gmail.example").is_some());
         Ok(())
     }
 
     #[test]
-    fn link_refuses_bad_input_demo_mode_and_unfinished_sign_ins() -> TestResult {
+    fn link_refuses_bad_input_demo_mode_unfinished_sign_ins_and_a_full_list() -> TestResult {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
@@ -3202,11 +3389,68 @@ mod tests {
         let (code, out) = run(&demo.ctx, &["link", "google"], "");
         assert_eq!(code, 1);
         assert!(out.contains("Demo-Modus"), "{out}");
+        let accounts: Vec<String> = (0..16)
+            .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
+            .collect();
+        let full = format!(r#"{{"version": 3, "accounts": [{}]}}"#, accounts.join(","));
+        let crowded_dir = TempDir::new()?;
+        let crowded = cloudy(
+            &crowded_dir,
+            &full,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let (code, out) = run(&crowded.ctx, &["link", "google"], "id\nsecret\n1\n");
+        assert_eq!(code, 1);
+        assert!(out.contains("Es sind schon 16 Konten verbunden"), "{out}");
+        assert!(!out.contains("Client-ID"), "{out}");
         Ok(())
     }
 
     #[test]
-    fn unlinking_removes_the_grants_and_the_sign_in_of_one_account_only() -> TestResult {
+    fn a_google_workspace_account_is_refused_and_nothing_is_saved() -> TestResult {
+        let dir = TempDir::new()?;
+        let transport = crate::http::scripted::Scripted::new()
+            .json(
+                crate::http::Method::Post,
+                "oauth2.googleapis.com/token",
+                200,
+                &google_tokens(false),
+            )
+            .json(
+                crate::http::Method::Get,
+                "openidconnect.googleapis.com",
+                200,
+                r#"{"sub": "1", "email": "alice@firma.example", "email_verified": true, "hd": "firma.example"}"#,
+            );
+        let cloud = cloudy(
+            &dir,
+            r#"{"version": 3}"#,
+            &[],
+            quiet(),
+            crate::provider::fakes::Visit::Good("c"),
+            transport,
+        )?;
+        let (code, out) = run(&cloud.ctx, &["link", "google"], "id1\nsecret1\n1\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains(
+                "Avery verbindet nur persoenliche Gmail-Konten, keine Organisationskonten"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            fs::read_to_string(&cloud.ctx.settings.config_path)?,
+            r#"{"version": 3}"#
+        );
+        assert!(cloud.vault.get("google:alice@firma.example").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn unlinking_removes_the_entry_and_the_sign_in_of_one_account_only() -> TestResult {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
@@ -3221,34 +3465,26 @@ mod tests {
         )?;
         let (code, out) = run(&cloud.ctx, &["unlink", "bob@outlook.example"], "n\n");
         assert_eq!(code, 1, "{out}");
-        assert_eq!(
-            cloud
-                .ctx
-                .settings
-                .stored_rights()
-                .map_err(|e| e.message())?
-                .linked
-                .len(),
-            2
-        );
+        assert_eq!(stored(&cloud)?.accounts.len(), 2);
         assert!(cloud.vault.get("microsoft:bob@outlook.example").is_some());
         let (code, out) = run(&cloud.ctx, &["unlink", "Bob@Outlook.example"], "j\n");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("bob@outlook.example getrennt."), "{out}");
-        let rights = cloud
-            .ctx
-            .settings
-            .stored_rights()
-            .map_err(|e| e.message())?;
-        assert_eq!(rights.linked.len(), 1);
-        assert_eq!(rights.linked[0].address, "alice@gmail.example");
-        assert_eq!(rights.calendars.len(), 1);
-        assert_eq!(rights.mail.len(), 1);
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 1);
+        assert_eq!(rights.accounts[0].address(), "alice@gmail.example");
+        assert_eq!(rights.calendars_at(Level::Read).len(), 1);
+        assert_eq!(rights.mail_at(Level::Read).len(), 1);
         assert!(cloud.vault.get("microsoft:bob@outlook.example").is_none());
         assert!(cloud.vault.get("google:alice@gmail.example").is_some());
         for (arguments, wanted) in [
             (vec!["unlink"], "Benutzung: avery mail unlink"),
             (vec!["unlink", "nobody@x.example"], "Verbunden:"),
+            (vec!["unlink", "apple:alice@gmail.example"], "Verbunden:"),
+            (
+                vec!["unlink", "microsoft:alice@gmail.example"],
+                "Verbunden:",
+            ),
         ] {
             let (code, out) = run(&cloud.ctx, &arguments, "j\n");
             assert_eq!(code, 1, "{out}");
@@ -3260,6 +3496,36 @@ mod tests {
             (code, out.contains("kein Konto direkt verbunden")),
             (1, true)
         );
+        assert_eq!(cloud.apple.calls(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_address_that_is_linked_twice_is_unlinked_with_its_provider() -> TestResult {
+        let dir = TempDir::new()?;
+        let twice = r#"{"version": 3, "accounts": [{"provider": "google", "address": "x@example.org"}, {"provider": "microsoft", "address": "x@example.org"}]}"#;
+        let cloud = cloudy(
+            &dir,
+            twice,
+            &[
+                ("google:x@example.org", READ_SCOPE),
+                ("microsoft:x@example.org", "Mail.Read"),
+            ],
+            quiet(),
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let (code, out) = run(&cloud.ctx, &["unlink", "x@example.org"], "j\n");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("mehrfach verbunden"), "{out}");
+        assert_eq!(stored(&cloud)?.accounts.len(), 2);
+        let (code, out) = run(&cloud.ctx, &["unlink", "Microsoft:x@example.org"], "j\n");
+        assert_eq!(code, 0, "{out}");
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 1);
+        assert_eq!(rights.accounts[0].provider(), Provider::Google);
+        assert!(cloud.vault.get("microsoft:x@example.org").is_none());
+        assert!(cloud.vault.get("google:x@example.org").is_some());
         Ok(())
     }
 
@@ -3277,20 +3543,14 @@ mod tests {
         let (code, out) = run(&cloud.ctx, &["accounts"], "");
         assert_eq!(code, 0, "{out}");
         assert!(
-            out.contains("* 4) alice@gmail.example  [gmail]  alice@gmail.example  [schreiben]"),
+            out.contains("* 1) alice@gmail.example  [gmail]  alice@gmail.example  [schreiben]\n"),
             "{out}"
         );
         assert!(
-            !out.contains(
-                "alice@gmail.example  [gmail]  alice@gmail.example  [schreiben]  [Anmeldung fehlt"
-            ),
+            out.contains("  2) bob@outlook.example  [outlook]  bob@outlook.example  [aus]  [Anmeldung fehlt, neu verbinden mit: avery mail link]"),
             "{out}"
         );
-        assert!(out.contains("  5) bob@outlook.example  [outlook]"), "{out}");
-        assert!(
-            out.contains("[aus]  [Anmeldung fehlt, neu verbinden mit: avery mail link]"),
-            "{out}"
-        );
+        assert!(out.contains("avery mail setup apple"), "{out}");
         let (code, out) = run(&cloud.ctx, &["status"], "");
         assert_eq!(code, 0, "{out}");
         assert!(
@@ -3299,100 +3559,110 @@ mod tests {
             ),
             "{out}"
         );
+        assert!(out.contains("Apple Mail und Kalender: aus."), "{out}");
+        let empty = real(&TempDir::new()?, None)?;
+        let (code, out) = run(&empty, &["accounts"], "");
+        assert_eq!(code, 0);
+        assert!(out.contains("Noch kein Konto verbunden."), "{out}");
+        assert!(out.contains("avery mail link google | microsoft"), "{out}");
+        assert!(out.contains("avery mail setup apple"), "{out}");
+        assert_eq!(cloud.apple.calls(), 0);
         Ok(())
     }
 
     #[test]
     fn calendars_of_linked_accounts_are_listed_named_and_failures_are_tolerated() -> TestResult {
         let dir = TempDir::new()?;
-        let calendars = CloudCalendars {
-            apple: Ok(vec![info("APPLE-1", "Privat", true)]),
-            cloud: vec![
-                (
-                    "alice@gmail.example",
-                    Ok(vec![
-                        info(
-                            "google:alice@gmail.example:alice@gmail.example",
-                            "alice@gmail.example",
-                            true,
-                        ),
-                        info(
-                            "google:alice@gmail.example:holidays@group",
-                            "Feiertage",
-                            false,
-                        ),
-                    ]),
-                ),
-                ("bob@outlook.example", Err(ToolError::msg("offline"))),
-            ],
-        };
+        let remote: Remote = vec![
+            (
+                "alice@gmail.example",
+                Ok(vec![
+                    info("alice@gmail.example", "alice@gmail.example", true),
+                    info("holidays@group", "Feiertage", false),
+                ]),
+            ),
+            ("bob@outlook.example", Err(ToolError::msg("offline"))),
+        ];
         let cloud = cloudy(
             &dir,
             LINKED,
             &[("google:alice@gmail.example", READ_SCOPE)],
-            calendars,
+            remote,
             crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
         let (code, out) = run(&cloud.ctx, &["calendars"], "");
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("  1) Privat  [aus]"), "{out}");
         assert!(
-            out.contains("* 2) alice@gmail.example  [schreiben]"),
+            out.contains("* 1) alice@gmail.example  [schreiben]"),
             "{out}"
         );
         assert!(
-            out.contains("  3) Feiertage (alice@gmail.example) [schreibgeschuetzt]  [aus]"),
+            out.contains("  2) Feiertage (alice@gmail.example) [schreibgeschuetzt]  [aus]"),
             "{out}"
         );
         assert!(
             out.contains("Hinweis: Kalender von bob@outlook.example nicht lesbar (offline)"),
             "{out}"
         );
+        assert_eq!(cloud.apple.calls(), 0);
+        let down_dir = TempDir::new()?;
+        let all_down = cloudy(
+            &down_dir,
+            LINKED,
+            &[],
+            vec![
+                ("alice@gmail.example", Err(ToolError::msg("offline"))),
+                ("bob@outlook.example", Err(ToolError::msg("offline"))),
+            ],
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        let (code, out) = run(&all_down.ctx, &["calendars"], "");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Keine Kalender gefunden."), "{out}");
+        let (code, out) = run(&real(&TempDir::new()?, None)?, &["calendars"], "");
+        assert_eq!(code, 0);
+        assert!(out.contains("Noch kein Kalender verfuegbar."), "{out}");
         Ok(())
     }
 
     #[test]
-    fn setup_offers_cloud_accounts_and_calendars_with_levels_that_the_sign_in_allows() -> TestResult
+    fn setup_asks_per_account_for_mail_and_calendars_within_what_the_sign_in_allows() -> TestResult
     {
         let dir = TempDir::new()?;
-        let calendars = CloudCalendars {
-            apple: Ok(Vec::new()),
-            cloud: vec![
-                (
-                    "alice@gmail.example",
-                    Ok(vec![
-                        info(
-                            "google:alice@gmail.example:alice@gmail.example",
-                            "alice@gmail.example",
-                            true,
-                        ),
-                        info("google:alice@gmail.example:family@group", "Familie", true),
-                    ]),
-                ),
-                ("bob@outlook.example", Err(ToolError::msg("offline"))),
-            ],
-        };
+        let remote: Remote = vec![
+            (
+                "alice@gmail.example",
+                Ok(vec![
+                    info("alice@gmail.example", "alice@gmail.example", true),
+                    info("family@group", "Familie", true),
+                ]),
+            ),
+            ("bob@outlook.example", Err(ToolError::msg("offline"))),
+        ];
         let cloud = cloudy(
             &dir,
             LINKED,
             &[("google:alice@gmail.example", READ_SCOPE)],
-            calendars,
+            remote,
             crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
-        let (code, out) = run(&cloud.ctx, &["setup"], "\n\n\n2\n1\n\n\n2\n1\nj\n");
+        let (code, out) = run(&cloud.ctx, &["setup"], "\n\n2\n1\n\nj\n");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("Stufe 0 entzieht nur die Freigabe"), "{out}");
         assert!(
             out.contains("Dieser Eintrag ist schreibgeschuetzt"),
             "{out}"
         );
-        let rights = cloud
-            .ctx
-            .settings
-            .stored_rights()
-            .map_err(|e| e.message())?;
+        assert!(
+            out.contains("Hinweis: Kalender von bob@outlook.example nicht lesbar (offline); deren Freigaben bleiben unveraendert."),
+            "{out}"
+        );
+        assert!(out.contains("avery mail setup apple"), "{out}");
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.accounts.len(), 2);
         assert_eq!(
             rights.mail_level("google:alice@gmail.example"),
             Some(Level::Read)
@@ -3410,80 +3680,75 @@ mod tests {
             rights.calendar_level("microsoft:bob@outlook.example:AQMk"),
             Some(Level::Read)
         );
-        assert_eq!(rights.linked.len(), 2);
+        assert_eq!(cloud.apple.calls(), 0);
         Ok(())
     }
 
     #[test]
-    fn setup_keeps_apple_grants_when_apple_cannot_be_read_and_cloud_ones_when_unreachable(
+    fn setup_removes_calendars_that_vanished_and_can_switch_the_mail_of_an_account_off(
     ) -> TestResult {
         let dir = TempDir::new()?;
-        let start = r#"{"version": 3,
-            "mail": {"accounts": [{"id": "ACC-1", "name": "Privat", "level": "read"}]},
-            "calendar": {"calendars": [{"id": "APPLE-1", "name": "Privat", "level": "write"}]},
-            "cloud": {"accounts": [{"source": "google", "address": "alice@gmail.example"}]}}"#;
-        let calendars = CloudCalendars {
-            apple: Err(ToolError::msg("Calendar is closed")),
-            cloud: vec![("alice@gmail.example", Err(ToolError::msg("offline")))],
-        };
-        let mut cloud = cloudy(
+        let config = r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "read",
+            "calendars": [{"id": "alice@gmail.example", "level": "read"}, {"id": "gone@group", "name": "Weg", "level": "read"}]}]}"#;
+        let remote: Remote = vec![(
+            "alice@gmail.example",
+            Ok(vec![info(
+                "alice@gmail.example",
+                "alice@gmail.example",
+                true,
+            )]),
+        )];
+        let cloud = cloudy(
             &dir,
-            start,
-            &[("google:alice@gmail.example", READ_SCOPE)],
-            calendars,
+            config,
+            &[("google:alice@gmail.example", WRITE_SCOPE)],
+            remote,
             crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
-        cloud.ctx.backend = Box::new(Untouchable);
-        let (code, out) = run(&cloud.ctx, &["setup", "calendar"], "j\n");
+        let (code, out) = run(&cloud.ctx, &["setup"], "0\n2\nj\n");
         assert_eq!(code, 0, "{out}");
         assert!(
-            out.contains("Hinweis: Apple Kalender ist nicht lesbar"),
+            out.contains("Nicht mehr vorhanden, wird entfernt: Weg"),
             "{out}"
         );
-        assert!(
-            out.contains("Hinweis: Kalender von alice@gmail.example nicht lesbar (offline)"),
-            "{out}"
+        let rights = stored(&cloud)?;
+        assert_eq!(rights.mail_level("google:alice@gmail.example"), None);
+        assert_eq!(
+            rights.calendar_level("google:alice@gmail.example:alice@gmail.example"),
+            Some(Level::Write)
         );
-        let rights = cloud
-            .ctx
-            .settings
-            .stored_rights()
-            .map_err(|e| e.message())?;
-        assert_eq!(rights.calendar_level("APPLE-1"), Some(Level::Write));
-        assert_eq!(rights.mail_level("ACC-1"), Some(Level::Read));
+        assert_eq!(rights.calendars_at(Level::Read).len(), 1);
+        assert_eq!(rights.accounts.len(), 1);
         Ok(())
     }
 
     #[test]
-    fn setup_fails_before_the_first_question_when_the_calendars_cannot_be_listed() -> TestResult {
+    fn setup_without_any_account_points_to_link_and_apple() -> TestResult {
         let dir = TempDir::new()?;
-        let calendars = CloudCalendars {
-            apple: Err(ToolError::msg("Calendar is closed")),
-            cloud: Vec::new(),
-        };
         let cloud = cloudy(
             &dir,
             r#"{"version": 3}"#,
             &[],
-            calendars,
+            quiet(),
             crate::provider::fakes::Visit::Nothing,
             crate::http::scripted::Scripted::new(),
         )?;
-        let (code, out) = run(&cloud.ctx, &["setup"], "1\n1\n1\n1\nj\n");
+        let (code, out) = run(&cloud.ctx, &["setup"], "1\n1\nj\n");
         assert_eq!(code, 1, "{out}");
-        assert!(out.contains("Fehler: Calendar is closed"), "{out}");
-        assert!(!out.contains("Mail-Konten."), "{out}");
+        assert!(out.contains("avery mail link google | microsoft"), "{out}");
+        assert!(out.contains("avery mail setup apple"), "{out}");
         assert!(!out.contains("Stufe 0=aus"), "{out}");
         assert_eq!(
             fs::read_to_string(&cloud.ctx.settings.config_path)?,
             r#"{"version": 3}"#
         );
+        assert_eq!(cloud.apple.calls(), 0);
         Ok(())
     }
 
     #[test]
-    fn revoke_removes_the_grants_but_keeps_the_links() -> TestResult {
+    fn revoke_removes_the_grants_but_keeps_the_accounts_and_their_sign_ins() -> TestResult {
         let dir = TempDir::new()?;
         let cloud = cloudy(
             &dir,
@@ -3496,14 +3761,65 @@ mod tests {
         let (code, out) = run(&cloud.ctx, &["revoke"], "");
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("avery mail unlink <adresse>"), "{out}");
-        let rights = cloud
-            .ctx
-            .settings
-            .stored_rights()
-            .map_err(|e| e.message())?;
-        assert!(rights.mail.is_empty() && rights.calendars.is_empty());
-        assert_eq!(rights.linked.len(), 2);
+        let rights = stored(&cloud)?;
+        assert!(rights.mail_at(Level::Read).is_empty());
+        assert!(rights.calendars_at(Level::Read).is_empty());
+        assert_eq!(rights.accounts.len(), 2);
         assert!(cloud.vault.get("google:alice@gmail.example").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_cloud_only_configuration_never_touches_apple_but_setup_apple_does() -> TestResult {
+        let dir = TempDir::new()?;
+        let remote: Remote = vec![
+            (
+                "alice@gmail.example",
+                Ok(vec![info(
+                    "alice@gmail.example",
+                    "alice@gmail.example",
+                    true,
+                )]),
+            ),
+            (
+                "bob@outlook.example",
+                Ok(vec![info("AQMk", "Calendar", true)]),
+            ),
+        ];
+        let cloud = cloudy(
+            &dir,
+            LINKED,
+            &[
+                ("google:alice@gmail.example", WRITE_SCOPE),
+                ("microsoft:bob@outlook.example", "Mail.Read"),
+            ],
+            remote,
+            crate::provider::fakes::Visit::Nothing,
+            crate::http::scripted::Scripted::new(),
+        )?;
+        for (args, input) in [
+            (vec!["accounts"], ""),
+            (vec!["calendars"], ""),
+            (vec!["status"], ""),
+            (vec!["setup"], "\n\n\n\n\n"),
+            (vec!["setup"], "0\n0\n0\n0\nn\n"),
+            (vec!["sendlog"], ""),
+            (vec!["changes"], ""),
+            (vec!["undo"], ""),
+            (vec!["unlink", "bob@outlook.example"], "n\n"),
+            (vec!["revoke"], ""),
+            (vec!["accounts"], ""),
+            (vec!["calendars"], ""),
+            (vec!["status"], ""),
+        ] {
+            let (_, out) = run(&cloud.ctx, &args, input);
+            assert!(!out.contains("BACKEND TOUCHED"), "{args:?}: {out}");
+            assert_eq!(cloud.apple.calls(), 0, "{args:?}: {out}");
+        }
+        let (code, out) = run(&cloud.ctx, &["setup", "apple"], "");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("Fehler: Apple Mail ist nicht lesbar"), "{out}");
+        assert_eq!(cloud.apple.calls(), 1);
         Ok(())
     }
 }

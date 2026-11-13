@@ -8,7 +8,7 @@ use crate::calendar::{self, Calendar};
 use crate::error::{ToolError, ToolResult};
 use crate::fake;
 use crate::json::{self, Json, Object};
-use crate::rights::{Level, Rights, CONFIG_VERSION};
+use crate::rights::{Apple, Level, Rights, CONFIG_VERSION};
 use crate::text::{clean, text_of};
 use crate::texts::{
     CALENDAR_WRITE_OFF, DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS,
@@ -152,23 +152,25 @@ impl Settings {
             }
         };
         Rights {
-            mail: fake::accounts()
-                .into_iter()
-                .filter(|entry| entry.id != "FAKE-WORK")
-                .map(|entry| {
-                    let granted = level(&entry.id);
-                    (entry, granted)
-                })
-                .collect(),
-            calendars: calendar::demo_entries()
-                .into_iter()
-                .filter(|entry| entry.id != "FAKE-CAL-FIRMA")
-                .map(|entry| {
-                    let granted = level(&entry.id);
-                    (entry, granted)
-                })
-                .collect(),
-            linked: Vec::new(),
+            accounts: Vec::new(),
+            apple: Apple {
+                mail: fake::accounts()
+                    .into_iter()
+                    .filter(|entry| entry.id != "FAKE-WORK")
+                    .map(|entry| {
+                        let granted = level(&entry.id);
+                        (entry, granted)
+                    })
+                    .collect(),
+                calendars: calendar::demo_entries()
+                    .into_iter()
+                    .filter(|entry| entry.id != "FAKE-CAL-FIRMA")
+                    .map(|entry| {
+                        let granted = level(&entry.id);
+                        (entry, granted)
+                    })
+                    .collect(),
+            },
             sends_per_hour: DEFAULT_SENDS_PER_HOUR,
             changes_per_hour: DEFAULT_CHANGES_PER_HOUR,
         }
@@ -451,13 +453,21 @@ mod tests {
         Ok(settings_at(&path))
     }
 
-    const TWO_ACCOUNTS: &str = r#"{"version": 3, "mail": {"accounts": [
+    const TWO_ACCOUNTS: &str = r#"{"version": 3, "apple": {"mail": [
         {"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"},
         {"id": "ACC-2", "name": "Outlook", "type": "exchange", "addresses": ["me@outlook.example", "alias@outlook.example"], "level": "read"}]}}"#;
 
-    const CALENDARS: &str = r#"{"version": 3, "calendar": {"calendars": [
+    const CALENDARS: &str = r#"{"version": 3, "apple": {"calendars": [
         {"id": "CAL-1", "name": "Privat", "level": "write"},
-        {"id": "CAL-2", "name": "Familie", "level": "read"}], "changes_per_hour": 4}}"#;
+        {"id": "CAL-2", "name": "Familie", "level": "read"}]}, "changes_per_hour": 4}"#;
+
+    const REMOTE: &str = r#"{"version": 3, "accounts": [
+        {"provider": "google", "address": "alice@gmail.example", "mail": "write",
+         "calendars": [
+            {"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "write"},
+            {"id": "family@group", "name": "Familie (alice@gmail.example)", "level": "read"}]},
+        {"provider": "microsoft", "address": "bob@outlook.example", "mail": "read"}],
+        "sends_per_hour": 2}"#;
 
     #[test]
     fn paths_follow_the_environment() {
@@ -586,10 +596,12 @@ mod tests {
         let dir = TempDir::new()?;
         for text in [
             r#"{"version": 3, "allowed_accounts": []}"#,
-            r#"{"version": 3, "mail": {"accounts": [{"id": 7, "level": "read"}]}}"#,
-            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "admin"}]}}"#,
-            r#"{"version": 3, "mail": {"sends_per_hour": 0}}"#,
-            r#"{"version": 3, "calendar": {"calendars": [{"id": "C"}]}}"#,
+            r#"{"version": 3, "mail": {"accounts": []}}"#,
+            r#"{"version": 3, "apple": {"mail": [{"id": 7, "level": "read"}]}}"#,
+            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "admin"}]}}"#,
+            r#"{"version": 3, "sends_per_hour": 0}"#,
+            r#"{"version": 3, "apple": {"calendars": [{"id": "C"}]}}"#,
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "Alice@Gmail.example"}]}"#,
         ] {
             let s = write_config(&dir, text)?;
             assert!(
@@ -688,7 +700,7 @@ mod tests {
         assert_eq!(off.resolve_writable(None), Err(ToolError::msg(WRITE_OFF)));
         let writing = write_config(
             &dir,
-            r#"{"version": 3, "mail": {"accounts": [
+            r#"{"version": 3, "apple": {"mail": [
                 {"id": "ACC-1", "name": "A", "level": "read"},
                 {"id": "ACC-2", "name": "B", "level": "write"}]}}"#,
         )?;
@@ -712,7 +724,7 @@ mod tests {
         let dir = TempDir::new()?;
         let with = |limit: &str| {
             format!(
-                r#"{{"version": 3, "mail": {{"accounts": [{{"id": "A", "name": "A", "level": "write"}}], {limit}}}}}"#
+                r#"{{"version": 3, "apple": {{"mail": [{{"id": "A", "name": "A", "level": "write"}}]}}, {limit}}}"#
             )
         };
         let s = write_config(&dir, &with(r#""sends_per_hour": 3"#))?;
@@ -723,7 +735,7 @@ mod tests {
         assert!(s.write_settings().is_err());
         let s = write_config(
             &dir,
-            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "write"}]}}"#,
+            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "write"}]}}"#,
         )?;
         assert_eq!(s.write_settings()?.max_per_hour, 5);
         for bad in ["0", "31", "\"7\"", "null", "true"] {
@@ -801,7 +813,7 @@ mod tests {
         );
         let read_only = write_config(
             &dir,
-            r#"{"version": 3, "calendar": {"calendars": [{"id": "C", "name": "N", "level": "read"}]}}"#,
+            r#"{"version": 3, "apple": {"calendars": [{"id": "C", "name": "N", "level": "read"}]}}"#,
         )?;
         assert_eq!(
             read_only.resolve_writable_calendar(None),
@@ -852,7 +864,7 @@ mod tests {
         let s = settings_at(&dir.path("sub/dir/config.json"));
         let mut rights = Rights::empty();
         rights.sends_per_hour = 7;
-        rights.mail.push((
+        rights.apple.mail.push((
             crate::account::MailAccount {
                 id: "A".into(),
                 name: "N".into(),
@@ -861,15 +873,63 @@ mod tests {
             },
             Level::Write,
         ));
-        rights.calendars.push((
+        rights.apple.calendars.push((
             crate::calendar::CalendarEntry {
                 id: "C".into(),
                 name: "K".into(),
             },
             Level::Read,
         ));
+        let mut account = crate::rights::RemoteAccount::new(
+            crate::provider::Provider::Microsoft,
+            "bob@outlook.example",
+        )
+        .ok_or("account")?;
+        account.mail = Some(Level::Read);
+        rights.accounts.push(account);
         s.save_rights(&rights)?;
         assert_eq!(s.rights()?, rights);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_accounts_are_read_with_runtime_ids_labels_and_limits() -> TestResult {
+        let dir = TempDir::new()?;
+        let s = write_config(&dir, REMOTE)?;
+        let accounts = s.allowed_accounts()?;
+        let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "google:alice@gmail.example",
+                "microsoft:bob@outlook.example"
+            ]
+        );
+        assert_eq!(accounts[0].label, "alice@gmail.example");
+        assert_eq!(accounts[0].kind, "gmail");
+        assert_eq!(accounts[1].kind, "outlook");
+        let writing = s.write_settings()?;
+        let ids: Vec<&str> = writing.accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["google:alice@gmail.example"]);
+        assert_eq!(writing.max_per_hour, 2);
+        let calendars = s.allowed_calendars()?;
+        let ids: Vec<&str> = calendars.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "google:alice@gmail.example:alice@gmail.example",
+                "google:alice@gmail.example:family@group"
+            ]
+        );
+        assert_eq!(
+            s.resolve(Some(&j("\"bob@outlook.example\"")?))?[0].id,
+            "microsoft:bob@outlook.example"
+        );
+        let changing = s.calendar_write_settings()?;
+        let ids: Vec<&str> = changing.calendars.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["google:alice@gmail.example:alice@gmail.example"]);
+        let (only, _) = s.resolve_writable_calendar(None)?;
+        assert_eq!(only.label, "alice@gmail.example");
         Ok(())
     }
 

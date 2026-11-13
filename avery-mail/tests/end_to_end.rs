@@ -21,7 +21,7 @@ fn account(id: &str, name: &str, level: &str) -> String {
 
 fn mail_config(level: &str) -> String {
     format!(
-        r#"{{"version": 3, "mail": {{"accounts": [{}]}}}}"#,
+        r#"{{"version": 3, "apple": {{"mail": [{}]}}}}"#,
         account("ACC-1", "Privat Gmail", level)
     )
 }
@@ -182,7 +182,8 @@ fn an_uncertain_outcome_asks_the_user_to_check_mail_and_stays_pending() -> TestR
 
 #[test]
 fn real_mode_reads_the_configuration_file_and_never_guesses() -> TestResult {
-    let calendars = r#"{"version": 3, "calendar": {"calendars": [{"id": "C", "name": "K", "level": "write"}]}}"#;
+    let calendars =
+        r#"{"version": 3, "apple": {"calendars": [{"id": "C", "name": "K", "level": "write"}]}}"#;
     for (config, tools) in [
         (mail_config("read"), 5),
         (mail_config("write"), 7),
@@ -190,8 +191,17 @@ fn real_mode_reads_the_configuration_file_and_never_guesses() -> TestResult {
         (r#"{"version": 3}"#.to_string(), 0),
         (r#"{"version": 2, "allowed_accounts": []}"#.to_string(), 8),
         (
-            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "root"}]}}"#.to_string(),
+            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "root"}]}}"#.to_string(),
             8,
+        ),
+        (
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "read"}]}}"#.to_string(),
+            8,
+        ),
+        (
+            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write"}]}"#
+                .to_string(),
+            7,
         ),
         ("not json".to_string(), 8),
     ] {
@@ -276,7 +286,7 @@ fn demo_mode_selftest_and_accounts_work_without_mail() -> TestResult {
     assert!(!selftest.stdout.contains("Paket"));
     let accounts = run_cli(&sandbox, &env, &["accounts,"], "")?;
     assert_eq!(accounts.code, Some(0));
-    assert!(accounts.stdout.contains("Demo Gmail") && accounts.stdout.contains("Demo Firma"));
+    assert!(accounts.stdout.contains("Demo Gmail") && !accounts.stdout.contains("Demo Firma"));
     Ok(())
 }
 
@@ -284,7 +294,7 @@ fn demo_mode_selftest_and_accounts_work_without_mail() -> TestResult {
 fn setup_reads_its_answers_from_standard_input() -> TestResult {
     let sandbox = Sandbox::new()?;
     let env = [("MAIL_MCP_FAKE", "1")];
-    let output = run_cli(&sandbox, &env, &["setup"], "2\n1\n\n1\n\n\n\nj\n")?;
+    let output = run_cli(&sandbox, &env, &["setup", "apple"], "2\n1\n\n1\n\n\n\nj\n")?;
     assert_eq!(output.code, Some(0), "{}", output.stdout);
     let saved = sandbox.read("config.json");
     assert!(
@@ -314,8 +324,7 @@ fn an_unsupported_configuration_is_never_overwritten() -> TestResult {
         sandbox.write("config.json", original)?;
         for (args, input) in [
             (vec!["setup"], "1\nj\n"),
-            (vec!["setup", "mail"], "1\nj\n"),
-            (vec!["setup", "calendar"], "1\nj\n"),
+            (vec!["setup", "apple"], "1\nj\n"),
             (vec!["revoke"], ""),
         ] {
             let output = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &args, input)?;
