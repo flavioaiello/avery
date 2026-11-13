@@ -205,7 +205,7 @@ impl LogEntry {
             subject: text("subject")?,
             reply_to_id: match object.get("reply_to_id") {
                 Some(Json::Null) => None,
-                Some(Json::Str(id)) => Some(MessageId::parse(id)?.as_str().to_string()),
+                Some(Json::Str(id)) => Some(MessageId::logged(id)?),
                 _ => return None,
             },
             recipients: usize::try_from(whole("recipients")?).ok()?,
@@ -412,6 +412,15 @@ mod tests {
             &good.replace(r#""reply_to_id": null"#, r#""reply_to_id": "AAMk-_=""#)
         )?)
         .is_some());
+        for old in ["a..b", "AAMk...", ".."] {
+            let line = good.replace(
+                r#""reply_to_id": null"#,
+                &format!(r#""reply_to_id": "{old}""#),
+            );
+            let entry = LogEntry::from_json(&j(&line)?)
+                .ok_or("an id the old grammar accepted must stay readable")?;
+            assert_eq!(entry.reply_to_id.as_deref(), Some(old));
+        }
         for bad in [
             good.replace(r#""v": 1"#, r#""v": 2"#),
             good.replace(r#""v": 1, "#, ""),

@@ -92,15 +92,22 @@ pub(crate) const MAX_MESSAGE_ID: usize = 512;
 pub(crate) struct MessageId(String);
 
 impl MessageId {
-    pub(crate) fn parse(text: &str) -> Option<MessageId> {
-        let text = text.trim();
-        (!text.is_empty()
+    fn token(text: &str) -> bool {
+        !text.is_empty()
             && text.len() <= MAX_MESSAGE_ID
-            && !text.contains("..")
             && text
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_=+/.-".contains(c)))
-        .then(|| MessageId(text.to_string()))
+                .all(|c| c.is_ascii_alphanumeric() || "_=+/.-".contains(c))
+    }
+
+    pub(crate) fn parse(text: &str) -> Option<MessageId> {
+        let text = text.trim();
+        (!text.contains("..") && MessageId::token(text)).then(|| MessageId(text.to_string()))
+    }
+
+    pub(crate) fn logged(text: &str) -> Option<String> {
+        let text = text.trim();
+        MessageId::token(text).then(|| text.to_string())
     }
 
     pub(crate) fn argument(value: Option<&Json>, parameter: &str) -> ToolResult<Option<MessageId>> {
