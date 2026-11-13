@@ -182,6 +182,14 @@ impl Provider {
         }
     }
 
+    pub(crate) fn display(self) -> &'static str {
+        match self {
+            Provider::Apple => "Apple Mail und Kalender",
+            Provider::Google => "Gmail",
+            Provider::Microsoft => "Outlook.com",
+        }
+    }
+
     pub(crate) fn oauth(self) -> Option<&'static OAuth> {
         match self {
             Provider::Apple => None,
@@ -205,11 +213,9 @@ impl Provider {
     }
 
     pub(crate) fn of_id(id: &str) -> Provider {
-        match id.split_once(':') {
-            Some(("google", _)) => Provider::Google,
-            Some(("microsoft", _)) => Provider::Microsoft,
-            _ => Provider::Apple,
-        }
+        id.split_once(':')
+            .and_then(|(prefix, _)| Provider::parse_remote(prefix))
+            .unwrap_or(Provider::Apple)
     }
 }
 

@@ -329,9 +329,9 @@ fn setup_account(
     listing: ToolResult<Vec<Listed>>,
 ) -> Result<(), u8> {
     console.say(&format!(
-        "\n{} ({})",
-        account.address(),
-        account.provider().kind()
+        "\n{}: {}",
+        account.provider().display(),
+        account.address()
     ));
     let capability = ctx.linker.capability(account.provider(), account.address());
     let mail_highest = if capability.is_some_and(|found| found.write_mail) {
@@ -1060,7 +1060,7 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         .is_ok_and(|rights| rights.calendar_level(&entry.calendar_id) == Some(Level::Write));
     if !writable {
         console.say(
-            "Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup",
+            "Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup (Apple Kalender: avery mail setup apple)",
         );
         return 1;
     }

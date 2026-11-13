@@ -1366,3 +1366,72 @@ fn only_a_configured_apple_section_ever_reaches_the_apple_backend() -> TestResul
     assert!(wired.transport.seen().is_empty());
     Ok(())
 }
+
+#[test]
+fn the_selftest_of_a_provider_calendar_checks_it_at_the_provider_and_never_touches_apple(
+) -> TestResult {
+    let config = r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example",
+        "calendars": [{"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "read"},
+                      {"id": "gone@group", "name": "Weg", "level": "read"}]}]}"#;
+    let transport = Scripted::new()
+        .json(Method::Post, "/token", 200, TOKEN)
+        .json(
+            Method::Get,
+            "/users/me/calendarList",
+            200,
+            r#"{"kind": "calendar#calendarList", "items": [
+                {"id": "alice@gmail.example", "summary": "alice@gmail.example", "accessRole": "owner"}]}"#,
+        )
+        .json(
+            Method::Get,
+            "/events",
+            200,
+            r#"{"kind": "calendar#events", "items": []}"#,
+        );
+    let wired = wired(
+        config,
+        &[("google:alice@gmail.example", GOOGLE_SCOPES)],
+        transport,
+        "no",
+    )?;
+    let (code, out) = run_cli(&wired.ctx, &["selftest"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("PASS  Kalender 1  Kalender erreichbar"),
+        "{out}"
+    );
+    assert!(out.contains("beschreibbar"), "{out}");
+    assert!(out.contains("PASS  Kalender 1  Termine lesen"), "{out}");
+    assert!(
+        out.contains("FAIL  Kalender 2  Kalender erreichbar: Kalender nicht mehr vorhanden"),
+        "{out}"
+    );
+    assert!(!out.contains("Wiederholungen"), "{out}");
+    assert_eq!(wired.apple.calls(), 0);
+    Ok(())
+}
+
+fn ordinal(provider: Provider) -> usize {
+    match provider {
+        Provider::Apple => 0,
+        Provider::Google => 1,
+        Provider::Microsoft => 2,
+    }
+}
+
+#[test]
+fn all_lists_every_provider_once_and_the_labels_differ() {
+    assert_eq!(Provider::ALL.len(), 3);
+    for (position, provider) in Provider::ALL.iter().enumerate() {
+        assert_eq!(ordinal(*provider), position);
+    }
+    for (index, provider) in Provider::ALL.iter().enumerate() {
+        for other in Provider::ALL.iter().skip(index + 1) {
+            assert_ne!(provider.as_str(), other.as_str());
+            assert_ne!(provider.kind(), other.kind());
+            assert_ne!(provider.display(), other.display());
+        }
+    }
+    assert_eq!(Provider::Google.display(), "Gmail");
+    assert_eq!(Provider::Microsoft.display(), "Outlook.com");
+}
