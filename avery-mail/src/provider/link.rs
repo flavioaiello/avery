@@ -28,7 +28,7 @@ pub(crate) struct Client {
 
 impl Client {
     pub(crate) fn new(provider: Provider, id: &str, secret: &str) -> Result<Client, String> {
-        let oauth = provider.oauth().ok_or("Not a cloud provider.")?;
+        let oauth = provider.oauth().ok_or("This provider has no sign-in.")?;
         let id = id.trim();
         let secret = secret.trim();
         let valid = |text: &str| {
@@ -455,7 +455,7 @@ impl Linker {
         write: bool,
         announce: &mut dyn FnMut(&str),
     ) -> Result<Linked, String> {
-        let oauth = provider.oauth().ok_or("Not a cloud provider.")?;
+        let oauth = provider.oauth().ok_or("This provider has no sign-in.")?;
         let verifier = random_token(32).ok_or("No random numbers available.")?;
         let state = random_token(16).ok_or("No random numbers available.")?;
         let challenge = challenge_of(&verifier);
