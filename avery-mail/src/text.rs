@@ -104,7 +104,7 @@ pub(crate) fn one_line_str(text: &str, limit: usize) -> String {
                 collapsed.push(' ');
             }
             in_space = true;
-        } else {
+        } else if !is_hidden(c) {
             collapsed.push(c);
             in_space = false;
         }
@@ -394,6 +394,146 @@ mod tests {
         );
         assert_eq!(one_line_str(&"a ".repeat(200), 10), "a a a a a [...]");
         assert_eq!(one_line(None, 10), "");
+    }
+
+    fn one_line_is_stable(text: &str, limit: usize) -> Result<(), String> {
+        let once = one_line_str(text, limit);
+        let again = one_line_str(&once, limit);
+        if again != once {
+            return Err(format!("{text:?} at {limit}: {once:?} became {again:?}"));
+        }
+        if once.chars().any(is_hidden)
+            || once.chars().any(|c| c.is_whitespace() && c != ' ')
+            || once.contains("  ")
+            || once.starts_with(' ')
+            || once.ends_with(' ')
+        {
+            return Err(format!("{text:?} at {limit}: {once:?} is not clean"));
+        }
+        if char_len(&once) > limit + 6 {
+            return Err(format!("{text:?} at {limit}: {once:?} is too long"));
+        }
+        let wider = char_len(&once).max(limit);
+        if one_line_str(&once, wider) != once {
+            return Err(format!("{text:?} at {limit}: {once:?} changes at {wider}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_hidden_character_between_spaces_does_not_leave_a_double_space() {
+        for (text, wanted) in [
+            ("Free \u{200b} Events", "Free Events"),
+            ("a \u{200b}\u{200b} \u{200b} b", "a b"),
+            ("a\u{200b}\tb", "a b"),
+            ("a \u{202e} b \u{2066}\t\u{2069} c", "a b c"),
+            ("a\u{200b}b", "ab"),
+            ("\u{200b} a \u{200b}", "a"),
+            ("\u{feff}\t\u{200d}", ""),
+            ("a\u{b}b\u{c}c", "a b c"),
+            ("a\t\tb \t c\r\n\r\nd", "a b c d"),
+            ("x \u{e0041} \u{e0042} y", "x y"),
+        ] {
+            assert_eq!(one_line_str(text, 50), wanted, "{text:?}");
+            assert_eq!(one_line_str(wanted, 50), wanted, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn one_line_is_stable_for_every_short_mix_of_nasty_pieces() -> TestResult {
+        let pieces = ["a", " ", "\t", "\u{200b}", "\u{202e}", "\u{a0}"];
+        let mut texts: Vec<String> = vec![String::new()];
+        let mut start = 0;
+        for _ in 0..6 {
+            let end = texts.len();
+            for index in start..end {
+                for piece in pieces {
+                    texts.push(format!("{}{piece}", texts[index]));
+                }
+            }
+            start = end;
+        }
+        assert!(texts.len() > 50_000);
+        for text in &texts {
+            for limit in [1, 2, 6, 7, 120] {
+                one_line_is_stable(text, limit)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn one_line_is_stable_for_long_and_odd_names_at_every_limit() -> TestResult {
+        let pieces = [
+            "a",
+            "Z",
+            " ",
+            "  ",
+            "\t",
+            "\r\n",
+            "\u{b}",
+            "\u{85}",
+            "\u{a0}",
+            "\u{2028}",
+            "\u{200b}",
+            "\u{200d}",
+            "\u{202e}",
+            "\u{2066}",
+            "\u{feff}",
+            "\u{ad}",
+            "\u{e0041}",
+            "\u{fe0f}",
+            "\u{e9}",
+            "\u{301}",
+            "\u{1f600}",
+            "\u{4e2d}",
+            "[...]",
+            " [...]",
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap_or(0)
+        };
+        for _ in 0..1200 {
+            let count = next() % 220;
+            let text: String = (0..count).map(|_| pieces[next() % pieces.len()]).collect();
+            for limit in [1, 2, 8, 30, 114, 120] {
+                one_line_is_stable(&text, limit)?;
+            }
+        }
+        for length in [119, 120, 121, 122, 126, 127, 200, 1000] {
+            for text in [
+                "x".repeat(length),
+                "x ".repeat(length),
+                " x".repeat(length),
+                format!("{}\u{200b} {}", "y".repeat(length), "z".repeat(length)),
+                format!("{} \u{200b} {}", "y".repeat(length), "z".repeat(length)),
+                "\u{4e2d}".repeat(length),
+                "\u{1f600} ".repeat(length),
+            ] {
+                for limit in [30, 80, 120] {
+                    one_line_is_stable(&text, limit)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn one_line_keeps_ordinary_text_as_it_is() -> TestResult {
+        for text in [
+            "Privat",
+            "Max Mustermann",
+            "iCloud (me@icloud.example)",
+            "a b c",
+        ] {
+            assert_eq!(one_line_str(text, 120), text);
+            one_line_is_stable(text, 120)?;
+        }
+        Ok(())
     }
 
     #[test]

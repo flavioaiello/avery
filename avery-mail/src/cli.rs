@@ -4703,6 +4703,127 @@ mod tests {
         Ok(())
     }
 
+    fn nasty_names() -> Vec<String> {
+        vec![
+            "Free \u{200b} Events".to_string(),
+            "Work\t\u{202e}Mail  \u{2066} x".to_string(),
+            format!("{} tail words", "L".repeat(119)),
+            format!("{} tail", "M".repeat(118)),
+            "x ".repeat(100),
+            "\u{e9}".repeat(300),
+            "\u{200b}\u{200b}".to_string(),
+            "\n\r\n\t ".to_string(),
+            format!("{}\u{200b}{}", "a".repeat(60), "b".repeat(80)),
+            format!("{} \u{200b} {}", "c".repeat(59), "d".repeat(80)),
+            "Feiertage \u{e0041}\u{e0042} (Deutschland)".to_string(),
+        ]
+    }
+
+    #[test]
+    fn what_the_sanitiser_makes_of_apple_names_always_passes_the_config_validator() -> TestResult {
+        for (index, name) in nasty_names().into_iter().enumerate() {
+            let account = sanitized(MailAccount {
+                id: format!("ACC-{index}"),
+                name: name.clone(),
+                kind: format!("imap {name}"),
+                addresses: vec![name.clone(), format!("me \u{200b} {index}@example.org")],
+            });
+            let calendar = CalendarEntry {
+                id: format!("CAL-{index}"),
+                name: one_line_str(&name, MAX_NAME),
+            };
+            let remote = calendar_name(&name, "alice@gmail.com");
+            let mut rights = Rights::empty();
+            rights.apple.mail.push((account.clone(), Level::Read));
+            rights.apple.calendars.push((calendar, Level::Read));
+            let mut linked =
+                RemoteAccount::new(Provider::Google, "alice@gmail.com").ok_or("account")?;
+            linked.calendars.push(CalendarGrant {
+                id: "primary".to_string(),
+                name: remote.clone(),
+                level: Level::Read,
+            });
+            rights.accounts.push(linked);
+            let parsed = Rights::parse(&rights.to_config())
+                .map_err(|what| format!("{name:?} was saved but is refused: {what}"))?;
+            assert_eq!(parsed.apple.mail[0].0.addresses, account.addresses);
+            assert_eq!(parsed.apple.mail[0].0.kind, account.kind);
+            assert_eq!(
+                one_line_str(&account.name, MAX_NAME),
+                account.name,
+                "{name:?}"
+            );
+            assert_eq!(one_line_str(&remote, MAX_NAME), remote, "{name:?}");
+            if account.name.is_empty() {
+                assert_eq!(parsed.apple.mail[0].0.name, account.id);
+            } else {
+                assert_eq!(parsed.apple.mail[0].0.name, account.name);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nasty_apple_names_never_lock_the_config() -> TestResult {
+        let names = nasty_names();
+        let listing = crate::testutil::Listing {
+            accounts: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| MailAccount {
+                    id: format!("ACC-{index}"),
+                    name: name.clone(),
+                    kind: "imap".to_string(),
+                    addresses: vec![format!("me{index}@example.org")],
+                })
+                .collect(),
+            calendars: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| CalendarInfo {
+                    id: format!("CAL-{index}"),
+                    name: name.clone(),
+                    writable: true,
+                })
+                .collect(),
+        };
+        let dir = TempDir::new()?;
+        let ctx = Context::new(
+            settings_at(&dir.path("config.json")),
+            Box::new(listing.clone()),
+            Box::new(listing),
+            Linker::inert(),
+        );
+        let count = names.len();
+        let (code, out) = run(
+            &ctx,
+            &["setup", "apple"],
+            &format!("{}j\n", "1\n".repeat(2 * count)),
+        );
+        assert_eq!(code, 0, "{out}");
+        let rights = ctx.settings.stored_rights().map_err(|e| e.message())?;
+        assert_eq!(rights.apple.mail.len(), count);
+        assert_eq!(rights.apple.calendars.len(), count);
+        let stored = fs::read_to_string(&ctx.settings.config_path)?;
+        for hidden in ["\\u200b", "\\u202e", "\\u2066", "\\t", "\\n"] {
+            assert!(!stored.contains(hidden), "{hidden}: {stored}");
+        }
+        for (calendar, _) in &rights.apple.calendars {
+            assert_eq!(one_line_str(&calendar.name, MAX_NAME), calendar.name);
+        }
+        let (code, out) = run(&ctx, &["setup"], &"\n".repeat(2 * count));
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Unveraendert."), "{out}");
+        for command in ["status", "accounts", "calendars"] {
+            let (code, out) = run(&ctx, &[command], "");
+            assert_eq!(code, 0, "{command}: {out}");
+        }
+        let (code, out) = run(&ctx, &["revoke"], "");
+        assert_eq!(code, 0, "{out}");
+        assert!(ctx.settings.stored_rights().is_ok());
+        Ok(())
+    }
+
     #[test]
     fn the_five_config_commands_refuse_in_demo_mode_and_touch_nothing() -> TestResult {
         for (args, input) in [

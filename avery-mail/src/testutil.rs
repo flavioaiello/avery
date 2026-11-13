@@ -105,6 +105,70 @@ pub(crate) fn log_entry(ts: i64, outcome: Outcome, id: Option<&str>) -> LogEntry
 }
 
 #[derive(Clone, Default)]
+pub(crate) struct Listing {
+    pub(crate) accounts: Vec<MailAccount>,
+    pub(crate) calendars: Vec<CalendarInfo>,
+}
+
+impl Backend for Listing {
+    fn all_accounts(&self) -> ToolResult<Vec<MailAccount>> {
+        Ok(self.accounts.clone())
+    }
+
+    fn account_info(&self, _: &Account) -> ToolResult<MailAccount> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn mailboxes(&self, _: &Account) -> ToolResult<Vec<Mailbox>> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn messages(&self, _: &Account, _: &MessageQuery) -> ToolResult<MessageList> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn read(
+        &self,
+        _: &Account,
+        _: Option<&str>,
+        _: &MessageId,
+        _: usize,
+    ) -> ToolResult<MessageBody> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn compose(&self, _: &Account, _: &ComposeRequest) -> ToolResult<Preview> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn approval_test(&self, _: u64) -> ToolResult<String> {
+        Err(ToolError::msg("only listed"))
+    }
+}
+
+impl CalendarBackend for Listing {
+    fn calendars(&self, provider: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
+        if provider == Provider::Apple {
+            Ok(self.calendars.clone())
+        } else {
+            Err(ToolError::msg("only listed"))
+        }
+    }
+
+    fn events(&self, _: &Calendar, _: Window) -> ToolResult<Vec<RawEvent>> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn event(&self, _: &Calendar, _: &str) -> ToolResult<EventDetail> {
+        Err(ToolError::msg("only listed"))
+    }
+
+    fn change(&self, _: &Calendar, _: &Change, _: &Approval) -> ToolResult<ChangeResult> {
+        Err(ToolError::msg("only listed"))
+    }
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct Untouchable {
     calls: Arc<AtomicUsize>,
 }
