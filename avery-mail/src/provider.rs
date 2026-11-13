@@ -58,7 +58,62 @@ pub(crate) struct OAuth {
     pub(crate) mail_write: &'static [&'static str],
     pub(crate) calendar_write: &'static [&'static str],
     pub(crate) registration: &'static [&'static str],
+    pub(crate) explanation: &'static str,
     pub(crate) identify: fn(&Object) -> Result<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Page {
+    Readme,
+    GoogleProject,
+    GmailApi,
+    CalendarApi,
+    GoogleConsent,
+    GoogleCredentials,
+    EntraApps,
+}
+
+impl Page {
+    #[cfg(test)]
+    pub(crate) const ALL: [Page; 7] = [
+        Page::Readme,
+        Page::GoogleProject,
+        Page::GmailApi,
+        Page::CalendarApi,
+        Page::GoogleConsent,
+        Page::GoogleCredentials,
+        Page::EntraApps,
+    ];
+
+    pub(crate) const fn url(self) -> &'static str {
+        match self {
+            Page::Readme => "https://github.com/flavioaiello/avery#gmail-and-outlookcom",
+            Page::GoogleProject => "https://console.cloud.google.com/projectcreate",
+            Page::GmailApi => {
+                "https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+            }
+            Page::CalendarApi => {
+                "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com"
+            }
+            Page::GoogleConsent => "https://console.cloud.google.com/apis/credentials/consent",
+            Page::GoogleCredentials => "https://console.cloud.google.com/apis/credentials",
+            Page::EntraApps => {
+                "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+            }
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Page::Readme => "Anleitung (README)",
+            Page::GoogleProject => "Google Cloud: Projekt anlegen",
+            Page::GmailApi => "Google Cloud: Gmail API aktivieren",
+            Page::CalendarApi => "Google Cloud: Google Calendar API aktivieren",
+            Page::GoogleConsent => "Google Cloud: Zustimmungsbildschirm",
+            Page::GoogleCredentials => "Google Cloud: Anmeldedaten (OAuth-Client)",
+            Page::EntraApps => "Microsoft Entra: App-Registrierungen",
+        }
+    }
 }
 
 static GOOGLE: OAuth = OAuth {
@@ -80,6 +135,7 @@ static GOOGLE: OAuth = OAuth {
         "(Google Cloud Console, Typ 'Desktop-App', Gmail API und Google Calendar API aktiviert).",
         "Nur persoenliche Gmail-Konten (Adressen auf gmail.com oder googlemail.com), keine Google-Workspace-Konten und keine eigenen Domains.",
     ],
+    explanation: "Für Gmail braucht Avery einmalig eine eigene OAuth-App von dir (kostenlos, etwa 10 Minuten): Google Cloud Console, Typ »Desktop-App«, Gmail API und Google Calendar API aktiviert. Nur persönliche Gmail-Konten (gmail.com, googlemail.com).",
     identify: google_address,
 };
 
@@ -102,6 +158,7 @@ static MICROSOFT: OAuth = OAuth {
         "Du brauchst eine eigene App-Registrierung (Entra: 'Nur persoenliche Microsoft-Konten',",
         "Plattform 'Mobil- und Desktopanwendungen', Umleitungs-URI http://localhost).",
     ],
+    explanation: "Für Outlook.com braucht Avery einmalig eine eigene App-Registrierung von dir (kostenlos, etwa 5 Minuten): Microsoft Entra, »Nur persönliche Microsoft-Konten«, Plattform »Mobil- und Desktopanwendungen«, Umleitungs-URI http://localhost. Ein Secret ist nicht nötig.",
     identify: microsoft_address,
 };
 
@@ -228,6 +285,21 @@ impl Provider {
 
     pub(crate) fn consent_url(self) -> Option<&'static str> {
         self.oauth().map(|oauth| oauth.consent)
+    }
+
+    pub(crate) fn pages(self) -> &'static [Page] {
+        match self {
+            Provider::Apple => &[],
+            Provider::Google => &[
+                Page::Readme,
+                Page::GoogleProject,
+                Page::GmailApi,
+                Page::CalendarApi,
+                Page::GoogleConsent,
+                Page::GoogleCredentials,
+            ],
+            Provider::Microsoft => &[Page::Readme, Page::EntraApps],
+        }
     }
 
     pub(crate) fn expands_recurrence_locally(self) -> bool {

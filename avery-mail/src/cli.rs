@@ -11,7 +11,7 @@ use crate::calendar::{
 use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
 use crate::config::{UpdateError, WriteSettings};
-use crate::console::{failed, level_word, Choice, Console, Topic};
+use crate::console::{failed, level_word, Choice, Console, Screen, Topic};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::localtime;
@@ -29,6 +29,8 @@ use crate::texts::{
     MAX_SEND_LINES, NO_ACCOUNTS, NO_CALENDARS, VERSION, WRITE_OFF,
 };
 use crate::write_tools;
+
+mod onboard;
 
 const SENDLOG_LINES: usize = 200;
 const SENDLOG_SHOWN: usize = 20;
@@ -2038,6 +2040,7 @@ pub(crate) fn closest_command(word: &str) -> Option<&'static str> {
 pub(crate) fn dispatch(
     args: &[String],
     ctx: &Context,
+    screen: &Screen,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> u8 {
@@ -2056,11 +2059,12 @@ pub(crate) fn dispatch(
     if command == "serve" {
         return u8::from(server::serve(ctx, input, out).is_err());
     }
-    let mut console = Console { input, out };
+    let mut console = Console::terminal(input, out);
     match command {
         "accounts" => cmd_accounts(ctx, &mut console),
         "calendars" => cmd_calendars(ctx, &mut console),
         "setup" => cmd_setup(ctx, &mut console, args.get(1).map(String::as_str)),
+        "onboard" => onboard::run(ctx, &mut console, screen, args.get(1..).unwrap_or_default()),
         "link" => cmd_link(ctx, &mut console, args.get(1).map(String::as_str)),
         "unlink" => cmd_unlink(ctx, &mut console, args.get(1).map(String::as_str)),
         "revoke" => cmd_revoke(ctx, &mut console),
@@ -2091,7 +2095,7 @@ mod tests {
     use crate::journal;
     use crate::json::Json;
     use crate::provider::Linker;
-    use crate::testutil::{gm, j, log_entry, settings_at, TempDir, TestResult, Untouchable};
+    use crate::testutil::{dark, gm, j, log_entry, settings_at, TempDir, TestResult, Untouchable};
     use std::fs;
     use std::io::{BufRead, Cursor, Read};
 
@@ -2132,6 +2136,7 @@ mod tests {
         let code = dispatch(
             &args,
             ctx,
+            &dark(),
             &mut Cursor::new(input.as_bytes().to_vec()),
             &mut out,
         );
@@ -2826,7 +2831,7 @@ mod tests {
         assert!(out.contains("Unbekannter Befehl: foo"));
         assert!(!out.contains("Usage") && !out.contains("Meintest"));
         assert!(out.contains(
-            "Befehle: accounts, calendars, setup, link, unlink, revoke, selftest, sendlog, changes, undo, selftest-write, status"
+            "Befehle: accounts, calendars, onboard, setup, link, unlink, revoke, selftest, sendlog, changes, undo, selftest-write, status"
         ));
         assert!(out.contains("Hilfe: avery mail help"));
         let (code, out) = run(&ctx, &["write-enable"], "");
@@ -4370,7 +4375,7 @@ mod tests {
     fn run_typed(ctx: &Context, args: &[&str], input: &mut Typed) -> (u8, String) {
         let args: Vec<String> = args.iter().map(|argument| argument.to_string()).collect();
         let mut out = Vec::new();
-        let code = dispatch(&args, ctx, input, &mut out);
+        let code = dispatch(&args, ctx, &dark(), input, &mut out);
         (code, String::from_utf8_lossy(&out).into_owned())
     }
 
@@ -5282,10 +5287,7 @@ mod tests {
         let mut input = Cursor::new(Vec::new());
         let code = update_failed(
             &ctx,
-            &mut Console {
-                input: &mut input,
-                out: &mut out,
-            },
+            &mut Console::terminal(&mut input, &mut out),
             &UpdateError::Invalid("apple.mail[0].name must be one line".to_string()),
         );
         let text = String::from_utf8_lossy(&out).into_owned();

@@ -102,9 +102,10 @@ pub(crate) fn read_instructions(mail: bool, calendar: bool) -> String {
     text
 }
 
-pub(crate) const COMMANDS: [&str; 12] = [
+pub(crate) const COMMANDS: [&str; 13] = [
     "accounts",
     "calendars",
+    "onboard",
     "setup",
     "link",
     "unlink",
@@ -136,6 +137,8 @@ pub(crate) const HELP: &str = concat!(
     "\n",
     "Usage\n",
     "  avery mail [serve]         MCP server on stdin/stdout (what goose starts)\n",
+    "  avery mail onboard [--if-needed]   guided first setup in macOS dialogs (Gmail, Outlook.com, optionally Apple);\n",
+    "                             --if-needed asks only while nothing is set up and not dismissed (what Avery.app runs)\n",
     "  avery mail link google|microsoft   connect Gmail or Outlook.com (OAuth in the browser)\n",
     "  avery mail unlink <address>        disconnect such an account and delete its sign-in; google:<address> or\n",
     "                             microsoft:<address> also deletes a sign-in that has no config entry\n",
@@ -151,7 +154,7 @@ pub(crate) const HELP: &str = concat!(
     "  avery mail selftest        check read access without printing any content\n",
     "  avery mail selftest-write  check the approval dialog, drafts and sending\n",
     "Set MAIL_MCP_FAKE=1 to run against synthetic demo data (no account, no Mail or Calendar access);\n",
-    "link, unlink, setup and revoke refuse in demo mode.\n"
+    "link, unlink, setup, onboard and revoke refuse in demo mode.\n"
 );
 
 pub(crate) fn calendar_write_instructions() -> String {

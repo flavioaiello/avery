@@ -1351,7 +1351,13 @@ const BOTH: &str = r#"{"version": 3, "accounts": [
 fn run_cli(ctx: &Context, args: &[&str]) -> (u8, String) {
     let args: Vec<String> = args.iter().map(|argument| argument.to_string()).collect();
     let mut out = Vec::new();
-    let code = crate::cli::dispatch(&args, ctx, &mut std::io::Cursor::new(Vec::new()), &mut out);
+    let code = crate::cli::dispatch(
+        &args,
+        ctx,
+        &crate::testutil::dark(),
+        &mut std::io::Cursor::new(Vec::new()),
+        &mut out,
+    );
     (code, String::from_utf8_lossy(&out).into_owned())
 }
 

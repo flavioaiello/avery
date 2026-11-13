@@ -180,6 +180,17 @@ pub(crate) fn run_command(program: &str, args: &[&str], timeout: Duration) -> Fi
     run_limited(program, args, timeout, STDOUT_LIMIT, STDERR_LIMIT)
 }
 
+fn is_gui_session(managername: &str) -> bool {
+    managername.trim() == "Aqua"
+}
+
+pub(crate) fn gui_session() -> bool {
+    matches!(
+        run_command("/bin/launchctl", &["managername"], Duration::from_secs(5)),
+        Finished::Done { code: Some(0), stdout, .. } if is_gui_session(&stdout)
+    )
+}
+
 pub(crate) trait Host {
     fn ensure_running(&self, app: App);
     fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished;
@@ -429,6 +440,23 @@ mod tests {
             shell("kill -9 $$", 5000),
             Finished::Done { code: None, .. }
         ));
+    }
+
+    #[test]
+    fn only_the_aqua_session_counts_as_a_graphical_session() {
+        for (name, expected) in [
+            ("Aqua\n", true),
+            (" Aqua ", true),
+            ("Background\n", false),
+            ("StandardIO\n", false),
+            ("System", false),
+            ("LoginWindow", false),
+            ("aqua", false),
+            ("Aqua Background", false),
+            ("", false),
+        ] {
+            assert_eq!(is_gui_session(name), expected, "{name:?}");
+        }
     }
 
     #[test]

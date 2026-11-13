@@ -1,9 +1,14 @@
+mod dialogs;
+
 use std::io::{BufRead, Write};
 
 use crate::error::ToolError;
+use crate::osascript::Host;
 use crate::provider::Provider;
 use crate::rights::Level;
 use crate::server::{self, Line};
+
+pub(crate) use dialogs::{Buttons, Dialogs, Icon, List, Stop, Talk};
 
 const MAX_ANSWER_BYTES: usize = 8192;
 const LEVEL_ATTEMPTS: usize = 3;
@@ -15,21 +20,96 @@ pub(crate) enum Topic {
     AppleAccess,
 }
 
-pub(crate) struct Console<'a> {
-    pub(crate) input: &'a mut dyn BufRead,
-    pub(crate) out: &'a mut dyn Write,
+pub(crate) struct Screen<'a> {
+    pub(crate) host: &'a dyn Host,
+    pub(crate) gui: fn() -> bool,
 }
 
-impl Console<'_> {
+pub(crate) enum Console<'a> {
+    Terminal(Terminal<'a>),
+    Dialogs(Dialogs<'a>),
+}
+
+pub(crate) struct Terminal<'a> {
+    input: &'a mut dyn BufRead,
+    out: &'a mut dyn Write,
+}
+
+impl<'a> Console<'a> {
+    pub(crate) fn terminal(input: &'a mut dyn BufRead, out: &'a mut dyn Write) -> Console<'a> {
+        Console::Terminal(Terminal { input, out })
+    }
+
     pub(crate) fn say(&mut self, text: &str) {
-        let _ = writeln!(self.out, "{text}");
+        match self {
+            Console::Terminal(terminal) => terminal.say(text),
+            Console::Dialogs(dialogs) => dialogs.say(text),
+        }
     }
 
     pub(crate) fn hint(&mut self, text: &str) {
-        self.say(text);
+        match self {
+            Console::Terminal(terminal) => terminal.say(text),
+            Console::Dialogs(_) => {}
+        }
     }
 
     pub(crate) fn ask(&mut self, prompt: &str) -> Option<String> {
+        match self {
+            Console::Terminal(terminal) => terminal.ask(prompt),
+            Console::Dialogs(dialogs) => dialogs.ask(prompt),
+        }
+    }
+
+    pub(crate) fn confirm(&mut self, question: &str) -> bool {
+        match self {
+            Console::Terminal(terminal) => terminal.confirm(question),
+            Console::Dialogs(dialogs) => dialogs.confirm(question),
+        }
+    }
+
+    pub(crate) fn explain(&mut self, topic: Topic) -> bool {
+        match self {
+            Console::Terminal(terminal) => terminal.explain(topic),
+            Console::Dialogs(dialogs) => dialogs.explain(topic),
+        }
+    }
+
+    pub(crate) fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
+        match self {
+            Console::Terminal(terminal) => terminal.ask_client(provider),
+            Console::Dialogs(dialogs) => dialogs.ask_client(provider),
+        }
+    }
+
+    pub(crate) fn ask_write(&mut self) -> Option<bool> {
+        match self {
+            Console::Terminal(terminal) => terminal.ask_write(),
+            Console::Dialogs(dialogs) => dialogs.ask_write(),
+        }
+    }
+
+    pub(crate) fn browser(&mut self, url: &str) {
+        match self {
+            Console::Terminal(terminal) => terminal.browser(url),
+            Console::Dialogs(dialogs) => dialogs.browser(),
+        }
+    }
+
+    pub(crate) fn ask_levels(&mut self, choices: &[Choice]) -> Result<Vec<Option<Level>>, u8> {
+        match self {
+            Console::Terminal(terminal) => terminal.ask_levels(choices),
+            Console::Dialogs(dialogs) => dialogs.ask_levels(choices),
+        }
+    }
+}
+
+impl Terminal<'_> {
+    fn say(&mut self, text: &str) {
+        let _ = writeln!(self.out, "{text}");
+    }
+
+    fn ask(&mut self, prompt: &str) -> Option<String> {
         let _ = write!(self.out, "{prompt}");
         let _ = self.out.flush();
         match server::next_line(self.input, MAX_ANSWER_BYTES) {
@@ -38,7 +118,7 @@ impl Console<'_> {
         }
     }
 
-    pub(crate) fn confirm(&mut self, question: &str) -> bool {
+    fn confirm(&mut self, question: &str) -> bool {
         self.ask(&format!("{question} [j/N] "))
             .is_some_and(|answer| {
                 matches!(
@@ -48,7 +128,7 @@ impl Console<'_> {
             })
     }
 
-    pub(crate) fn explain(&mut self, topic: Topic) -> bool {
+    fn explain(&mut self, topic: Topic) -> bool {
         match topic {
             Topic::Registration(provider) => {
                 for line in provider.oauth().map_or(&[][..], |oauth| oauth.registration) {
@@ -72,7 +152,7 @@ impl Console<'_> {
         true
     }
 
-    pub(crate) fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
+    fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
         let Some(id) = self.ask("Client-ID: ") else {
             self.say(INVALID);
             return None;
@@ -87,7 +167,7 @@ impl Console<'_> {
         Some((id, secret))
     }
 
-    pub(crate) fn ask_write(&mut self) -> Option<bool> {
+    fn ask_write(&mut self) -> Option<bool> {
         let answer = self.ask("Stufe: 1 = lesen, 2 = schreiben (Entwuerfe, Senden, Termine aendern; jedes Mal mit Klick) [1]: ");
         match answer.as_deref().map(str::trim) {
             Some("" | "1") => Some(false),
@@ -99,12 +179,12 @@ impl Console<'_> {
         }
     }
 
-    pub(crate) fn browser(&mut self, url: &str) {
+    fn browser(&mut self, url: &str) {
         self.say("\nDer Browser oeffnet sich. Melde dich an und erlaube den Zugriff. Falls nicht, oeffne diese Adresse:");
         self.say(&format!("  {url}"));
     }
 
-    pub(crate) fn ask_levels(&mut self, choices: &[Choice]) -> Result<Vec<Option<Level>>, u8> {
+    fn ask_levels(&mut self, choices: &[Choice]) -> Result<Vec<Option<Level>>, u8> {
         let mut chosen = Vec::with_capacity(choices.len());
         for choice in choices {
             let prompt = format!(
@@ -185,10 +265,7 @@ mod tests {
         let mut out = Vec::new();
         let result = {
             let mut reader = Cursor::new(input.as_bytes().to_vec());
-            let mut console = Console {
-                input: &mut reader,
-                out: &mut out,
-            };
+            let mut console = Console::terminal(&mut reader, &mut out);
             console.ask_levels(&choices())
         };
         (result, String::from_utf8_lossy(&out).into_owned())
@@ -248,10 +325,7 @@ mod tests {
             ("", false),
         ] {
             let (mut out, mut reader) = terminal(input);
-            let mut console = Console {
-                input: &mut reader,
-                out: &mut out,
-            };
+            let mut console = Console::terminal(&mut reader, &mut out);
             assert_eq!(console.confirm("Korrekt?"), expected, "{input:?}");
             assert_eq!(String::from_utf8_lossy(&out), "Korrekt? [j/N] ");
         }
@@ -260,10 +334,7 @@ mod tests {
     #[test]
     fn a_hint_is_printed_like_a_line_of_text() {
         let (mut out, mut reader) = terminal("");
-        let mut console = Console {
-            input: &mut reader,
-            out: &mut out,
-        };
+        let mut console = Console::terminal(&mut reader, &mut out);
         console.hint("eins");
         console.say("zwei");
         assert_eq!(String::from_utf8_lossy(&out), "eins\nzwei\n");
@@ -272,20 +343,14 @@ mod tests {
     #[test]
     fn the_client_is_asked_with_a_secret_only_where_the_provider_needs_one() {
         let (mut out, mut reader) = terminal("id-1\nsecret-1\n");
-        let mut console = Console {
-            input: &mut reader,
-            out: &mut out,
-        };
+        let mut console = Console::terminal(&mut reader, &mut out);
         assert_eq!(
             console.ask_client(Provider::Google),
             Some(("id-1".to_string(), "secret-1".to_string()))
         );
         assert_eq!(String::from_utf8_lossy(&out), "Client-ID: Client-Secret: ");
         let (mut out, mut reader) = terminal("id-2\nignored\n");
-        let mut console = Console {
-            input: &mut reader,
-            out: &mut out,
-        };
+        let mut console = Console::terminal(&mut reader, &mut out);
         assert_eq!(
             console.ask_client(Provider::Microsoft),
             Some(("id-2".to_string(), String::new()))
@@ -293,10 +358,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out), "Client-ID: ");
         for (input, shown) in [("", "Client-ID: "), ("id\n", "Client-ID: Client-Secret: ")] {
             let (mut out, mut reader) = terminal(input);
-            let mut console = Console {
-                input: &mut reader,
-                out: &mut out,
-            };
+            let mut console = Console::terminal(&mut reader, &mut out);
             assert_eq!(console.ask_client(Provider::Google), None, "{input:?}");
             assert_eq!(String::from_utf8_lossy(&out), format!("{shown}{INVALID}\n"));
         }
@@ -313,10 +375,7 @@ mod tests {
             ("", None),
         ] {
             let (mut out, mut reader) = terminal(input);
-            let mut console = Console {
-                input: &mut reader,
-                out: &mut out,
-            };
+            let mut console = Console::terminal(&mut reader, &mut out);
             assert_eq!(console.ask_write(), expected, "{input:?}");
             assert_eq!(
                 String::from_utf8_lossy(&out).contains(INVALID),
@@ -330,10 +389,7 @@ mod tests {
     fn topics_are_explained_in_lines_and_never_stop_the_command_line() {
         for provider in Provider::remote() {
             let (mut out, mut reader) = terminal("");
-            let mut console = Console {
-                input: &mut reader,
-                out: &mut out,
-            };
+            let mut console = Console::terminal(&mut reader, &mut out);
             assert!(console.explain(Topic::Registration(provider)));
             let text = String::from_utf8_lossy(&out).into_owned();
             let registration = provider.oauth().map_or(&[][..], |oauth| oauth.registration);
@@ -344,10 +400,7 @@ mod tests {
             assert!(text.contains("Schluesselbund"), "{text}");
         }
         let (mut out, mut reader) = terminal("");
-        let mut console = Console {
-            input: &mut reader,
-            out: &mut out,
-        };
+        let mut console = Console::terminal(&mut reader, &mut out);
         assert!(console.explain(Topic::AppleAccess));
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(text.contains("Automation-Berechtigung"), "{text}");
@@ -360,10 +413,7 @@ mod tests {
     #[test]
     fn the_browser_hint_names_the_address() {
         let (mut out, mut reader) = terminal("");
-        let mut console = Console {
-            input: &mut reader,
-            out: &mut out,
-        };
+        let mut console = Console::terminal(&mut reader, &mut out);
         console.browser("https://accounts.example/auth?x=1");
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(text.contains("Der Browser oeffnet sich"), "{text}");

@@ -26,6 +26,7 @@ pub(crate) struct Settings {
     pub(crate) fake: bool,
     pub(crate) fake_write: String,
     pub(crate) lock_wait: Duration,
+    pub(crate) no_onboard: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,6 +72,7 @@ impl Settings {
             fake: lookup("MAIL_MCP_FAKE").as_deref() == Some("1"),
             fake_write: lookup("MAIL_MCP_FAKE_WRITE").unwrap_or_default(),
             lock_wait: lock::WAIT,
+            no_onboard: lookup("AVERY_NO_ONBOARD").as_deref() == Some("1"),
         }
     }
 
@@ -88,6 +90,10 @@ impl Settings {
 
     pub(crate) fn vault_lock_path(&self) -> String {
         join_path(&dirname(&self.config_path), "vault.lock")
+    }
+
+    pub(crate) fn onboard_marker_path(&self) -> String {
+        join_path(&dirname(&self.config_path), "onboard.dismissed")
     }
 
     pub(crate) fn config_exists(&self) -> bool {

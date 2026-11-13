@@ -8,16 +8,19 @@ use crate::calendar::{
     Window,
 };
 use crate::config::Settings;
+use crate::console::Screen;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{self, Json, Object, ParseError};
+use crate::osascript::{App, Finished, Host};
 use crate::provider::Provider;
 use crate::sendlog::{LogEntry, Outcome};
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -83,6 +86,7 @@ pub(crate) fn settings_at(path: &str) -> Settings {
         fake: false,
         fake_write: String::new(),
         lock_wait: Duration::from_millis(300),
+        no_onboard: false,
     }
 }
 
@@ -244,5 +248,245 @@ impl CalendarBackend for Untouchable {
 
     fn change(&self, _: &Calendar, _: &Change, _: &Approval) -> ToolResult<ChangeResult> {
         self.touched()
+    }
+}
+
+pub(crate) struct Dark;
+
+impl Host for Dark {
+    fn ensure_running(&self, _app: App) {}
+
+    fn run(&self, _app: App, _payload: &str, _timeout: Duration) -> Finished {
+        Finished::NotStarted
+    }
+}
+
+pub(crate) static DARK: Dark = Dark;
+
+pub(crate) fn dark() -> Screen<'static> {
+    Screen {
+        host: &DARK,
+        gui: || false,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum Reply {
+    Text(String),
+    Button(usize),
+    List(Vec<usize>),
+    Cancel,
+    Timeout,
+    TooLong,
+    Done,
+    Data(String),
+    Silent,
+    Hung,
+    Flood,
+    Raw {
+        code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+}
+
+impl Reply {
+    pub(crate) fn text(answer: &str) -> Reply {
+        Reply::Text(answer.to_string())
+    }
+
+    fn finished(&self) -> Finished {
+        let data = match self {
+            Reply::Text(answer) => json::dumps(
+                &Json::object(vec![
+                    ("result", Json::from("text")),
+                    ("text", Json::from(answer)),
+                ]),
+                true,
+            ),
+            Reply::Button(index) => format!("{{\"result\": \"button\", \"index\": {index}}}"),
+            Reply::List(selected) => format!(
+                "{{\"result\": \"list\", \"selected\": [{}]}}",
+                selected
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Reply::Cancel => "{\"result\": \"cancel\"}".to_string(),
+            Reply::Timeout => "{\"result\": \"timeout\"}".to_string(),
+            Reply::TooLong => "{\"result\": \"too_long\"}".to_string(),
+            Reply::Done => "{\"result\": \"ok\"}".to_string(),
+            Reply::Data(text) => text.clone(),
+            Reply::Silent => return Finished::NotStarted,
+            Reply::Hung => return Finished::TimedOut,
+            Reply::Flood => return Finished::TooLarge,
+            Reply::Raw {
+                code,
+                stdout,
+                stderr,
+            } => {
+                return Finished::Done {
+                    code: *code,
+                    stdout: stdout.clone(),
+                    stderr: stderr.clone(),
+                }
+            }
+        };
+        Finished::Done {
+            code: Some(0),
+            stdout: format!("{{\"ok\": true, \"data\": {data}}}\n"),
+            stderr: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Seen {
+    pub(crate) payload: String,
+    pub(crate) wait: Duration,
+}
+
+impl Seen {
+    pub(crate) fn op(&self) -> String {
+        match json::parse(&self.payload) {
+            Ok(Json::Obj(object)) => object
+                .get("op")
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            _ => String::new(),
+        }
+    }
+
+    pub(crate) fn field(&self, key: &str) -> Option<Json> {
+        match json::parse(&self.payload) {
+            Ok(Json::Obj(object)) => object.get(key).cloned(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn text(&self, key: &str) -> String {
+        self.field(key)
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+}
+
+type Hook = Box<dyn FnOnce()>;
+
+pub(crate) struct Script {
+    steps: Mutex<VecDeque<(&'static str, Reply)>>,
+    seen: Mutex<Vec<Seen>>,
+    hooks: Mutex<Vec<(usize, Hook)>>,
+    mismatches: Mutex<Vec<String>>,
+}
+
+impl Script {
+    pub(crate) fn new() -> Script {
+        Script {
+            steps: Mutex::new(VecDeque::new()),
+            seen: Mutex::new(Vec::new()),
+            hooks: Mutex::new(Vec::new()),
+            mismatches: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn then(self, op: &'static str, reply: Reply) -> Script {
+        if let Ok(mut steps) = self.steps.lock() {
+            steps.push_back((op, reply));
+        }
+        self
+    }
+
+    pub(crate) fn after(self, calls: usize, hook: impl FnOnce() + 'static) -> Script {
+        if let Ok(mut hooks) = self.hooks.lock() {
+            hooks.push((calls, Box::new(hook)));
+        }
+        self
+    }
+
+    pub(crate) fn seen(&self) -> Vec<Seen> {
+        self.seen
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn ops(&self) -> Vec<String> {
+        self.seen().iter().map(Seen::op).collect()
+    }
+
+    pub(crate) fn left(&self) -> usize {
+        self.steps.lock().map(|steps| steps.len()).unwrap_or(0)
+    }
+
+    pub(crate) fn mismatches(&self) -> Vec<String> {
+        self.mismatches
+            .lock()
+            .map(|found| found.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Host for Script {
+    fn ensure_running(&self, _app: App) {}
+
+    fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished {
+        let seen = Seen {
+            payload: payload.to_string(),
+            wait: timeout,
+        };
+        let op = seen.op();
+        let calls = match self.seen.lock() {
+            Ok(mut all) => {
+                all.push(seen);
+                all.len()
+            }
+            Err(_) => 0,
+        };
+        let ready: Vec<Hook> = match self.hooks.lock() {
+            Ok(mut hooks) => {
+                let mut ready = Vec::new();
+                let mut index = 0;
+                while index < hooks.len() {
+                    if hooks[index].0 <= calls {
+                        ready.push(hooks.remove(index).1);
+                    } else {
+                        index += 1;
+                    }
+                }
+                ready
+            }
+            Err(_) => Vec::new(),
+        };
+        let next = self
+            .steps
+            .lock()
+            .ok()
+            .and_then(|mut steps| steps.pop_front());
+        let finished = match next {
+            Some((wanted, reply)) if wanted == op && app == App::Dialog => reply.finished(),
+            Some((wanted, _)) => {
+                self.note(&format!("wanted {wanted} for {app:?}, got {op}"));
+                Finished::NotStarted
+            }
+            None => {
+                self.note(&format!("no answer left for {op}"));
+                Finished::NotStarted
+            }
+        };
+        for hook in ready {
+            hook();
+        }
+        finished
+    }
+}
+
+impl Script {
+    fn note(&self, text: &str) {
+        if let Ok(mut found) = self.mismatches.lock() {
+            found.push(text.to_string());
+        }
     }
 }
