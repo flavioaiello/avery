@@ -719,6 +719,7 @@ fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> Test
         ]
     );
     assert!(out.contains("Einrichtung abgeschlossen."), "{out}");
+    assert!(out.contains(RESTART_GOOSE), "{out}");
     let rights = station.rights()?;
     assert_eq!(rights.accounts.len(), 1);
     assert_eq!(
@@ -756,6 +757,7 @@ fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> Test
         seen[9].text("text")
     );
     assert!(seen[10].text("text").contains("Das ist eingerichtet:"));
+    assert!(seen[10].text("text").contains(RESTART_GOOSE));
     assert!(seen[10].text("text").contains(&alice()));
     assert!(seen[11].text("text").contains("Einrichtung abgeschlossen"));
     assert!(seen[11].text("text").contains("Goose danach neu starten"));

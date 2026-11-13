@@ -433,7 +433,7 @@ impl<'a> Flow<'a> {
             return Next::End(Ending::Empty);
         }
         let text = format!(
-            "Das ist eingerichtet:\n{}\n\n{SELFTEST_TEXT}",
+            "Das ist eingerichtet:\n{}\n\n{RESTART_GOOSE} {SELFTEST_TEXT}",
             overview(&rights)
         );
         let answer = self.dialogs().ask_buttons(&Buttons {
@@ -512,7 +512,7 @@ impl<'a> Flow<'a> {
         match ending {
             Ending::Finished => {
                 self.dialogs().notify(FINISHED_NOTICE);
-                console.say("Einrichtung abgeschlossen.");
+                console.say(&format!("Einrichtung abgeschlossen. {RESTART_GOOSE}"));
                 0
             }
             Ending::Later => {
