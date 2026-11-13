@@ -201,10 +201,19 @@ pub(crate) struct ScreenHost<'a> {
     osascript: Option<&'a str>,
 }
 
+#[cfg(debug_assertions)]
+fn overridden(lookup: &dyn Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+    lookup(key).filter(|value| !value.is_empty())
+}
+
+#[cfg(not(debug_assertions))]
+fn overridden(_lookup: &dyn Fn(&str) -> Option<String>, _key: &str) -> Option<String> {
+    None
+}
+
 impl Programs {
     pub(crate) fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Programs {
-        let program = |key: &str, system: &str| match lookup(key).filter(|value| !value.is_empty())
-        {
+        let program = |key: &str, system: &str| match overridden(lookup, key) {
             None => Some(system.to_string()),
             Some(path) if path.starts_with('/') => Some(path),
             Some(_) => None,
@@ -353,8 +362,11 @@ pub(crate) mod clicks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(debug_assertions)]
     use crate::testutil::{TempDir, TestResult};
+    #[cfg(debug_assertions)]
     use std::fs;
+    #[cfg(debug_assertions)]
     use std::os::unix::fs::PermissionsExt;
 
     fn programs(pairs: &[(&str, &str)]) -> Programs {
@@ -366,6 +378,7 @@ mod tests {
         })
     }
 
+    #[cfg(debug_assertions)]
     fn stand_in(dir: &TempDir, name: &str, body: &str) -> Result<String, std::io::Error> {
         let path = dir.path(name);
         fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
@@ -532,6 +545,20 @@ mod tests {
         }
     }
 
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_builds_ignore_the_screen_program_overrides() {
+        let replaced = programs(&[
+            ("AVERY_OSASCRIPT", "/stand/in/osascript"),
+            ("AVERY_LAUNCHCTL", "/stand/in/launchctl"),
+        ]);
+        assert_eq!(replaced.osascript.as_deref(), Some(OSASCRIPT));
+        assert_eq!(replaced.launchctl.as_deref(), Some(LAUNCHCTL));
+        let refused = programs(&[("AVERY_OSASCRIPT", "osascript")]);
+        assert_eq!(refused.osascript.as_deref(), Some(OSASCRIPT));
+    }
+
+    #[cfg(debug_assertions)]
     #[test]
     fn the_screen_programs_are_the_system_ones_unless_an_absolute_path_replaces_them() {
         let system = programs(&[]);
@@ -550,6 +577,7 @@ mod tests {
         assert_eq!(one.launchctl.as_deref(), Some(LAUNCHCTL));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn a_program_that_is_not_an_absolute_path_never_reaches_the_path_lookup() {
         for bad in [
@@ -574,6 +602,7 @@ mod tests {
         }
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn the_screen_host_runs_the_dialog_script_through_its_own_program_and_nothing_else(
     ) -> TestResult {
@@ -608,6 +637,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn only_a_launchctl_that_says_aqua_makes_a_graphical_session() -> TestResult {
         let dir = TempDir::new()?;

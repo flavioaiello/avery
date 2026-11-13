@@ -1,3 +1,8 @@
+#[cfg(not(debug_assertions))]
+compile_error!(
+    "the binary-level tests need the debug profile: release builds ignore the screen stand-ins and would reach the real dialogs"
+);
+
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
