@@ -2,7 +2,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use super::auth::{load_record, Record};
+use super::auth::{load_record, Record, MAX_TOKEN};
 use crate::base64;
 use crate::http::{self, Method, Request, Transport};
 use crate::json::{self, Json, Object};
@@ -404,13 +404,13 @@ fn exchange(
         ));
     }
     let object = object.ok_or("The sign-in service gave an unexpected answer.")?;
-    let access =
-        text_of(object, "access_token", 8192).ok_or("The sign-in service gave no access token.")?;
-    let refresh = text_of(object, "refresh_token", 8192).ok_or(
+    let access = text_of(object, "access_token", MAX_TOKEN)
+        .ok_or("The sign-in service gave no access token.")?;
+    let refresh = text_of(object, "refresh_token", MAX_TOKEN).ok_or(
         "The sign-in service gave no refresh token. Remove the app's access in your account settings and try again.",
     )?;
     let scope = match object.get("scope") {
-        Some(Json::Str(scope)) if scope.len() <= 8192 => scope.clone(),
+        Some(Json::Str(scope)) if scope.len() <= MAX_TOKEN => scope.clone(),
         _ => String::new(),
     };
     Ok((access, refresh, scope))
@@ -1133,6 +1133,34 @@ mod tests {
             return Err("expected an error".into());
         };
         assert!(error.contains("Keychain"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_sign_in_that_does_not_fit_the_keychain_is_refused_and_nothing_is_stored() -> TestResult {
+        let tokens = GOOGLE_TOKENS.replace(
+            "\"1//r\"",
+            &format!("\"{}\"", "r".repeat(crate::vault::MAX_RECORD)),
+        );
+        let vault = Arc::new(Memory::new());
+        let browser = Visitor {
+            visit: Visit::Good("x"),
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let admin = CloudAdmin::new(
+            Box::new(google_transport(&tokens)),
+            Box::new(crate::vault::memory::Shared(Arc::clone(&vault))),
+            Box::new(browser),
+        )
+        .within(Duration::from_secs(10));
+        let Err(error) = admin.link(Source::Google, &google()?, false, &mut |_| {}) else {
+            return Err("expected an error".into());
+        };
+        assert!(
+            error.contains("Keychain") && error.contains("too large"),
+            "{error}"
+        );
+        assert_eq!(vault.count(), 0);
         Ok(())
     }
 
