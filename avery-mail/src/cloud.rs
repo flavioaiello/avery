@@ -106,9 +106,15 @@ impl<'a> Api<'a> {
         }
     }
 
-    pub(crate) fn with_header(mut self, name: &str, value: &str) -> Api<'a> {
-        self.headers.push((name.to_string(), value.to_string()));
-        self
+    pub(crate) fn with_header(&self, name: &str, value: &str) -> Api<'a> {
+        let mut headers = self.headers.clone();
+        headers.push((name.to_string(), value.to_string()));
+        Api {
+            transport: self.transport,
+            token: self.token.clone(),
+            source: self.source,
+            headers,
+        }
     }
 
     fn request(&self, method: Method, url: &str, body: Option<&Json>) -> Request {

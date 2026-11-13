@@ -1,6 +1,5 @@
 use super::{
-    email, extended, field, message_path, person_text, unexpected, url, MAX_ID, MAX_TEXT,
-    NO_MESSAGE,
+    email, field, message_path, person_text, unexpected, url, MAX_ID, MAX_TEXT, NO_MESSAGE,
 };
 use crate::account::Account;
 use crate::backend::{ComposeRequest, MessageId, Mode, Preview};
@@ -330,7 +329,7 @@ fn send(api: &Api, id: &str, own: &Own, approved: &Draft, preview: Preview) -> T
         Ok(_) => return Err(abandon(api, id, refusal("content_mismatch"))),
         Err(error) => return Err(abandon(api, id, before_send(error))),
     }
-    let sender = extended(api, &[("Content-Length", "0")]);
+    let sender = api.with_header("Content-Length", "0");
     sender.send(
         Method::Post,
         &url(&format!("{}/send", message_path(id)), &[]),

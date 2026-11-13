@@ -58,18 +58,6 @@ fn unexpected() -> ToolError {
     ToolError::msg("The provider gave an unexpected answer.")
 }
 
-fn extended<'a>(api: &Api<'a>, extra: &[(&str, &str)]) -> Api<'a> {
-    let mut copy = Api::new(api.transport, api.token.clone(), api.source);
-    let own = api
-        .headers
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()));
-    for (name, value) in own.chain(extra.iter().copied()) {
-        copy = copy.with_header(name, value);
-    }
-    copy
-}
-
 fn url(path: &str, pairs: &[(&str, &str)]) -> String {
     if pairs.is_empty() {
         format!("{BASE}{path}")
@@ -165,7 +153,7 @@ fn usable_address(profile: &Object) -> Option<String> {
 }
 
 pub(crate) fn account_info(api: &Api, account: &Account) -> ToolResult<MailAccount> {
-    let session = extended(api, &[("Prefer", IDS)]);
+    let session = api.with_header("Prefer", IDS);
     let profile = session.get(&url("", &[("$select", PROFILE_FIELDS)]))?;
     let address = profile
         .as_object()
@@ -180,7 +168,7 @@ pub(crate) fn account_info(api: &Api, account: &Account) -> ToolResult<MailAccou
 }
 
 pub(crate) fn mailboxes(api: &Api) -> ToolResult<Vec<Mailbox>> {
-    folders::listing(&extended(api, &[("Prefer", IDS)]))
+    folders::listing(&api.with_header("Prefer", IDS))
 }
 
 fn item_of(entry: &Json) -> Option<MessageItem> {
@@ -276,7 +264,7 @@ fn scan(
 }
 
 fn list(api: &Api, request: &MessageQuery, now: i64) -> ToolResult<MessageList> {
-    let session = extended(api, &[("Prefer", IDS)]);
+    let session = api.with_header("Prefer", IDS);
     let place = folders::resolve(&session, request.mailbox.as_deref())?;
     let limit = usize::try_from(request.limit)
         .unwrap_or(0)
@@ -353,7 +341,7 @@ fn body_text(message: &Object) -> String {
 }
 
 pub(crate) fn read(api: &Api, id: &MessageId, max_chars: usize) -> ToolResult<MessageBody> {
-    let session = extended(api, &[("Prefer", IDS_AND_TEXT)]);
+    let session = api.with_header("Prefer", IDS_AND_TEXT);
     let address = url(&message_path(id.as_str()), &[("$select", READ_FIELDS)]);
     let Some(json) = session.get_optional(&address)? else {
         return Err(ToolError::msg(NO_MESSAGE));
@@ -391,7 +379,7 @@ pub(crate) fn compose(
     request: &ComposeRequest,
 ) -> ToolResult<Preview> {
     draft::compose(
-        &extended(api, &[("Prefer", IDS_AND_TEXT)]),
+        &api.with_header("Prefer", IDS_AND_TEXT),
         host,
         account,
         request,
@@ -1784,7 +1772,9 @@ mod tests {
         let transport = Scripted::new().json(Method::Get, "/x", 200, "{}");
         let base = Api::new(&transport, "TOKEN".to_string(), Source::Microsoft)
             .with_header("X-First", "1");
-        let derived = extended(&base, &[("Prefer", "a=\"b\""), ("X-Second", "2")]);
+        let derived = base
+            .with_header("Prefer", "a=\"b\"")
+            .with_header("X-Second", "2");
         derived.get("https://graph.microsoft.com/v1.0/me/x")?;
         let seen = transport.seen();
         let call = seen.first().ok_or("request")?;

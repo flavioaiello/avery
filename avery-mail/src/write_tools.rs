@@ -350,7 +350,7 @@ pub(crate) fn send_message(ctx: &Context, args: &Object) -> ToolResult<String> {
     let (preview, outcome) = perform_send(ctx, &account, &request, Origin::Model { max_per_hour })?;
     Ok(match outcome {
         Outcome::Sent => format!(
-            "Sent: the user approved and Mail took the message for delivery.\n{UNTRUSTED}\n{}",
+            "Sent: the user approved and the message was handed over for delivery.\n{UNTRUSTED}\n{}",
             summary(&preview)
         ),
         Outcome::Timeout => "The user did not answer the approval dialog in time. NOTHING was sent. Ask the user whether to try again.".to_string(),
