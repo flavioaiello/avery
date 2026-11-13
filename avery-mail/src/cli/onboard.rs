@@ -8,7 +8,7 @@ use super::{
     list_account_calendars, setup_apple, setup_calendars, LinkDone,
 };
 use crate::config::{dirname, make_dirs, Settings};
-use crate::console::{Buttons, Console, Dialogs, Icon, List, Screen, Stop, Talk};
+use crate::console::{Buttons, Console, Dialogs, Icon, List, Screen, Stop, Talk, RESTART_GOOSE};
 use crate::context::Context;
 use crate::osascript::Host;
 use crate::provider::Provider;
@@ -23,7 +23,8 @@ const ACCOUNTS_TEXT: &str =
 const SELFTEST_TEXT: &str =
     "Soll Avery jetzt den Lesezugriff prüfen? Dabei wird nichts gesendet oder geändert.";
 const SELFTEST_NOTICE: &str = "Der Lesetest läuft ...";
-const FINISHED_NOTICE: &str = "Einrichtung abgeschlossen. Weitere Einstellungen: avery mail setup";
+const FINISHED_NOTICE: &str =
+    "Einrichtung abgeschlossen. Goose danach neu starten. Weitere Einstellungen: avery mail setup";
 const CANCELLED_NOTICE: &str = "Abgebrochen. Es wurde nichts gespeichert.";
 const NOTHING_NOTICE: &str =
     "Nichts ausgewählt. Die Einrichtung startet wieder mit: avery mail onboard";
@@ -477,7 +478,7 @@ impl<'a> Flow<'a> {
             Some(rights) => {
                 self.talk.set_title(DONE_TITLE);
                 let text = format!(
-                    "{lead} Das ist schon gespeichert und bleibt:\n{}\n\nWeiter einrichten: Avery erneut starten oder im Terminal: avery mail setup",
+                    "{lead} Das ist schon gespeichert und bleibt:\n{}\n\n{RESTART_GOOSE} Weiter einrichten: Avery erneut starten oder im Terminal: avery mail setup",
                     overview(&rights)
                 );
                 let _ = self.dialogs().ask_buttons(&Buttons {

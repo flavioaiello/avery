@@ -13,6 +13,9 @@ pub(crate) use dialogs::{Buttons, Dialogs, Icon, List, Stop, Talk};
 const MAX_ANSWER_BYTES: usize = 8192;
 const LEVEL_ATTEMPTS: usize = 3;
 const INVALID: &str = "Ungueltige Eingabe.";
+pub(crate) const PRIVATE_ONLY: &str =
+    "Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
+pub(crate) const RESTART_GOOSE: &str = "Goose danach neu starten.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Topic {

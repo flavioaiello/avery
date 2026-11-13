@@ -11,7 +11,9 @@ use crate::calendar::{
 use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
 use crate::config::{UpdateError, WriteSettings};
-use crate::console::{failed, level_word, Choice, Console, Screen, Topic};
+use crate::console::{
+    failed, level_word, Choice, Console, Screen, Topic, PRIVATE_ONLY, RESTART_GOOSE,
+};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::localtime;
@@ -369,7 +371,9 @@ fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights
     {
         Ok(()) => {
             console.hint(&format!("Gespeichert in {}", ctx.settings.config_path));
-            console.hint("Goose danach neu starten. Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)");
+            console.hint(&format!(
+                "{RESTART_GOOSE} Pruefen mit: avery mail selftest (lesen) und avery mail selftest-write (schreiben)"
+            ));
             0
         }
         Err(error) => update_failed(ctx, console, &error),
@@ -377,7 +381,7 @@ fn finish(ctx: &Context, console: &mut Console, before: &Rights, rights: &Rights
 }
 
 fn explain_levels(ctx: &Context, console: &mut Console, rights: &Rights) {
-    console.hint("Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.");
+    console.hint(PRIVATE_ONLY);
     console
         .hint("Stufen: 0 = aus, 1 = lesen, 2 = schreiben (Entwuerfe, Senden und Termine aendern,");
     console.hint("jedes Mal erst nach deinem Klick in einem macOS-Dialog; der Agent kann ihn nicht bedienen).");
@@ -2208,6 +2212,8 @@ mod tests {
         assert!(out.contains("Mail:     Demo Gmail (schreiben), Demo Outlook (lesen)"));
         assert!(out.contains("Kalender: Demo Privat (schreiben), Demo Familie (lesen)"));
         assert!(out.contains("Gespeichert in"));
+        assert!(out.contains(PRIVATE_ONLY), "{out}");
+        assert!(out.contains(RESTART_GOOSE), "{out}");
         let config = saved(&ctx)?;
         assert!(section(&config, "accounts").is_none());
         let apple = section(&config, "apple")

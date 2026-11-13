@@ -17,6 +17,7 @@ use crate::calendar::{
     Window,
 };
 use crate::cli::dispatch;
+use crate::console::PRIVATE_ONLY;
 use crate::error::{ToolError, ToolResult};
 use crate::http::scripted::{Scripted, Shared};
 use crate::http::Method;
@@ -738,6 +739,7 @@ fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> Test
     assert!(seen[10].text("text").contains("Das ist eingerichtet:"));
     assert!(seen[10].text("text").contains(&alice()));
     assert!(seen[11].text("text").contains("Einrichtung abgeschlossen"));
+    assert!(seen[11].text("text").contains("Goose danach neu starten"));
     assert!(script.seen().iter().all(|seen| seen.op() != "open_url"));
     let again = scripted(&[]);
     let (code, out) = run_with(&station, &again, || true, &["onboard", "--if-needed"]);
@@ -883,6 +885,7 @@ fn an_apple_only_setup_starts_with_the_explanation_and_saves_the_apple_section()
     assert_eq!(station.browser_visits(), 0);
     let seen = script.seen();
     assert!(seen[2].text("text").contains("Automation"));
+    assert!(seen[2].text("text").contains(PRIVATE_ONLY));
     assert_eq!(seen[2].text("title"), "Apple Mail und Kalender");
     assert!(seen[2]
         .text("text")
@@ -1074,6 +1077,7 @@ fn cancelling_at_every_step_stops_cleanly_and_keeps_only_what_was_completed() ->
                 "step {index}: {kept}"
             );
             assert!(kept.contains(&alice()), "step {index}: {kept}");
+            assert!(kept.contains(RESTART_GOOSE), "step {index}: {kept}");
         }
         let expected = match index {
             0 => "spaeter verschoben",
@@ -1116,7 +1120,15 @@ fn cancelling_the_second_account_keeps_the_first_one_complete() -> TestResult {
         "{kept}"
     );
     assert!(kept.contains("Kalender: "), "{kept}");
+    assert!(kept.contains(RESTART_GOOSE), "{kept}");
     Ok(())
+}
+
+#[test]
+fn the_finished_notice_and_the_hint_of_the_terminal_say_the_same_about_goose() {
+    assert!(FINISHED_NOTICE.contains(RESTART_GOOSE));
+    assert!(FINISHED_NOTICE.contains("Goose danach neu starten"));
+    assert!(FINISHED_NOTICE.chars().count() < 240);
 }
 
 #[test]

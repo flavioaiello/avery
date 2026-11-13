@@ -37,7 +37,7 @@ const PAGES_PROMPT: &str = "Welche Seiten sollen sich im Browser öffnen?";
 const PAGES_NOTICE: &str = "Registriere die App wie in der Anleitung. Danach startest du Avery erneut: die Einrichtung geht dort weiter.";
 const BROWSER_NOTICE: &str =
     "Melde dich im Browser an und erlaube den Zugriff. Avery wartet bis zu 3 Minuten.";
-const APPLE_TEXT: &str = "Avery startet jetzt Mail und Kalender und listet deine Konten und Kalender auf. macOS fragt dabei einmal um Erlaubnis (Automation): bitte erlauben. Avery braucht für Apple keine Anmeldung.";
+const APPLE_TEXT: &str = "Avery startet jetzt Mail und Kalender und listet deine Konten und Kalender auf. macOS fragt dabei einmal um Erlaubnis (Automation): bitte erlauben. Avery braucht für Apple keine Anmeldung.\n\nNur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
 const LEVEL_TEXT: &str = "Was darf Avery mit diesem Konto tun?\n\nNur lesen: Mails und Termine lesen.\nLesen und mit Freigabe schreiben: zusätzlich Entwürfe, Senden und Termine ändern; jede Änderung erst nach deinem Klick in einem macOS-Dialog, den der Agent nicht bedienen kann.";
 const READ_ONLY: &str = "Nur lesen";
 const READ_WRITE: &str = "Lesen und mit Freigabe schreiben";
@@ -622,6 +622,7 @@ impl<'a> Dialogs<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::console::PRIVATE_ONLY;
     use crate::json;
     use crate::testutil::{Reply, Script, TestResult};
     use std::time::Duration;
@@ -1413,6 +1414,22 @@ mod tests {
             seen[0].field("buttons"),
             Some(json::parse("[\"Abbrechen\", \"Weiter\"]")?)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_apple_step_says_to_share_private_accounts_only_like_the_terminal_does() -> TestResult {
+        let script = Script::new().then("ask_buttons", Reply::Button(1));
+        let mut talk = Talk::new();
+        assert!(Dialogs::new(&script, &mut talk).explain(Topic::AppleAccess));
+        let text = script.seen()[0].text("text");
+        assert!(text.contains(PRIVATE_ONLY), "{text}");
+        assert!(
+            text.contains("Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche"),
+            "{text}"
+        );
+        assert!(APPLE_TEXT.contains(PRIVATE_ONLY));
+        assert!(chars(&text) < MAX_TEXT);
         Ok(())
     }
 
