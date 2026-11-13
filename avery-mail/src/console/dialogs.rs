@@ -1047,7 +1047,7 @@ mod tests {
         let shown = script.seen()[0].text("text");
         assert_eq!(
             shown,
-            "Mail: PrivatKalender: Gefaelscht (schreiben)Ende\n\nKorrekt?"
+            "Mail: Privat Kalender: Gefaelscht (schreiben)  Ende\n\nKorrekt ?"
         );
         for separator in ['\u{2028}', '\u{2029}', '\u{85}'] {
             assert!(!shown.contains(separator), "{:x}", u32::from(separator));
@@ -2249,7 +2249,7 @@ function run(argv) {
         assert!(separators.ok, "{}", separators.error);
         assert_eq!(
             separators.logged("text"),
-            Json::from("ZeileZweiDreiVier\nFuenf")
+            Json::from("Zeile Zwei Drei Vier\nFuenf")
         );
         let open = probe(r#"{"typed": "x"}"#, &ask_text_request(""))?;
         assert_eq!(open.option("hiddenAnswer"), Json::Bool(false));
@@ -2506,8 +2506,8 @@ function run(argv) {
             r#"{"op": "notify", "title": "A\u2028B", "text": "Ha\u2028l\u2029l\u0085o"}"#,
         )?;
         assert!(separators.ok, "{}", separators.error);
-        assert_eq!(separators.logged("text"), Json::from("Hallo"));
-        assert_eq!(separators.option("withTitle"), Json::from("AB"));
+        assert_eq!(separators.logged("text"), Json::from("Ha l l o"));
+        assert_eq!(separators.option("withTitle"), Json::from("A B"));
         for bad in [
             format!(
                 r#"{{"op": "notify", "title": "A", "text": {}}}"#,

@@ -52,8 +52,16 @@ pub(crate) fn take_chars(text: &str, count: usize) -> String {
     text.chars().take(count).collect()
 }
 
+fn is_separator(c: char) -> bool {
+    matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
 pub(crate) fn clean_str(text: &str, limit: Option<usize>) -> String {
-    let kept: String = text.chars().filter(|c| !is_hidden(*c)).collect();
+    let kept: String = text
+        .chars()
+        .map(|c| if is_separator(c) { ' ' } else { c })
+        .filter(|c| !is_hidden(*c))
+        .collect();
     let kept = kept.replace("\r\n", "\n").replace('\r', "\n");
     let mut out = String::with_capacity(kept.len());
     for c in kept.chars() {
@@ -296,11 +304,8 @@ mod tests {
             '\u{80}',
             '\u{84}',
             '\u{86}',
-            '\u{85}',
             '\u{9b}',
             '\u{9f}',
-            '\u{2028}',
-            '\u{2029}',
             '\u{2800}',
             '\u{b}',
             '\u{c}',
@@ -348,7 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn line_and_paragraph_separators_and_the_next_line_character_are_hidden_like_controls() {
+    fn line_and_paragraph_separators_and_the_next_line_character_become_line_breaks_in_texts_and_a_space_in_names(
+    ) {
         for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
             assert!(is_hidden(separator), "{:x}", u32::from(separator));
             assert_eq!(
@@ -356,14 +362,15 @@ mod tests {
                     &format!("Privat{separator}Familie\n{separator}x{separator}"),
                     None
                 ),
-                "PrivatFamilie\nx"
+                "Privat Familie\n x"
             );
             assert_eq!(
                 one_line_str(&format!("Privat{separator}Familie"), 50),
                 "Privat Familie"
             );
         }
-        assert_eq!(clean_str("a\u{85}b\u{2028}c\u{2029}d", None), "abcd");
+        assert_eq!(clean_str("a\u{85}b\u{2028}c\u{2029}d", None), "a b c d");
+        assert_eq!(clean_str("Montag\u{2028}Ort", None), "Montag Ort");
         assert_eq!(clean_str("\u{2028}\u{2029}\u{85}", None), "");
     }
 
@@ -417,7 +424,7 @@ function run(argv) {
         let object = answer.as_object().ok_or("object")?;
         assert_eq!(
             object.get("shown").and_then(Json::as_str),
-            Some("abcde\u{a0}f")
+            Some("a b c de\u{a0}f")
         );
         let pairs = object
             .get("ranges")

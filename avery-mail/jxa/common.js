@@ -24,7 +24,8 @@ function shown(value) {
   for (i = 0; i < s.length; i++) {
     cp = s.codePointAt(i);
     if (cp > 0xffff) { i++; }
-    if (!hidden(cp)) { out += String.fromCodePoint(cp); }
+    if (cp === 0x85 || cp === 0x2028 || cp === 0x2029) { out += ' '; }
+    else if (!hidden(cp)) { out += String.fromCodePoint(cp); }
   }
   return out;
 }
