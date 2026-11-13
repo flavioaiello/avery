@@ -2,6 +2,7 @@ use crate::account::{string_list, MailAccount};
 use crate::calendar::CalendarEntry;
 use crate::json::{Json, Object};
 use crate::source::{account_address, calendar_parts, plain_address, Source};
+use crate::text::one_line_str;
 use crate::texts::{DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, MAX_LIMIT_PER_HOUR};
 
 pub(crate) const CONFIG_VERSION: i64 = 3;
@@ -30,6 +31,7 @@ impl Level {
 }
 
 pub(crate) const MAX_LINKS: usize = 16;
+pub(crate) const MAX_NAME: usize = 120;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Link {
@@ -79,7 +81,10 @@ fn id_of(object: &Object, place: &str) -> Result<String, String> {
 fn optional_text(object: &Object, key: &str, place: &str) -> Result<String, String> {
     match object.get(key) {
         None => Ok(String::new()),
-        Some(Json::Str(text)) => Ok(text.clone()),
+        Some(Json::Str(text)) if *text == one_line_str(text, MAX_NAME) => Ok(text.clone()),
+        Some(Json::Str(_)) => Err(format!(
+            "{place}.{key} must be one line of visible text up to {MAX_NAME} characters"
+        )),
         Some(_) => Err(format!("{place}.{key} must be text")),
     }
 }
@@ -117,9 +122,11 @@ fn parse_mail(section: &Object) -> Result<Vec<(MailAccount, Level)>, String> {
             name => name,
         };
         if let Some(addresses) = entry.get("addresses") {
-            let valid = matches!(addresses, Json::Arr(items) if items.iter().all(|item| item.as_str().is_some()));
+            let valid = matches!(addresses, Json::Arr(items) if items.iter().all(|item| item.as_str().is_some_and(|text| text == one_line_str(text, MAX_NAME))));
             if !valid {
-                return Err(format!("{place}.addresses must be a list of text"));
+                return Err(format!(
+                    "{place}.addresses must be a list of one-line texts"
+                ));
             }
         }
         let account = MailAccount {
@@ -470,6 +477,23 @@ mod tests {
         assert_eq!(linked_only.linked.len(), 1);
         assert_eq!(Rights::parse(&linked_only.to_config())?, linked_only);
         Ok(())
+    }
+
+    #[test]
+    fn names_and_addresses_must_be_visible_single_lines() {
+        for text in [
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "name": "Privat\u200b", "level": "read"}]}}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "name": "Pri\nvat", "level": "read"}]}}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "name": "Privat\u202e", "level": "read"}]}}"#,
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "addresses": ["a@x.example\u200b"], "level": "read"}]}}"#,
+            r#"{"version": 3, "calendar": {"calendars": [{"id": "C", "name": "Feiertage\u{e0041}", "level": "read"}]}}"#,
+        ] {
+            assert!(parsed(text).is_err(), "{text}");
+        }
+        assert!(parsed(
+            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "name": "Privat Gmail", "addresses": ["a@x.example"], "level": "read"}]}}"#
+        )
+        .is_ok());
     }
 
     #[test]

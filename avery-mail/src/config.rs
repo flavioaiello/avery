@@ -1,5 +1,5 @@
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -75,7 +75,7 @@ impl Settings {
                 "config.json is unreadable. Ask the user to move the file away and run `avery mail setup` again.",
             )
         };
-        let bytes = match fs::read(&self.config_path) {
+        let bytes = match read_bounded(&self.config_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut empty = Object::new();
@@ -354,6 +354,18 @@ fn name_filter(value: Option<&Json>, parameter: &str) -> ToolResult<String> {
     }
 }
 
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+
+fn read_bounded(path: &str) -> io::Result<Vec<u8>> {
+    let limit = u64::try_from(MAX_CONFIG_BYTES + 1).unwrap_or(u64::MAX);
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(limit).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "too large"));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn join_path(base: &str, name: &str) -> String {
     if base.is_empty() {
         name.to_string()
@@ -560,6 +572,12 @@ mod tests {
         assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
         let s = settings_at(&dir.path(""));
         assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
+        let padding = " ".repeat(MAX_CONFIG_BYTES);
+        let s = write_config(&dir, &format!("{{\"version\": 3}}{padding}"))?;
+        assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
+        let padding = " ".repeat(MAX_CONFIG_BYTES - 14);
+        let s = write_config(&dir, &format!("{{\"version\": 3}}{padding}"))?;
+        assert!(s.load_config().is_ok());
         Ok(())
     }
 

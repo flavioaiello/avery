@@ -497,7 +497,21 @@ fn an_undo_in_a_fresh_process_reports_an_event_that_is_gone() -> TestResult {
         "{}",
         changes.stdout
     );
-    let undo = run_cli(&sandbox, &env, &["undo"], "1\nj\n")?;
+    let read_only = run_cli(&sandbox, &env, &["undo"], "1\nj\n")?;
+    assert_eq!(read_only.code, Some(1), "{}", read_only.stdout);
+    assert!(
+        read_only
+            .stdout
+            .contains("nicht mehr zum Schreiben freigegeben"),
+        "{}",
+        read_only.stdout
+    );
+    let writable = [
+        ("MAIL_MCP_FAKE", "1"),
+        ("MAIL_MCP_FAKE_APPROVE", "yes"),
+        ("MAIL_MCP_FAKE_WRITE", "FAKE-CAL-PRIVAT"),
+    ];
+    let undo = run_cli(&sandbox, &writable, &["undo"], "1\nj\n")?;
     assert_eq!(undo.code, Some(1), "{}", undo.stdout);
     assert!(undo.stdout.contains("Event not found"), "{}", undo.stdout);
     Ok(())

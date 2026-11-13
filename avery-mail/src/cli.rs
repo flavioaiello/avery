@@ -17,11 +17,11 @@ use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::localtime;
 use crate::recurrence;
-use crate::rights::{Level, Link, Rights, MAX_LINKS};
+use crate::rights::{Level, Link, Rights, MAX_LINKS, MAX_NAME};
 use crate::sendlog::{self, Outcome};
 use crate::server;
 use crate::source::{account_address, account_id, calendar_parts, Source};
-use crate::text::{clean_str, one_line_str};
+use crate::text::{bracketed, clean_str, one_line_str};
 use crate::texts::{
     CALENDAR_WRITE_OFF, COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
     MAX_SEND_LINES, NO_ACCOUNTS, NO_CALENDARS, VERSION, WRITE_OFF,
@@ -42,18 +42,41 @@ enum Area {
     Calendar,
 }
 
+fn sent_by(sender: &str, address: &str) -> bool {
+    bracketed(sender)
+        .unwrap_or(sender)
+        .trim()
+        .eq_ignore_ascii_case(address)
+}
+
 fn describe(account: &MailAccount) -> String {
     let kind = if account.kind.is_empty() {
-        "?"
+        "?".to_string()
     } else {
-        account.kind.as_str()
+        one_line_str(&account.kind, 30)
     };
     let addresses = if account.addresses.is_empty() {
         "-".to_string()
     } else {
-        account.addresses.join(", ")
+        one_line_str(&account.addresses.join(", "), 200)
     };
-    format!("{}  [{kind}]  {addresses}", account.name)
+    format!(
+        "{}  [{kind}]  {addresses}",
+        one_line_str(&account.name, MAX_NAME)
+    )
+}
+
+fn sanitized(account: MailAccount) -> MailAccount {
+    MailAccount {
+        id: account.id,
+        name: one_line_str(&account.name, MAX_NAME),
+        kind: one_line_str(&account.kind, 30),
+        addresses: account
+            .addresses
+            .iter()
+            .map(|address| one_line_str(address, MAX_NAME))
+            .collect(),
+    }
 }
 
 fn save_rights(ctx: &Context, console: &mut Console, rights: &Rights) -> u8 {
@@ -127,7 +150,7 @@ fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
     };
     let cloud = cloud_accounts(&rights);
     let apple = match ctx.backend.all_accounts() {
-        Ok(accounts) => accounts,
+        Ok(accounts) => accounts.into_iter().map(sanitized).collect(),
         Err(error) if cloud.is_empty() => return failed(console, &error),
         Err(error) => {
             console.say(&format!("Hinweis: Apple Mail ist nicht lesbar ({error})"));
@@ -187,7 +210,10 @@ fn list_calendars(
     };
     match ctx.calendar.calendars(Source::Apple, "") {
         Ok(found) => listing.listed.extend(found.into_iter().map(|info| Listed {
-            info,
+            info: CalendarInfo {
+                name: one_line_str(&info.name, MAX_NAME),
+                ..info
+            },
             write_capable: true,
         })),
         Err(error) if rights.linked.is_empty() => return Err(failed(console, &error)),
@@ -269,7 +295,7 @@ fn setup_mail(
 ) -> Result<(), u8> {
     let cloud = cloud_accounts(rights);
     let (apple, apple_ok) = match ctx.backend.all_accounts() {
-        Ok(accounts) => (accounts, true),
+        Ok(accounts) => (accounts.into_iter().map(sanitized).collect(), true),
         Err(error) if cloud.is_empty() => return Err(failed(console, &error)),
         Err(error) => {
             console.say(&format!(
@@ -898,6 +924,14 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         console.say("Der Eintrag enthaelt nicht genug Angaben fuer das Rueckgaengigmachen.");
         return 1;
     };
+    let writable = ctx
+        .settings
+        .rights()
+        .is_ok_and(|rights| rights.calendar_level(&entry.calendar_id) == Some(Level::Write));
+    if !writable {
+        console.say("Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup calendar");
+        return 1;
+    }
     console.say(&format!(
         "\n{} | {} | {}: {}",
         one_line_str(&entry.calendar, 60),
@@ -1325,7 +1359,8 @@ fn selftest_write_mail(
                 if let Ok(list) = ctx.backend.messages(account, &query) {
                     found = list
                         .items
-                        .first()
+                        .iter()
+                        .find(|item| sent_by(&item.from, &own))
                         .and_then(|item| MessageId::parse(&item.id));
                 }
                 if found.is_some() {
