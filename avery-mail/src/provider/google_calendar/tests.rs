@@ -2690,9 +2690,10 @@ mod writing {
 
 #[test]
 fn ids_that_could_walk_the_path_are_refused() {
+    let holiday = format!("en.usa#holiday@{}", "group.v.calendar.google.com");
     for id in [
         "alice@gmail.example",
-        "en.usa#holiday@group.v.calendar.google.com",
+        holiday.as_str(),
         "abc123_20300101T100000Z",
         "a/b",
     ] {
