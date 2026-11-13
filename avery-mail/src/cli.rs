@@ -36,8 +36,32 @@ const CHANGES_SHOWN: usize = 20;
 const SUGGESTION_CUTOFF: f64 = 0.6;
 const MAX_COMMAND_CHARS: usize = 100;
 
-const LINK_HINT: &str = "Gmail oder Outlook.com verbinden: avery mail link google | microsoft";
-const APPLE_HINT: &str = "Apple Mail und Kalender einbeziehen (optional): avery mail setup apple";
+fn link_hint() -> String {
+    format!(
+        "{} verbinden: avery mail link {}",
+        Provider::remote_names(" oder "),
+        Provider::remote_ids(" | ")
+    )
+}
+
+fn apple_command() -> String {
+    format!("avery mail setup {}", Provider::Apple.as_str())
+}
+
+fn apple_hint() -> String {
+    format!(
+        "{} einbeziehen (optional): {}",
+        Provider::Apple.display(),
+        apple_command()
+    )
+}
+
+fn unlink_forms() -> String {
+    Provider::remote()
+        .map(|provider| format!("{}:<adresse>", provider.as_str()))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
 
 fn sent_by(sender: &str, address: &str) -> bool {
     bracketed(sender)
@@ -154,9 +178,9 @@ fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
     };
     if rights.accounts.is_empty() && rights.apple.mail.is_empty() {
         console.say("Noch kein Konto verbunden.");
-        console.say(LINK_HINT);
+        console.say(&link_hint());
         if !rights.apple.enabled() {
-            console.say(APPLE_HINT);
+            console.say(&apple_hint());
         }
         return 0;
     }
@@ -182,7 +206,7 @@ fn cmd_accounts(ctx: &Context, console: &mut Console) -> u8 {
     console.say("\n* = fuer den Agenten freigegeben, Stufe in Klammern: lesen oder schreiben");
     console.say("(schreiben = Entwuerfe und Senden, jede Mail nur nach deinem Klick)");
     if !rights.apple.enabled() {
-        console.say(APPLE_HINT);
+        console.say(&apple_hint());
     }
     0
 }
@@ -244,9 +268,9 @@ fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
     };
     if rights.accounts.is_empty() && rights.apple.calendars.is_empty() {
         console.say("Noch kein Kalender verfuegbar.");
-        console.say(LINK_HINT);
+        console.say(&link_hint());
         if !rights.apple.enabled() {
-            console.say(APPLE_HINT);
+            console.say(&apple_hint());
         }
         return 0;
     }
@@ -293,7 +317,7 @@ fn cmd_calendars(ctx: &Context, console: &mut Console) -> u8 {
         "(schreiben = Termine anlegen, aendern, loeschen, jede Aenderung nur nach deinem Klick)",
     );
     if !rights.apple.enabled() {
-        console.say(APPLE_HINT);
+        console.say(&apple_hint());
     }
     0
 }
@@ -431,7 +455,11 @@ fn setup_account(
 }
 
 fn setup_apple_entries(console: &mut Console, apple: &mut Apple) -> Result<(), u8> {
-    console.say("\nApple Mail und Kalender (einbezogen; neu auflisten: avery mail setup apple)");
+    console.say(&format!(
+        "\n{} (einbezogen; neu auflisten: {})",
+        Provider::Apple.display(),
+        apple_command()
+    ));
     let choices: Vec<Choice> = apple
         .mail
         .iter()
@@ -473,8 +501,8 @@ fn setup_accounts(ctx: &Context, console: &mut Console) -> u8 {
     let before = rights.clone();
     if rights.accounts.is_empty() && !rights.apple.enabled() {
         console.say("Noch kein Konto verbunden, es gibt nichts einzurichten.");
-        console.say(LINK_HINT);
-        console.say(APPLE_HINT);
+        console.say(&link_hint());
+        console.say(&apple_hint());
         return 1;
     }
     explain_levels(ctx, console, &rights);
@@ -498,7 +526,7 @@ fn setup_accounts(ctx: &Context, console: &mut Console) -> u8 {
     }
     let code = finish(ctx, console, &before, &rights);
     if code == 0 && !rights.apple.enabled() {
-        console.say(APPLE_HINT);
+        console.say(&apple_hint());
     }
     code
 }
@@ -508,7 +536,7 @@ fn unique<T>(items: Vec<T>, id: impl Fn(&T) -> &str) -> Vec<T> {
     for item in items {
         let name = id(&item);
         if !name.is_empty()
-            && Provider::of_id(name) == Provider::Apple
+            && Provider::is_apple_id(name)
             && !kept.iter().any(|known| id(known) == name)
         {
             kept.push(item);
@@ -526,9 +554,10 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
         Err(error) => return failed(console, &error),
     };
     let before = rights.clone();
-    console.say(
-        "Apple Mail und Kalender einbeziehen (optional). Dazu startet Avery Mail und Kalender;",
-    );
+    console.say(&format!(
+        "{} einbeziehen (optional). Dazu startet Avery Mail und Kalender;",
+        Provider::Apple.display()
+    ));
     console.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
     let mail = match ctx.backend.all_accounts() {
         Ok(found) => unique(found.into_iter().map(sanitized).collect(), |account| {
@@ -652,7 +681,10 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
     rights.apple = apple;
     let code = finish(ctx, console, &before, &rights);
     if code == 0 && before.apple.enabled() && !rights.apple.enabled() {
-        console.say("Apple Mail und Kalender sind wieder aus: Avery startet sie nicht mehr.");
+        console.say(&format!(
+            "{} sind wieder aus: Avery startet sie nicht mehr.",
+            Provider::Apple.display()
+        ));
     }
     code
 }
@@ -660,11 +692,12 @@ fn setup_apple(ctx: &Context, console: &mut Console) -> u8 {
 fn cmd_setup(ctx: &Context, console: &mut Console, word: Option<&str>) -> u8 {
     match word {
         None => setup_accounts(ctx, console),
-        Some("apple") => setup_apple(ctx, console),
+        Some(word) if word == Provider::Apple.as_str() => setup_apple(ctx, console),
         Some(other) => {
             console.say(&format!(
-                "Unbekannter Bereich: {} (nur: apple)",
-                clean_str(other, Some(30))
+                "Unbekannter Bereich: {} (nur: {})",
+                clean_str(other, Some(30)),
+                Provider::Apple.as_str()
             ));
             2
         }
@@ -686,13 +719,18 @@ fn cmd_revoke(ctx: &Context, console: &mut Console) -> u8 {
     };
     console.say("Alle Freigaben entfernt (Mail und Kalender, auch Schreiben). Der Agent sieht keine Konten und Kalender mehr.");
     if linked {
-        console.say("Direkt verbundene Konten (Gmail/Outlook.com) bleiben verbunden; ihre Anmeldung liegt im Schluesselbund.");
+        console.say(&format!(
+            "Direkt verbundene Konten ({}) bleiben verbunden; ihre Anmeldung liegt im Schluesselbund.",
+            Provider::remote_names("/")
+        ));
         console.say("Verbindung ganz loesen: avery mail unlink <adresse>");
     }
     if had_apple {
-        console.say(
-            "Apple Mail und Kalender sind wieder aus. Wieder einbeziehen: avery mail setup apple",
-        );
+        console.say(&format!(
+            "{} sind wieder aus. Wieder einbeziehen: {}",
+            Provider::Apple.display(),
+            apple_command()
+        ));
     }
     0
 }
@@ -728,7 +766,10 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
         return 1;
     }
     let Some(provider) = provider.and_then(Provider::parse_remote) else {
-        console.say("Benutzung: avery mail link google | microsoft");
+        console.say(&format!(
+            "Benutzung: avery mail link {}",
+            Provider::remote_ids(" | ")
+        ));
         return 2;
     };
     let Some(oauth) = provider.oauth() else {
@@ -748,7 +789,10 @@ fn cmd_link(ctx: &Context, console: &mut Console, provider: Option<&str>) -> u8 
     for line in oauth.registration {
         console.say(line);
     }
-    console.say("Details: README, Abschnitt 'Gmail und Outlook.com'.");
+    console.say(&format!(
+        "Details: README, Abschnitt '{}'.",
+        Provider::remote_names(" and ")
+    ));
     console.say("Avery speichert die Anmeldung im macOS-Schluesselbund (Dienst avery-mail), nie in einer Datei.");
     console.say(
         "Der Agent bekommt nur das, was du danach mit 'avery mail setup' oder hier freigibst.",
@@ -858,11 +902,17 @@ fn single_account(
                     ));
                 }
             }
-            console.say("Eine Anmeldung ohne Eintrag in der Konfiguration (etwa nach einem abgebrochenen Verbinden) entfernt: avery mail unlink google:<adresse> | microsoft:<adresse>");
+            console.say(&format!(
+                "Eine Anmeldung ohne Eintrag in der Konfiguration (etwa nach einem abgebrochenen Verbinden) entfernt: avery mail unlink {}",
+                unlink_forms()
+            ));
             Err(1)
         }
         _ => {
-            console.say("Die Adresse ist mehrfach verbunden. Benutzung: avery mail unlink google:<adresse> | microsoft:<adresse>");
+            console.say(&format!(
+                "Die Adresse ist mehrfach verbunden. Benutzung: avery mail unlink {}",
+                unlink_forms()
+            ));
             Err(1)
         }
     }
@@ -951,7 +1001,9 @@ fn cmd_unlink(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 
         )),
         (false, false) => console.say(&format!("{address} war schon getrennt.")),
     }
-    console.say("Zugriff der App auch im Konto widerrufen (Google: myaccount.google.com/permissions, Microsoft: account.live.com/consent/Manage).");
+    if let Some(url) = provider.consent_url() {
+        console.say(&format!("Zugriff der App auch im Konto widerrufen: {url}"));
+    }
     0
 }
 
@@ -1149,9 +1201,10 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         .rights()
         .is_ok_and(|rights| rights.calendar_level(&entry.calendar_id) == Some(Level::Write));
     if !writable {
-        console.say(
-            "Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup (Apple Kalender: avery mail setup apple)",
-        );
+        console.say(&format!(
+            "Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup (Apple Kalender: {})",
+            apple_command()
+        ));
         return 1;
     }
     console.say(&format!(
@@ -1216,12 +1269,17 @@ fn cmd_status(ctx: &Context, console: &mut Console) -> u8 {
     }
     if rights.apple.enabled() {
         console.say(&format!(
-            "Apple Mail und Kalender: an ({} Konten, {} Kalender)",
+            "{}: an ({} Konten, {} Kalender)",
+            Provider::Apple.display(),
             rights.apple.mail.len(),
             rights.apple.calendars.len()
         ));
     } else {
-        console.say(&format!("Apple Mail und Kalender: aus. {APPLE_HINT}"));
+        console.say(&format!(
+            "{}: aus. {}",
+            Provider::Apple.display(),
+            apple_hint()
+        ));
     }
     console.say(&format!(
         "Grenzen pro Stunde: {} gesendete Mails, {MAX_DRAFTS_PER_HOUR} Entwuerfe, {} Kalenderaenderungen",
@@ -1381,7 +1439,7 @@ fn selftest_calendar(
     if !step(console, failures, tag, "Termine lesen", reading) {
         return;
     }
-    if Provider::of_id(&calendar.id) != Provider::Apple {
+    if !Provider::of_id(&calendar.id).expands_recurrence_locally() {
         return;
     }
     let unreadable: Vec<&String> = rules
@@ -3672,6 +3730,42 @@ mod tests {
             (1, true)
         );
         assert_eq!(cloud.apple.calls(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unlink_names_only_the_consent_page_of_its_own_provider() -> TestResult {
+        for (address, shown, hidden) in [
+            (
+                "bob@outlook.example",
+                "https://account.live.com/consent/Manage",
+                "myaccount.google.com",
+            ),
+            (
+                "alice@gmail.example",
+                "https://myaccount.google.com/permissions",
+                "account.live.com",
+            ),
+        ] {
+            let dir = TempDir::new()?;
+            let cloud = cloudy(
+                &dir,
+                LINKED,
+                &bob_and_alice(),
+                quiet(),
+                crate::provider::fakes::Visit::Nothing,
+                crate::http::scripted::Scripted::new(),
+            )?;
+            let (code, out) = run(&cloud.ctx, &["unlink", address], "j\n");
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                out.contains(&format!(
+                    "Zugriff der App auch im Konto widerrufen: {shown}"
+                )),
+                "{out}"
+            );
+            assert!(!out.contains(hidden), "{out}");
+        }
         Ok(())
     }
 

@@ -10,6 +10,7 @@ pub(crate) const MAX_ACCOUNTS: usize = 16;
 pub(crate) const MAX_CALENDARS: usize = 100;
 pub(crate) const MAX_APPLE: usize = 200;
 pub(crate) const MAX_NAME: usize = 120;
+const APPLE: &str = Provider::Apple.as_str();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Level {
@@ -248,7 +249,12 @@ fn parse_accounts(config: &Object) -> Result<Vec<RemoteAccount>, String> {
             .get("provider")
             .and_then(Json::as_str)
             .and_then(Provider::parse_remote)
-            .ok_or_else(|| format!("{place}.provider must be \"google\" or \"microsoft\""))?;
+            .ok_or_else(|| {
+                let choices: Vec<String> = Provider::remote()
+                    .map(|provider| format!("\"{}\"", provider.as_str()))
+                    .collect();
+                format!("{place}.provider must be {}", choices.join(" or "))
+            })?;
         let address = entry
             .get("address")
             .and_then(Json::as_str)
@@ -270,9 +276,10 @@ fn parse_accounts(config: &Object) -> Result<Vec<RemoteAccount>, String> {
 
 fn apple_id(entry: &Object, place: &str) -> Result<String, String> {
     let id = id_of(entry, place)?;
-    if Provider::of_id(&id) != Provider::Apple {
+    if !Provider::is_apple_id(&id) {
         return Err(format!(
-            "{place}.id must not look like a Gmail or Outlook.com id"
+            "{place}.id must not look like a {} id",
+            Provider::remote_names(" or ")
         ));
     }
     Ok(id)
@@ -280,11 +287,11 @@ fn apple_id(entry: &Object, place: &str) -> Result<String, String> {
 
 fn parse_apple_mail(section: &Object) -> Result<Vec<(MailAccount, Level)>, String> {
     let mut found: Vec<(MailAccount, Level)> = Vec::new();
-    for (index, item) in list_of(section, "mail", "apple.", MAX_APPLE)?
+    for (index, item) in list_of(section, "mail", &format!("{APPLE}."), MAX_APPLE)?
         .iter()
         .enumerate()
     {
-        let place = format!("apple.mail[{index}]");
+        let place = format!("{APPLE}.mail[{index}]");
         let entry = object_of(item, &place)?;
         only_keys(entry, &["id", "name", "type", "addresses", "level"], &place)?;
         let id = apple_id(entry, &place)?;
@@ -315,11 +322,11 @@ fn parse_apple_mail(section: &Object) -> Result<Vec<(MailAccount, Level)>, Strin
 
 fn parse_apple_calendars(section: &Object) -> Result<Vec<(CalendarEntry, Level)>, String> {
     let mut found: Vec<(CalendarEntry, Level)> = Vec::new();
-    for (index, item) in list_of(section, "calendars", "apple.", MAX_APPLE)?
+    for (index, item) in list_of(section, "calendars", &format!("{APPLE}."), MAX_APPLE)?
         .iter()
         .enumerate()
     {
-        let place = format!("apple.calendars[{index}]");
+        let place = format!("{APPLE}.calendars[{index}]");
         let entry = object_of(item, &place)?;
         only_keys(entry, &["id", "name", "level"], &place)?;
         let id = apple_id(entry, &place)?;
@@ -338,7 +345,7 @@ fn parse_apple_calendars(section: &Object) -> Result<Vec<(CalendarEntry, Level)>
 }
 
 fn parse_apple(section: &Object) -> Result<Apple, String> {
-    only_keys(section, &["mail", "calendars"], "apple")?;
+    only_keys(section, &["mail", "calendars"], APPLE)?;
     Ok(Apple {
         mail: parse_apple_mail(section)?,
         calendars: parse_apple_calendars(section)?,
@@ -424,14 +431,14 @@ impl Rights {
             &[
                 "version",
                 "accounts",
-                "apple",
+                APPLE,
                 "sends_per_hour",
                 "changes_per_hour",
             ],
             "config",
         )?;
-        let apple = match config.get("apple") {
-            Some(value) => parse_apple(object_of(value, "apple")?)?,
+        let apple = match config.get(APPLE) {
+            Some(value) => parse_apple(object_of(value, APPLE)?)?,
             None => Apple::default(),
         };
         Ok(Rights {
@@ -450,7 +457,7 @@ impl Rights {
             config.insert("accounts", Json::Arr(accounts));
         }
         if self.apple.enabled() {
-            config.insert("apple", apple_json(&self.apple));
+            config.insert(APPLE, apple_json(&self.apple));
         }
         config.insert("sends_per_hour", Json::Int(self.sends_per_hour));
         config.insert("changes_per_hour", Json::Int(self.changes_per_hour));
@@ -853,6 +860,18 @@ mod tests {
             r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "read"}]}, {"provider": "microsoft", "address": "b@outlook.example", "calendars": [{"id": "c", "level": "read"}]}]}"#
         )
         .is_ok());
+    }
+
+    #[test]
+    fn the_names_in_the_error_texts_come_from_the_providers() {
+        rejected(
+            r#"{"version": 3, "accounts": [{"provider": "yahoo", "address": "a@gmail.example"}]}"#,
+            r#"accounts[0].provider must be "google" or "microsoft""#,
+        );
+        rejected(
+            r#"{"version": 3, "apple": {"mail": [{"id": "google:a@gmail.example", "level": "read"}]}}"#,
+            "apple.mail[0].id must not look like a Gmail or Outlook.com id",
+        );
     }
 
     #[test]

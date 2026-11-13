@@ -1520,6 +1520,79 @@ fn all_lists_every_provider_once_and_the_labels_differ() {
 }
 
 #[test]
+fn consent_pages_belong_to_their_provider_and_are_for_the_user_only() {
+    assert_eq!(
+        Provider::Google.consent_url(),
+        Some("https://myaccount.google.com/permissions")
+    );
+    assert_eq!(
+        Provider::Microsoft.consent_url(),
+        Some("https://account.live.com/consent/Manage")
+    );
+    assert_eq!(Provider::Apple.consent_url(), None);
+    for provider in Provider::ALL {
+        if let Some(url) = provider.consent_url() {
+            assert!(url.starts_with("https://"), "{url}");
+            assert!(
+                Request::new(Method::Get, url, READ_TIMEOUT).refused(),
+                "{url}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_apple_hands_out_recurrence_rules_that_avery_expands_itself() {
+    assert!(Provider::Apple.expands_recurrence_locally());
+    assert!(!Provider::Google.expands_recurrence_locally());
+    assert!(!Provider::Microsoft.expands_recurrence_locally());
+}
+
+#[test]
+fn ids_without_a_provider_prefix_are_apple_ids() {
+    for id in [
+        "0C1E9B7A",
+        "FAKE-GMAIL",
+        "",
+        "apple:x",
+        "a:b:c",
+        "Google:x@y.example",
+    ] {
+        assert!(Provider::is_apple_id(id), "{id}");
+        assert_eq!(
+            Provider::is_apple_id(id),
+            Provider::of_id(id) == Provider::Apple
+        );
+    }
+    for id in [
+        "google:alice@gmail.com",
+        "microsoft:bob@outlook.example",
+        "google:alice@gmail.com:primary",
+        "microsoft:x",
+    ] {
+        assert!(!Provider::is_apple_id(id), "{id}");
+    }
+}
+
+#[test]
+fn the_remote_providers_are_listed_from_the_provider_facts() {
+    assert_eq!(
+        Provider::remote().collect::<Vec<_>>(),
+        [Provider::Google, Provider::Microsoft]
+    );
+    assert_eq!(Provider::remote_ids(" | "), "google | microsoft");
+    assert_eq!(Provider::remote_ids(" or "), "google or microsoft");
+    assert_eq!(Provider::remote_names(" oder "), "Gmail oder Outlook.com");
+    assert_eq!(Provider::remote_names("/"), "Gmail/Outlook.com");
+    for provider in Provider::remote() {
+        assert_eq!(Provider::parse_remote(provider.as_str()), Some(provider));
+    }
+    assert_eq!(Provider::parse_remote("apple"), None);
+    assert_eq!(Provider::parse_remote("Google"), None);
+    assert_eq!(Provider::parse_remote(""), None);
+}
+
+#[test]
 fn listed_calendars_keep_the_provider_ids_and_drop_unusable_and_repeated_ones() -> TestResult {
     let transport = Scripted::new()
         .json(Method::Post, "/token", 200, TOKEN)

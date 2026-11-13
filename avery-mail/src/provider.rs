@@ -47,6 +47,7 @@ pub(crate) struct OAuth {
     pub(crate) authorize: &'static str,
     pub(crate) token: &'static str,
     pub(crate) userinfo: &'static str,
+    pub(crate) consent: &'static str,
     pub(crate) loopback: &'static str,
     pub(crate) secret: bool,
     pub(crate) scope_on_refresh: bool,
@@ -64,6 +65,7 @@ static GOOGLE: OAuth = OAuth {
     authorize: "https://accounts.google.com/o/oauth2/v2/auth",
     token: "https://oauth2.googleapis.com/token",
     userinfo: "https://openidconnect.googleapis.com/v1/userinfo",
+    consent: "https://myaccount.google.com/permissions",
     loopback: "127.0.0.1",
     secret: true,
     scope_on_refresh: false,
@@ -85,6 +87,7 @@ static MICROSOFT: OAuth = OAuth {
     authorize: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
     token: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
     userinfo: "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName",
+    consent: "https://account.live.com/consent/Manage",
     loopback: "localhost",
     secret: false,
     scope_on_refresh: true,
@@ -167,7 +170,7 @@ impl OAuth {
 impl Provider {
     pub(crate) const ALL: [Provider; 3] = [Provider::Apple, Provider::Google, Provider::Microsoft];
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Provider::Apple => "apple",
             Provider::Google => "google",
@@ -175,10 +178,28 @@ impl Provider {
         }
     }
 
-    pub(crate) fn parse_remote(text: &str) -> Option<Provider> {
+    pub(crate) fn remote() -> impl Iterator<Item = Provider> {
         Provider::ALL
             .into_iter()
-            .find(|provider| provider.oauth().is_some() && provider.as_str() == text)
+            .filter(|provider| provider.oauth().is_some())
+    }
+
+    pub(crate) fn remote_ids(separator: &str) -> String {
+        Provider::remote()
+            .map(Provider::as_str)
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    pub(crate) fn remote_names(separator: &str) -> String {
+        Provider::remote()
+            .map(Provider::display)
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    pub(crate) fn parse_remote(text: &str) -> Option<Provider> {
+        Provider::remote().find(|provider| provider.as_str() == text)
     }
 
     pub(crate) fn kind(self) -> &'static str {
@@ -205,6 +226,17 @@ impl Provider {
         }
     }
 
+    pub(crate) fn consent_url(self) -> Option<&'static str> {
+        self.oauth().map(|oauth| oauth.consent)
+    }
+
+    pub(crate) fn expands_recurrence_locally(self) -> bool {
+        match self {
+            Provider::Apple => true,
+            Provider::Google | Provider::Microsoft => false,
+        }
+    }
+
     pub(crate) fn hosts(self) -> &'static [&'static str] {
         match self {
             Provider::Apple => &[],
@@ -223,6 +255,10 @@ impl Provider {
         id.split_once(':')
             .and_then(|(prefix, _)| Provider::parse_remote(prefix))
             .unwrap_or(Provider::Apple)
+    }
+
+    pub(crate) fn is_apple_id(id: &str) -> bool {
+        Provider::of_id(id) == Provider::Apple
     }
 }
 
