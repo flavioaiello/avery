@@ -44,6 +44,10 @@ const OUTLOOK_CALENDARS: &str =
 
 type Step = (&'static str, Reply);
 
+fn chars(text: &str) -> usize {
+    text.chars().count()
+}
+
 fn alice() -> String {
     gm("alice@{gmail}")
 }
@@ -553,11 +557,23 @@ fn an_unreadable_config_is_reported_and_never_gets_a_dialog() -> TestResult {
         "{\"version\": 3, \"accounts\": 5}",
     ] {
         let station = gmail_station(Some(config), Visit::Nothing, false, Orchard::empty())?;
-        let script = Script::new();
+        let script = Script::new().then("notify", Reply::Done);
         let (code, out) = run_with(&station, &script, || true, &["onboard", "--if-needed"]);
         assert_eq!(code, 1, "{config}: {out}");
         assert!(out.starts_with("Fehler: "), "{config}: {out}");
-        assert!(script.seen().is_empty());
+        assert_eq!(script.ops(), ["notify"], "{config}");
+        assert!(script.mismatches().is_empty(), "{config}");
+        let seen = script.seen();
+        assert_eq!(seen[0].text("title"), FAILED_TITLE);
+        assert_eq!(seen[0].text("text"), UNREADABLE_NOTICE);
+        assert!(seen[0].text("text").contains("nicht lesbar"));
+        assert!(seen[0].text("text").contains("avery mail status"));
+        assert_eq!(station.config(), config);
+        let dark = Script::new();
+        let (code, out) = run_with(&station, &dark, || false, &["onboard", "--if-needed"]);
+        assert_eq!(code, 1, "{config}: {out}");
+        assert!(out.starts_with("Fehler: "), "{config}: {out}");
+        assert!(dark.seen().is_empty(), "{config}");
         assert_eq!(station.config(), config);
     }
     Ok(())
@@ -1172,13 +1188,68 @@ fn the_welcome_can_postpone_or_dismiss_for_good() -> TestResult {
 fn a_dismissal_that_cannot_be_saved_is_reported() -> TestResult {
     let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
     fs::create_dir_all(station.marker())?;
-    let script = Script::new().then("ask_buttons", Reply::Button(1));
-    let (code, out) = onboard(&station, &script);
+    for args in [vec!["onboard"], vec!["onboard", "--if-needed"]] {
+        let script = Script::new()
+            .then("ask_buttons", Reply::Button(1))
+            .then("notify", Reply::Done);
+        let (code, out) = run_with(&station, &script, || true, &args);
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.contains("Die Einstellung konnte nicht gespeichert werden"),
+            "{out}"
+        );
+        assert_eq!(script.ops(), ["ask_buttons", "notify"], "{args:?}");
+        assert!(script.mismatches().is_empty(), "{args:?}");
+        let notice = script.seen()[1].text("text");
+        assert!(
+            notice.contains("Die Einstellung konnte nicht gespeichert werden"),
+            "{notice}"
+        );
+        assert!(notice.ends_with(FAILED_HINT), "{notice}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_notification_that_cannot_be_shown_does_not_change_how_a_failure_ends() -> TestResult {
+    for reply in [Reply::Silent, Reply::Hung, Reply::Flood, Reply::Cancel] {
+        let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+        let script = Script::new()
+            .then("ask_buttons", Reply::Silent)
+            .then("notify", reply.clone());
+        let (code, out) = onboard(&station, &script);
+        assert_eq!(code, 1, "{reply:?}: {out}");
+        assert!(out.starts_with("Fehler: "), "{reply:?}: {out}");
+        assert_eq!(script.ops(), ["ask_buttons", "notify"], "{reply:?}");
+        assert!(!Path::new(&station.ctx.settings.config_path).exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_config_that_turns_unreadable_before_the_summary_ends_the_run_with_a_notification() -> TestResult
+{
+    let station = gmail_station(Some("not json"), Visit::Nothing, false, Orchard::empty())?;
+    let script = Script::new().then("notify", Reply::Done);
+    let mut flow = Flow::new(&station.ctx, &script);
+    let Next::End(ending) = flow.summary() else {
+        return Err("the summary should have ended the run".into());
+    };
+    assert!(matches!(ending, Ending::Failed(_)));
+    let mut input = Cursor::new(Vec::new());
+    let mut out = Vec::new();
+    let code = {
+        let mut console = Console::terminal(&mut input, &mut out);
+        flow.conclude(ending, &mut console)
+    };
+    let out = String::from_utf8_lossy(&out).into_owned();
     assert_eq!(code, 1, "{out}");
-    assert!(
-        out.contains("Die Einstellung konnte nicht gespeichert werden"),
-        "{out}"
-    );
+    assert!(out.starts_with("Fehler: "), "{out}");
+    assert_eq!(script.ops(), ["notify"]);
+    let notice = script.seen()[0].text("text");
+    assert!(notice.contains("config.json"), "{notice}");
+    assert!(notice.ends_with(FAILED_HINT), "{notice}");
+    assert_eq!(station.config(), "not json");
     Ok(())
 }
 
@@ -1503,12 +1574,20 @@ fn dialogs_that_cannot_be_shown_end_the_run_with_the_reason_and_change_nothing()
         ),
     ] {
         let station = gmail_station(None, Visit::Good("c"), false, apple_orchard())?;
-        let script = Script::new().then("ask_buttons", reply);
+        let script = Script::new()
+            .then("ask_buttons", reply)
+            .then("notify", Reply::Done);
         let (code, out) = onboard(&station, &script);
         assert_eq!(code, 1, "{out}");
         assert!(out.starts_with("Fehler: "), "{out}");
         assert!(out.contains(wanted), "{out}");
-        assert_eq!(script.seen().len(), 1);
+        assert_eq!(script.ops(), ["ask_buttons", "notify"]);
+        assert!(script.mismatches().is_empty());
+        let seen = script.seen();
+        assert_eq!(seen[1].text("title"), FAILED_TITLE);
+        assert!(seen[1].text("text").contains(wanted), "{wanted}");
+        assert!(seen[1].text("text").ends_with(FAILED_HINT), "{wanted}");
+        assert!(chars(&seen[1].text("text")) <= 240);
         assert!(!Path::new(&station.ctx.settings.config_path).exists());
         assert!(!Path::new(&station.marker()).exists());
         assert_eq!(station.tokens(), 0);
@@ -1526,9 +1605,11 @@ fn a_dialog_that_breaks_in_the_middle_leaves_a_consistent_state() -> TestResult 
         link_google(false),
         vec![("choose_list", Reply::Silent)],
         vec![("ask_buttons", Reply::Silent)],
+        vec![("notify", Reply::Done)],
     ]);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 1, "{out}");
+    assert_clean(&script);
     let rights = station.rights()?;
     assert_eq!(rights.accounts.len(), 1);
     assert_eq!(station.tokens(), 1);

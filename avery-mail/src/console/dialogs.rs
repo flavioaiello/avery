@@ -231,7 +231,7 @@ fn failure(text: &str, _op: Option<&str>, _uncertain: bool) -> ToolError {
     if low.contains("-1743") || low.contains("not authorized") || low.contains("nicht berechtigt") {
         return ToolError::msg(concat!(
             "macOS erlaubt die Dialoge nicht. Bitte in den Systemeinstellungen unter Datenschutz & Sicherheit die ",
-            "Berechtigung erlauben, nach der macOS gefragt hat (Automation oder Benachrichtigungen), und Avery erneut starten."
+            "Berechtigung erlauben (Automation oder Benachrichtigungen) und Avery neu starten."
         ));
     }
     if low.contains("bad_request") {
@@ -1592,6 +1592,7 @@ mod tests {
         assert!(failure("dialog_failed: x", None, false)
             .message()
             .contains("Sitzung"));
+        assert!(chars(&failure("(-1743)", None, true).message()) <= 190);
         let long = failure(&"y".repeat(1000), None, false).message();
         assert!(
             long.starts_with("Der Dialog ist fehlgeschlagen ("),

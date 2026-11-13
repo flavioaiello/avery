@@ -95,8 +95,8 @@ setup before Goose starts. They are a thin layer over the very same code as `ave
    pages and opens them in the browser: this README section and the Google Cloud or Entra console pages; the dialogs then
    end for now and the next start continues),
    the client ID (for Gmail also the client secret, which is typed hidden), the level (*Nur lesen* or *Lesen und mit Freigabe
-   schreiben*), the sign-in in the browser (a notification says so while Avery waits, at most 3 minutes), and a dialog with the
-   result: the address that is now linked, or the reason why not.
+   schreiben*), the sign-in in the browser (Avery waits at most 3 minutes and says so in a notification, if macOS shows
+   notifications), and a dialog with the result: the address that is now linked, or the reason why not.
 4. **Calendars.** Choose the calendars Avery may read, then which of them it may also write. A last dialog shows what will be
    saved; only *Ja* saves it.
 5. **Apple** (only if you chose it). It first explains that macOS asks once for permission to control Mail and Calendar, then
@@ -119,9 +119,13 @@ dialogs cannot be shown or are cancelled, Avery still starts. `avery mail onboar
 The dialogs come from the helper `/usr/bin/osascript` and show only on the Mac's screen; the agent can neither start
 them nor answer them (the server `avery-mail serve` has no code path to them). They run inside that helper and send no
 Apple event to another app. macOS may still ask for a permission, for example to show notifications now, or Automation
-later for the approval dialogs: allow it (System Settings > Privacy & Security). If no dialog appears, run
-`avery mail onboard` in a terminal: it shows the dialogs again or says why it cannot. Avery starts as usual either way.
-If you prefer the terminal, `AVERY_NO_ONBOARD=1` keeps the dialogs away and the manual steps below stay as they were.
+later for the approval dialogs: allow it (System Settings > Privacy & Security).
+
+If a step fails (for example macOS blocks the dialogs, the *Nicht mehr fragen* marker cannot be saved or `config.json`
+cannot be read), the setup ends and says why: as `Fehler: ...` in a terminal and, where macOS shows notifications, as a
+notification, also when `Avery.app` or `avery up` started it. If no dialog and no notification appears, run
+`avery mail onboard` in a terminal: it shows the dialogs again or says why it cannot. Avery starts as usual in every
+case. If you prefer the terminal, `AVERY_NO_ONBOARD=1` keeps the dialogs away and the manual steps below stay as they were.
 
 ## Gmail and Outlook.com
 

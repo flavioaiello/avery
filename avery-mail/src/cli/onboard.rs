@@ -26,6 +26,10 @@ const SELFTEST_NOTICE: &str = "Der Lesetest läuft ...";
 const FINISHED_NOTICE: &str =
     "Einrichtung abgeschlossen. Goose danach neu starten. Weitere Einstellungen: avery mail setup";
 const CANCELLED_NOTICE: &str = "Abgebrochen. Es wurde nichts gespeichert.";
+const FAILED_TITLE: &str = "Avery: Einrichtung fehlgeschlagen";
+const FAILED_HINT: &str = "Erneut im Terminal: avery mail onboard";
+const MAX_FAILED: usize = 190;
+const UNREADABLE_NOTICE: &str = "Die Einrichtung startet nicht: die Konfiguration ist nicht lesbar. Den Grund zeigt im Terminal: avery mail status";
 const NOTHING_NOTICE: &str =
     "Nichts ausgewählt. Die Einrichtung startet wieder mit: avery mail onboard";
 const DISMISSED_NOTICE: &str =
@@ -492,6 +496,12 @@ impl<'a> Flow<'a> {
         }
     }
 
+    fn alert(&mut self, message: &str) {
+        self.talk.set_title(FAILED_TITLE);
+        let text = format!("{} {FAILED_HINT}", one_line_str(message, MAX_FAILED));
+        self.dialogs().notify(&text);
+    }
+
     fn conclude(&mut self, ending: Ending, console: &mut Console) -> u8 {
         match ending {
             Ending::Finished => {
@@ -537,9 +547,18 @@ impl<'a> Flow<'a> {
             }
             Ending::Failed(message) => {
                 console.say(&format!("Fehler: {message}"));
+                self.alert(&message);
                 1
             }
         }
+    }
+}
+
+fn announce(screen: &Screen, text: &str) {
+    if (screen.gui)() {
+        let mut talk = Talk::new();
+        talk.set_title(FAILED_TITLE);
+        Dialogs::new(screen.host, &mut talk).notify(text);
     }
 }
 
@@ -556,7 +575,11 @@ pub(super) fn run(ctx: &Context, console: &mut Console, screen: &Screen, args: &
         }
         Mode::IfNeeded => match needed(ctx, screen) {
             Need::No => return 0,
-            Need::Unreadable(error) => return failed(console, &error),
+            Need::Unreadable(error) => {
+                let code = failed(console, &error);
+                announce(screen, UNREADABLE_NOTICE);
+                return code;
+            }
             Need::Yes => {}
         },
     }

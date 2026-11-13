@@ -436,13 +436,23 @@ fn the_dialogs_go_through_the_program_the_environment_names_and_a_failing_one_en
         output.stdout
     );
     let calls: Vec<&str> = output.calls.lines().collect();
-    assert_eq!(calls.len(), 1, "{}", output.calls);
+    assert_eq!(calls.len(), 2, "{}", output.calls);
     assert!(
         calls[0].starts_with("osascript {\"op\": \"ask_buttons\""),
         "{}",
         calls[0]
     );
     assert!(calls[0].contains("Willkommen bei Avery"), "{}", calls[0]);
+    assert!(
+        calls[1].starts_with("osascript {\"op\": \"notify\""),
+        "{}",
+        calls[1]
+    );
+    assert!(
+        calls[1].contains("Der Dialog ist fehlgeschlagen"),
+        "{}",
+        calls[1]
+    );
     for name in NO_FILES {
         assert!(!sandbox.path(name).exists(), "{name}");
     }
@@ -466,12 +476,17 @@ fn the_flag_asks_the_session_probe_first_and_only_a_graphical_session_gets_the_d
     )?;
     assert_eq!(graphical.code, Some(1), "{}", graphical.stdout);
     let calls: Vec<&str> = graphical.calls.lines().collect();
-    assert_eq!(calls.len(), 2, "{}", graphical.calls);
+    assert_eq!(calls.len(), 3, "{}", graphical.calls);
     assert_eq!(calls[0], "launchctl managername");
     assert!(
         calls[1].starts_with("osascript {\"op\": \"ask_buttons\""),
         "{}",
         calls[1]
+    );
+    assert!(
+        calls[2].starts_with("osascript {\"op\": \"notify\""),
+        "{}",
+        calls[2]
     );
     for name in NO_FILES {
         assert!(!sandbox.path(name).exists(), "{name}");
@@ -513,9 +528,33 @@ fn a_config_that_cannot_be_read_is_reported_by_the_flag_and_never_gets_a_dialog(
     ] {
         let sandbox = Sandbox::new()?;
         sandbox.write("config.json", original)?;
-        let output = run_cli(&sandbox, &[], &["onboard", "--if-needed"], "")?;
-        assert_eq!(output.code, Some(1), "{original}: {}", output.stdout);
-        assert!(output.stdout.starts_with("Fehler: "), "{}", output.stdout);
+        let dark = run_cli_allowing_the_screen(&sandbox, &[], &["onboard", "--if-needed"], "")?;
+        assert_eq!(dark.code, Some(1), "{original}: {}", dark.stdout);
+        assert!(dark.stdout.starts_with("Fehler: "), "{}", dark.stdout);
+        assert_eq!(dark.calls, "launchctl managername\n", "{original}");
+        let aqua = sandbox.screen_program("launchctl-aqua");
+        let aqua = aqua.to_string_lossy().into_owned();
+        let graphical = run_cli_allowing_the_screen(
+            &sandbox,
+            &[("AVERY_LAUNCHCTL", aqua.as_str())],
+            &["onboard", "--if-needed"],
+            "",
+        )?;
+        assert_eq!(graphical.code, Some(1), "{original}: {}", graphical.stdout);
+        assert!(
+            graphical.stdout.starts_with("Fehler: "),
+            "{}",
+            graphical.stdout
+        );
+        let calls: Vec<&str> = graphical.calls.lines().collect();
+        assert_eq!(calls.len(), 2, "{original}: {}", graphical.calls);
+        assert_eq!(calls[0], "launchctl managername");
+        assert!(
+            calls[1].starts_with("osascript {\"op\": \"notify\""),
+            "{}",
+            calls[1]
+        );
+        assert!(calls[1].contains("nicht lesbar"), "{}", calls[1]);
         assert_eq!(sandbox.read("config.json"), original);
         assert!(!sandbox.path("onboard.dismissed").exists());
     }

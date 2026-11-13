@@ -972,8 +972,15 @@ STUB
   mkdir -p "$broken_home/.avery/mail"
   printf '{"version": 2}\n' > "$broken_home/.avery/mail/config.json"
   avery HOME="$broken_home" AVERY_NO_ONBOARD= mail onboard --if-needed
-  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && [ "$(cat "$broken_home/.avery/mail/config.json")" = '{"version": 2}' ] && [ -z "$(screen_calls)" ]
-  check "O19 onboard --if-needed meldet eine unlesbare Konfiguration, statt Dialoge zu zeigen, und aendert sie nicht" $? "rc=$RC $OUT"
+  made="$(screen_calls)"
+  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && [ "$(cat "$broken_home/.avery/mail/config.json")" = '{"version": 2}' ] && [ "$made" = "launchctl managername" ]
+  check "O19 onboard --if-needed meldet eine unlesbare Konfiguration, statt Dialoge zu zeigen, und aendert sie nicht (ohne grafische Sitzung nur die Sitzungsabfrage)" $? "rc=$RC $OUT calls=$made"
+  avery HOME="$broken_home" AVERY_NO_ONBOARD= "AVERY_LAUNCHCTL=$SCREEN_DIR/launchctl-aqua" mail onboard --if-needed
+  made="$(screen_calls)"
+  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && [ "$(cat "$broken_home/.avery/mail/config.json")" = '{"version": 2}' ] \
+    && [ "$(printf '%s\n' "$made" | wc -l | tr -d ' ')" = 2 ] && [ "$(printf '%s\n' "$made" | head -n 1)" = "launchctl managername" ] \
+    && begins "$(printf '%s\n' "$made" | sed -n 2p)" 'osascript {"op": "notify"' && has "$made" "nicht lesbar" && lacks "$made" '"op": "ask_'
+  check "O19b onboard --if-needed meldet eine unlesbare Konfiguration in einer grafischen Sitzung mit einer Benachrichtigung statt eines Dialogs" $? "rc=$RC $OUT calls=$made"
   avery mail help
   has "$OUT" "avery mail onboard [--if-needed]" && has "$OUT" "onboard and revoke refuse in demo mode"
   check "O20 die Hilfe des Mail-Programms nennt onboard" $? "$OUT"
@@ -992,17 +999,17 @@ STUB
     skip "O22 Avery.app startet 'avery up', den Weg mit der Einrichtung (O1, O2)" "osacompile fehlt"
   fi
   has "$(cat "$ROOT/Casks/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Casks/avery.rb")" "AVERY_NO_ONBOARD=1" \
-    && has "$(cat "$ROOT/Casks/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Casks/avery.rb")" "If no dialog appears" \
+    && has "$(cat "$ROOT/Casks/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Casks/avery.rb")" "no dialog and no notification appears" \
     && lacks "$(cat "$ROOT/Casks/avery.rb")" "System Events" && has "$(cat "$ROOT/Casks/avery.rb")" "Nicht mehr fragen"
   check "O23 Cask: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$ROOT/Formula/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Formula/avery.rb")" "AVERY_NO_ONBOARD=1" \
-    && has "$(cat "$ROOT/Formula/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Formula/avery.rb")" "If no dialog appears" \
+    && has "$(cat "$ROOT/Formula/avery.rb")" "macOS may ask for a permission" && has "$(cat "$ROOT/Formula/avery.rb")" "no dialog and no notification appears" \
     && lacks "$(cat "$ROOT/Formula/avery.rb")" "System Events"
   check "O24 Formel: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$SHARE/avery.env")" "AVERY_NO_ONBOARD"
   check "O25 die Vorlage avery.env nennt AVERY_NO_ONBOARD" $?
   has "$(cat "$ROOT/README.md")" "avery mail onboard --if-needed" && has "$(cat "$ROOT/README.md")" "onboard.dismissed" \
-    && has "$(cat "$ROOT/README.md")" "macOS may still ask for a permission" && has "$(cat "$ROOT/README.md")" "If no dialog appears" \
+    && has "$(cat "$ROOT/README.md")" "macOS may still ask for a permission" && has "$(cat "$ROOT/README.md")" "no dialog and no notification appears" \
     && lacks "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
   check "O26 README: die Dialoge, der Schalter, die Markierung und die moegliche Berechtigung sind beschrieben, ohne System Events" $?
 
@@ -1014,9 +1021,10 @@ STUB
   calls="$(open_calls)"
   made="$(screen_calls)"
   [ "$RC" = 0 ] && begins "$calls" "-n -a $FAKE_APP" && has "$ERR" "Hinweis: Die Einrichtung in Dialogen ist nicht abgeschlossen" \
-    && [ "$(printf '%s\n' "$made" | head -n 1)" = "launchctl managername" ] \
-    && begins "$(printf '%s\n' "$made" | sed -n 2p)" 'osascript {"op": "ask_buttons"' && has "$made" "Willkommen bei Avery"
-  check "O27 app in einer grafischen Sitzung: das Mail-Programm fragt den Stand-in (osascript scheitert), Goose startet trotzdem" $? "rc=$RC open=$calls calls=$made stderr=$ERR"
+    && [ "$(printf '%s\n' "$made" | wc -l | tr -d ' ')" = 3 ] && [ "$(printf '%s\n' "$made" | head -n 1)" = "launchctl managername" ] \
+    && begins "$(printf '%s\n' "$made" | sed -n 2p)" 'osascript {"op": "ask_buttons"' && has "$(printf '%s\n' "$made" | sed -n 2p)" "Willkommen bei Avery" \
+    && begins "$(printf '%s\n' "$made" | sed -n 3p)" 'osascript {"op": "notify"' && has "$(printf '%s\n' "$made" | sed -n 3p)" "Dialog ist fehlgeschlagen"
+  check "O27 app in einer grafischen Sitzung: das Mail-Programm fragt den Stand-in (osascript scheitert) und meldet es per Benachrichtigung, Goose startet trotzdem" $? "rc=$RC open=$calls calls=$made stderr=$ERR"
 }
 
 # ------------------------------------------------------------------ W: the watcher stops the model after Goose was closed
