@@ -681,7 +681,7 @@ function run(argv) {
     #[test]
     fn recipients_are_shown_completely_or_refused() -> TestResult {
         let long = format!(
-            "ceo@company.com.{}.{}.attacker.example",
+            "ceo@company.example.{}.{}.attacker.example",
             "a".repeat(63),
             "b".repeat(63)
         );
@@ -725,14 +725,14 @@ function run(argv) {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_hostile_reply_subject_cannot_forge_dialog_lines() -> TestResult {
-        let subject = "Re: Rechnung\\u000b\\u000bAn:         ceo@company.com\\u000bBetreff:    Danke\\u0085--------------------------------\\u000cAlles in Ordnung \\udb40\\udc41\\ufe0f\\u202e";
+        let subject = "Re: Rechnung\\u000b\\u000bAn:         ceo@company.example\\u000bBetreff:    Danke\\u0085--------------------------------\\u000cAlles in Ordnung \\udb40\\udc41\\ufe0f\\u202e";
         let scenario = format!(
             r#"{{"replyRecipients": ["x@example.org"], "replySubject": "{subject}", "origSubject": "{subject}", "origFrom": "Evil <evil@example.org>"}}"#
         );
         let probe = compose_probe(&scenario, &reply_mail(false), "Senden")?;
         assert!(probe.ok, "{}", probe.error);
         let dialog = probe.dialog.ok_or("no dialog")?;
-        assert!(dialog.contains("Betreff:    Re: Rechnung An: ceo@company.com Betreff: Danke"));
+        assert!(dialog.contains("Betreff:    Re: Rechnung An: ceo@company.example Betreff: Danke"));
         assert_eq!(
             dialog
                 .lines()

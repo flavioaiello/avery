@@ -522,8 +522,8 @@ run_J() {
 scan_files() {
   local dir="$1"
   shift
-  find "$dir" \( -name .git -o -name __pycache__ -o -path "$dir/avery-mail/target" -o -path "$dir/dist" \) -prune \
-    -o -type f ! -path "$SELF" ! -path "$dir/tests/test_mail.py" ! -path "$dir/libexec/avery-mail" "$@"
+  find "$dir" \( -name .git -o -path "$dir/avery-mail/target" -o -path "$dir/dist" \) -prune \
+    -o -type f ! -path "$SELF" "$@"
 }
 
 # l1_scan DIR: one line per finding ("path: pattern" or "path: address"); a failing tool counts as a finding.
