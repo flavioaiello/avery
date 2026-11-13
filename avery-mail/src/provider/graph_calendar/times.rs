@@ -1,10 +1,9 @@
 use crate::civil::{Date, DateTime};
 use crate::json::Json;
 
-const MAX_ZONE: usize = 64;
 const MAX_STAMP: usize = 40;
 const SAME_DAY_UNTIL: i64 = 10 * 60;
-const UTC_NAMES: [&str; 2] = ["UTC", "Etc/UTC"];
+pub(super) const UTC: &str = "UTC";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Stamp {
@@ -42,22 +41,8 @@ impl Stamp {
     }
 }
 
-pub(super) fn zone_ok(zone: &str) -> bool {
-    !zone.is_empty()
-        && zone.len() <= MAX_ZONE
-        && !zone.starts_with('/')
-        && !zone.contains("..")
-        && zone
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_+-/".contains(c))
-}
-
 fn is_utc(name: &str) -> bool {
-    UTC_NAMES.iter().any(|utc| utc.eq_ignore_ascii_case(name))
-}
-
-fn same_zone(label: &str, zone: &str) -> bool {
-    label.eq_ignore_ascii_case(zone) || (is_utc(label) && is_utc(zone))
+    name.eq_ignore_ascii_case(UTC)
 }
 
 fn clock_tail(tail: &str) -> bool {
@@ -95,7 +80,7 @@ pub(super) fn stamp(value: Option<&Json>, zone: &str) -> Option<Stamp> {
     let label = object.get("timeZone")?.as_str()?;
     Some(Stamp {
         at,
-        in_zone: same_zone(label, zone),
+        in_zone: label.eq_ignore_ascii_case(zone),
         in_utc: is_utc(label),
     })
 }
@@ -113,6 +98,8 @@ mod tests {
     use super::*;
     use crate::testutil::{j, TestResult};
 
+    const MAC: &str = "W. Europe Standard Time";
+
     fn stamp_of(
         date_time: &str,
         label: &str,
@@ -126,34 +113,6 @@ mod tests {
 
     fn date(text: &str) -> Result<Date, Box<dyn std::error::Error>> {
         Ok(Date::parse(text).ok_or("date")?)
-    }
-
-    #[test]
-    fn zones_are_checked_before_they_reach_a_header_or_a_body() {
-        for good in [
-            "Europe/Zurich",
-            "America/Argentina/Buenos_Aires",
-            "UTC",
-            "Etc/GMT+1",
-            "America/Port-au-Prince",
-        ] {
-            assert!(zone_ok(good), "{good}");
-        }
-        let long = "a".repeat(MAX_ZONE + 1);
-        for bad in [
-            "",
-            "/etc/passwd",
-            "../x",
-            "Europe/Zu rich",
-            "Europe/Zurich\"",
-            "Europe/Zurich\r\nX: y",
-            "Europe/Z\u{fc}rich",
-            "a,b",
-            "a;b",
-            long.as_str(),
-        ] {
-            assert!(!zone_ok(bad), "{bad:?}");
-        }
     }
 
     #[test]
@@ -198,25 +157,31 @@ mod tests {
 
     #[test]
     fn stamps_carry_the_label_they_arrived_with() -> TestResult {
-        let zone = "Europe/Zurich";
-        let in_zone = stamp_of("2026-11-20T09:00:00.0000000", "Europe/Zurich", zone)?;
+        let zone = MAC;
+        let in_zone = stamp_of("2026-11-20T09:00:00.0000000", MAC, zone)?;
         assert_eq!(
             in_zone.timed().map(|t| t.to_string()),
             Some("2026-11-20 09:00".into())
         );
-        let lower = stamp_of("2026-11-20T09:00:00", "europe/zurich", zone)?;
+        let lower = stamp_of("2026-11-20T09:00:00", "w. europe standard time", zone)?;
         assert!(lower.timed().is_some());
         let utc = stamp_of("2026-11-20T09:00:00", "UTC", zone)?;
         assert_eq!(utc.timed(), None);
         assert_eq!(utc.utc_day(), Some(date("2026-11-20")?));
-        let other = stamp_of("2026-11-20T09:00:00", "W. Europe Standard Time", zone)?;
-        assert_eq!(other.timed(), None);
-        assert_eq!(other.utc_day(), None);
-        let on_a_utc_mac = stamp_of("2026-11-20T09:00:00", "UTC", "Etc/UTC")?;
+        for other in ["Pacific Standard Time", "Central Europe Standard Time"] {
+            let other = stamp_of("2026-11-20T09:00:00", other, zone)?;
+            assert_eq!(other.timed(), None);
+            assert_eq!(other.utc_day(), None);
+        }
+        let iana = stamp_of("2026-11-20T09:00:00", "Europe/Zurich", zone)?;
+        assert_eq!(iana.timed(), None);
+        assert_eq!(iana.utc_day(), None);
+        let on_a_utc_mac = stamp_of("2026-11-20T09:00:00", "UTC", "UTC")?;
         assert!(on_a_utc_mac.timed().is_some());
         assert!(on_a_utc_mac.utc_day().is_some());
-        let same = stamp_of("2026-11-20T09:00:00", "Etc/UTC", "UTC")?;
-        assert!(same.timed().is_some());
+        let not_utc = stamp_of("2026-11-20T09:00:00", "Etc/UTC", "UTC")?;
+        assert_eq!(not_utc.timed(), None);
+        assert_eq!(not_utc.utc_day(), None);
         for broken in [
             r#"{"dateTime": "2026-11-20T09:00:00"}"#,
             r#"{"timeZone": "UTC"}"#,
@@ -237,12 +202,12 @@ mod tests {
     #[test]
     fn midnight_stamps_are_dates_whatever_their_label() -> TestResult {
         for label in [
-            "Europe/Zurich",
+            "W. Europe Standard Time",
             "UTC",
             "Pacific Standard Time",
             "Mars/Olympus",
         ] {
-            let stamp = stamp_of("2026-11-20T00:00:00.0000000", label, "Europe/Zurich")?;
+            let stamp = stamp_of("2026-11-20T00:00:00.0000000", label, MAC)?;
             assert_eq!(stamp.day(), Some(date("2026-11-20")?), "{label}");
         }
         Ok(())
@@ -255,7 +220,7 @@ mod tests {
             "2026-11-19T16:00:00",
             "2026-11-20T13:00:00",
         ] {
-            let stamp = stamp_of(text, "Europe/Zurich", "Europe/Zurich")?;
+            let stamp = stamp_of(text, MAC, MAC)?;
             assert_eq!(stamp.day(), None, "{text}");
             assert_eq!(stamp.utc_day(), None, "{text}");
         }
@@ -267,7 +232,7 @@ mod tests {
     ) -> Result<Stamp, Box<dyn std::error::Error>> {
         let midnight = DateTime::midnight(date("2026-11-20")?);
         let utc = midnight.add_minutes(-offset_minutes).ok_or("utc")?;
-        stamp_of(&local_stamp(utc), "UTC", "Europe/Zurich")
+        stamp_of(&local_stamp(utc), "UTC", MAC)
     }
 
     #[test]
@@ -332,11 +297,11 @@ mod tests {
 
     #[test]
     fn the_boundary_hour_belongs_to_the_same_day() -> TestResult {
-        let same = stamp_of("2026-11-20T10:00:00", "UTC", "Europe/Zurich")?;
+        let same = stamp_of("2026-11-20T10:00:00", "UTC", MAC)?;
         assert_eq!(same.utc_day(), Some(date("2026-11-20")?));
-        let next = stamp_of("2026-11-20T10:01:00", "UTC", "Europe/Zurich")?;
+        let next = stamp_of("2026-11-20T10:01:00", "UTC", MAC)?;
         assert_eq!(next.utc_day(), Some(date("2026-11-21")?));
-        let last = stamp_of("9999-12-31T23:00:00", "UTC", "Europe/Zurich")?;
+        let last = stamp_of("9999-12-31T23:00:00", "UTC", MAC)?;
         assert_eq!(last.utc_day(), None);
         Ok(())
     }

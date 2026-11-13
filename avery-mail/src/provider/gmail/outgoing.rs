@@ -74,7 +74,8 @@ fn encoded_words(subject: &str) -> Vec<String> {
 }
 
 fn subject_header(subject: &str) -> String {
-    let tokens: Vec<String> = if subject.chars().all(|c| (' '..='~').contains(&c)) {
+    let literal = !subject.contains("=?") && subject.chars().all(|c| (' '..='~').contains(&c));
+    let tokens: Vec<String> = if literal {
         subject.split_whitespace().map(str::to_string).collect()
     } else {
         encoded_words(subject)
@@ -180,6 +181,23 @@ mod tests {
     fn decoded_body(body: &str) -> Option<String> {
         let bytes = base64::decode(body)?;
         String::from_utf8(bytes).ok()
+    }
+
+    fn subject_value(raw: &str) -> Option<String> {
+        let (headers, _) = split(raw)?;
+        headers
+            .iter()
+            .find_map(|header| header.strip_prefix("Subject: "))
+            .map(str::to_string)
+    }
+
+    fn decoded_words(value: &str) -> Option<String> {
+        let mut out = String::new();
+        for token in value.split_whitespace() {
+            let inner = token.strip_prefix("=?UTF-8?B?")?.strip_suffix("?=")?;
+            out.push_str(&String::from_utf8(base64::decode(inner)?).ok()?);
+        }
+        Some(out)
     }
 
     #[test]
@@ -317,6 +335,50 @@ mod tests {
                 assert!(word.starts_with("=?UTF-8?B?") && word.ends_with("?="), "{word}");
                 assert!(word.len() <= 75, "{word}");
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_subject_with_the_encoded_word_marker_is_sent_as_encoded_text_of_itself() -> TestResult {
+        let to = list(&["a@example.org"]);
+        let word = format!(
+            "=?UTF-8?B?{}?=",
+            base64::encode("Plan \u{202e}fdp.exe\u{200b}".as_bytes())
+        );
+        let subjects = [
+            word.clone(),
+            format!("Re: {word}"),
+            format!("Re: {word} {word} {word} {word}"),
+            "=?utf-8?q?Gr=C3=BC=C3=9Fe?=".to_string(),
+            "=?".to_string(),
+            "x=?".to_string(),
+            "a =? b".to_string(),
+            "Gr\u{fc}\u{df}e =?".to_string(),
+        ];
+        for subject in subjects {
+            let raw = mail(&to, &subject, "y").raw().ok_or("raw")?;
+            for line in raw.split("\r\n") {
+                assert!(line.len() <= LINE, "{line}");
+            }
+            let value = subject_value(&raw).ok_or("subject")?;
+            assert!(value.is_ascii(), "{subject}");
+            assert!(!value.contains("=?UTF-8?B?UGxhbi"), "{subject}");
+            assert_eq!(decoded_words(&value).as_deref(), Some(subject.as_str()));
+            assert_eq!(header::text(&value, 1000), subject);
+            for token in value.split_whitespace() {
+                assert!(token.len() <= 75, "{token}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ascii_subjects_without_the_marker_stay_plain_text() -> TestResult {
+        let to = list(&["a@example.org"]);
+        for subject in ["Re: Plan", "?=", "a ?= b", "= ?", "Was? =)", "100% = 1"] {
+            let raw = mail(&to, subject, "y").raw().ok_or("raw")?;
+            assert_eq!(subject_value(&raw).as_deref(), Some(subject));
         }
         Ok(())
     }

@@ -2,6 +2,7 @@ mod html;
 #[cfg(test)]
 mod tests;
 mod times;
+mod zones;
 
 use std::collections::HashMap;
 
@@ -30,6 +31,7 @@ const MAX_CALENDARS: usize = 100;
 const MAX_PEOPLE: usize = 50;
 const MAX_ID: usize = 512;
 const MAX_NAME: usize = 100;
+const MAX_ZONE: usize = 64;
 const MAX_PERSON: usize = 200;
 const MAX_SUMMARY_READ: usize = 2 * MAX_KEPT_SUMMARY;
 const MAX_LOCATION_READ: usize = 2 * MAX_KEPT_LOCATION;
@@ -150,10 +152,10 @@ fn zone_refused() -> ToolError {
     ))
 }
 
-fn bad_zone() -> ToolError {
-    ToolError::msg(concat!(
-        "The time zone of this Mac cannot be used for Outlook.com calendars. ",
-        "Ask the user to check the time zone in System Settings."
+fn bad_zone(zone: &str) -> ToolError {
+    ToolError::msg(format!(
+        "The time zone of this Mac ({}) is not known for Outlook.com calendars, so NOTHING was read or changed. Ask the user to choose another time zone in System Settings.",
+        one_line_str(zone, MAX_ZONE)
     ))
 }
 
@@ -205,12 +207,8 @@ fn id_ok(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_ID
 }
 
-fn checked_zone(zone: &str) -> ToolResult<&str> {
-    if times::zone_ok(zone) {
-        Ok(zone)
-    } else {
-        Err(bad_zone())
-    }
+fn checked_zone(zone: &str) -> ToolResult<&'static str> {
+    zones::windows_name(zone).ok_or_else(|| bad_zone(zone))
 }
 
 fn checked_calendar(calendar: &str) -> ToolResult<&str> {
@@ -443,10 +441,10 @@ fn utc_days(
             .and_then(Json::as_str)
             .filter(|id| id_ok(id))
             .ok_or_else(unreadable)?;
-        let first = times::stamp(object.get("start"), "UTC")
+        let first = times::stamp(object.get("start"), times::UTC)
             .and_then(times::Stamp::utc_day)
             .ok_or_else(zone_refused)?;
-        let last = times::stamp(object.get("end"), "UTC")
+        let last = times::stamp(object.get("end"), times::UTC)
             .and_then(times::Stamp::utc_day)
             .ok_or_else(zone_refused)?;
         if found.len() >= MAX_EVENTS {
@@ -483,7 +481,7 @@ pub(crate) fn events(
         Ok(())
     })?;
     if rows.iter().any(|row| row.pending) {
-        let shifted = with_prefer(api, &prefer("UTC", false));
+        let shifted = with_prefer(api, &prefer(times::UTC, false));
         let days = utc_days(&shifted, calendar, window)?;
         for row in rows.iter_mut().filter(|row| row.pending) {
             let (first, last) = days.get(&row.event.uid).ok_or_else(changed_while_reading)?;
@@ -589,12 +587,12 @@ fn people_of(object: &Object) -> Vec<Attendee> {
 }
 
 fn shifted_days(api: &Api, uid: &str) -> ToolResult<(Date, Date)> {
-    let utc = with_prefer(api, &prefer("UTC", false));
+    let utc = with_prefer(api, &prefer(times::UTC, false));
     let url = format!("{}?$select={SHIFT_FIELDS}", event_url(uid));
     let reply = utc.get_optional(&url)?.ok_or_else(not_found)?;
     let object = reply.as_object().ok_or_else(unexpected)?;
     let day = |key: &str| {
-        times::stamp(object.get(key), "UTC")
+        times::stamp(object.get(key), times::UTC)
             .and_then(times::Stamp::utc_day)
             .ok_or_else(zone_refused)
     };
