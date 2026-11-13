@@ -169,12 +169,12 @@ install_file() {
 
 usage() {
   cat <<EOF
-avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Apple-Mail- und Kalender-Anbindung)
+avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Mail- und Kalender-Anbindung)
 
 Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
-  avery mail <befehl>    Mail- und Kalender-Anbindung verwalten: setup, accounts, calendars, selftest,
-                         selftest-write, sendlog, changes, undo, revoke, status, help
+  avery mail <befehl>    Mail- und Kalender-Anbindung verwalten: setup, link, unlink, accounts, calendars,
+                         selftest, selftest-write, sendlog, changes, undo, revoke, status, help
   avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen;
                          das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist
   avery down             Modell sofort beenden (gibt den Arbeitsspeicher frei)

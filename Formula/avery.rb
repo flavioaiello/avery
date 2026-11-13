@@ -1,5 +1,5 @@
 class Avery < Formula
-  desc "Private AI agent for macOS: Goose, a local model and an Apple Mail and Calendar bridge"
+  desc "Private AI agent for macOS: Goose, a local model and a mail and calendar bridge"
   homepage "https://github.com/flavioaiello/avery"
   url "git@github.com:flavioaiello/avery.git",
       using:    :git,

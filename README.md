@@ -3,10 +3,13 @@
 # avery
 
 A private AI agent for macOS: [Goose](https://github.com/block/goose) Desktop, a local model served by
-[Splash](https://github.com/incoai/splash), and a small Apple Mail and Calendar bridge that reads your private mail and
+[Splash](https://github.com/incoai/splash), and a small mail and calendar bridge that reads your private mail and
 calendar, writes drafts, sends mail and changes calendar events, but only after you click in a native macOS dialog.
+The bridge drives Apple Mail and Calendar, or talks to Gmail, Google Calendar and Outlook.com directly (optional).
 
-Everything runs on your Mac. Credentials stay in macOS: Avery drives Mail.app and Calendar.app and never sees passwords or tokens.
+Everything runs on your Mac. With Apple Mail and Calendar, credentials stay in macOS and Avery never sees passwords or
+tokens. Direct Gmail and Outlook.com accounts are different: Avery keeps an OAuth token for them in your Keychain
+(see [Gmail and Outlook.com directly](#gmail-and-outlookcom-directly-optional)).
 
 > Status: early (v0.4.0). After installing, run `avery mail selftest` and `avery mail selftest-write`.
 > They check the Mail integration on your machine, which the automated tests cannot do.
@@ -17,7 +20,7 @@ Everything runs on your Mac. Credentials stay in macOS: Avery drives Mail.app an
 |---|---|
 | `Avery.app` | The icon in Spotlight and the Dock: starts the model, waits until it is ready and opens Goose with the Avery profile |
 | `avery` | Command line: creates the Goose profile, starts the model and Goose, checks the setup |
-| `avery-mail` | MCP server for Goose (stdio, Rust, no dependencies) that drives Mail.app and Calendar.app through `osascript` |
+| `avery-mail` | MCP server for Goose (stdio, Rust, no dependencies) that drives Mail.app and Calendar.app through `osascript`, or Gmail, Google Calendar and Outlook.com through their APIs (via `/usr/bin/curl`) |
 | Goose profile | Config, permissions and a local provider for Splash, created by `avery init` in `~/.avery/goose`; your default Goose profile is not touched |
 
 ## Requirements
@@ -69,6 +72,51 @@ mv ~/.avery/mail/config.json ~/.avery/mail/config.v2.json.bak
 avery mail setup
 avery init --force        # new profile files: the calendar tools ask before they run (the old ones are kept as backup)
 ```
+
+## Gmail and Outlook.com directly (optional)
+
+Besides Apple Mail and Calendar, Avery can talk to **Gmail and Google Calendar** or to **Outlook.com** (personal
+Microsoft accounts, also Hotmail and Live) directly, without Mail.app and Calendar.app. Both ways work side by side:
+every account and calendar has its own level, and the model sees the same tools (`list_messages`, `send_message`,
+`list_events`, ...). Use it for accounts that are not in Mail.app, or that you do not want Mail.app to hold.
+
+**What changes for trust.** With Apple Mail, macOS holds your credentials. A direct account needs a sign-in that Avery
+keeps itself: a refresh token per account in the macOS Keychain (service `avery-mail`, written and read through
+`/usr/bin/security`, never in a file, never on a command line; requests go through `/usr/bin/curl` with the secrets on
+standard input). Whoever can run commands as you can read that token, so keep Goose's shell and file extensions off
+(the profile does). Levels, approval dialogs, limits, logs and undo work as for Apple accounts: the server builds the
+message or the event change itself, the dialog shows exactly that, and only a click sends or applies it. Tokens are
+requested with the least rights: read level only asks for read scopes, write level adds `gmail.compose` and
+`calendar.events` (Google) or `Mail.ReadWrite`, `Mail.Send` and `Calendars.ReadWrite` (Microsoft).
+
+**You register your own app.** Avery cannot ship one that Google or Microsoft trust for you, and it would not be yours.
+Registering takes a few minutes and is free:
+
+- Google: in the Google Cloud Console create a project, enable the *Gmail API* and the *Google Calendar API*, set up the
+  OAuth consent screen (user type *External*, add yourself as a test user; publish the app, because in the *Testing*
+  status Google lets refresh tokens expire after 7 days; unverified is fine for your own use) and create an *OAuth client
+  ID* of type *Desktop app*. `avery mail link google` asks for its client ID and secret.
+- Microsoft: in the Microsoft Entra admin center create an *App registration* with the account type *Personal Microsoft
+  accounts only*, add the platform *Mobile and desktop applications* with the redirect URI `http://localhost`, and give
+  it the delegated permissions `Mail.Read`, `Calendars.Read`, `User.Read`, `offline_access` (for the write level also
+  `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`). No secret is needed. `avery mail link microsoft` asks for the
+  application (client) ID. Work or school accounts cannot sign in this way, on purpose.
+
+```sh
+avery mail link google          # or: microsoft. Asks for the client ID, the level, opens the browser, stores the token
+avery mail setup calendar       # choose the level per calendar of the linked accounts
+avery mail selftest             # read access; selftest-write tests the dialogs, a draft and a test event
+avery mail unlink alice@gmail.com   # remove the grants and the stored token (then remove the app in your account settings)
+```
+
+`link` grants the account's mail at the chosen level; calendars are chosen in `setup`. `setup` offers Apple and direct
+accounts and calendars together; level 0 only takes the grant away, the link stays (`unlink` ends it). `revoke` removes
+all grants and keeps the links.
+
+Differences you will notice: the provider expands recurring events itself and Avery times are read and written in this
+Mac's time zone; message ids are longer texts (copy them exactly); replies take their recipients and subject from the
+original and carry no quoted text; Gmail search covers subject and sender like the other accounts. A direct account
+needs the internet; Apple accounts also work offline.
 
 ## Daily use
 
@@ -126,7 +174,10 @@ doing something.
   selectors, fillers) are stripped from mail and event text the model reads and from text it writes, so what the dialog
   shows is what is stored or sent.
 - **No other destructive tools.** There is no code that deletes, moves or flags mail.
-- **Replies** use Mail's reply: Mail picks the recipients and the subject.
+- **Replies** use the account's reply: the recipients and the subject are taken from the original message.
+- **Direct accounts** (Gmail, Outlook.com) use the same dialog, built from the exact message the server is about to
+  send. A request that fails after the click is reported as an unknown outcome and counts as sent; the server never
+  repeats a send or a change on its own.
 
 The dialog is the hard gate. Instructions to the model (`top-of-mind.md`) are only a second line of defence.
 The profile disables Goose's shell and file extensions; do not enable them for this profile.
@@ -137,6 +188,7 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 |---|---|
 | `avery init [--force]` | Create the profile (existing files are kept; `--force` replaces them and keeps a backup) |
 | `avery mail setup [mail\|calendar]` / `revoke` | Choose the level (off, read, write) per Mail account and calendar / remove all of them |
+| `avery mail link google\|microsoft` / `unlink <address>` | Connect Gmail or Outlook.com directly (OAuth in the browser, token in the Keychain) / disconnect it and delete the token |
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialogs, drafts, sending and a test event |
 | `avery mail status` / `accounts` / `calendars` | Show configuration and levels, Mail accounts, calendars |
 | `avery mail sendlog` / `changes` / `undo [id]` | Recent send attempts / recent calendar changes / undo a calendar change |
@@ -161,7 +213,8 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 | Path | Content |
 |---|---|
 | `~/.avery/goose` | Goose profile (`config/`, `top-of-mind.md`, sessions) |
-| `~/.avery/mail/config.json` | Levels per account and calendar, hourly limits (format version 3, created by `avery mail setup`) |
+| `~/.avery/mail/config.json` | Levels per account and calendar, hourly limits, linked direct accounts (format version 3, created by `avery mail setup` and `link`) |
+| Keychain item `avery-mail` | One OAuth token per linked Gmail or Outlook.com account (never in a file) |
 | `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
 | `~/.avery/mail/changes.jsonl` | Log of calendar changes with the event before and after (format version 1; used by `avery mail undo`) |
 
@@ -177,6 +230,11 @@ Set `AVERY_HOME` to use another base folder.
   Reading a calendar scans all of its events (up to 20000), so very large calendars are slow.
 - `avery mail selftest` and `selftest-write` are the first run against the real Calendar.app on your Mac; the automated
   tests use demo data and a mock of the scripting interface.
+- Gmail, Google Calendar and Outlook.com were built against the public API documentation and tested with mocks only, not
+  against real accounts. Run `avery mail selftest` and `selftest-write` after linking and look at the result.
+- Google lets the unverified app of a personal project expire its refresh token after 7 days while the consent screen is
+  in *Testing*; publish it (still unverified) to avoid signing in again every week.
+- Direct accounts support single events without attendees (as Apple ones do); links on events (`url`) are not supported.
 - The app and the cask are for Apple silicon and macOS 26 or later; the app is not notarized.
 - The model server settings assume Splash and the model named in `avery.env`.
 
