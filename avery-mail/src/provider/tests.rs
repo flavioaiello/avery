@@ -1435,3 +1435,48 @@ fn all_lists_every_provider_once_and_the_labels_differ() {
     assert_eq!(Provider::Google.display(), "Gmail");
     assert_eq!(Provider::Microsoft.display(), "Outlook.com");
 }
+
+#[test]
+fn listed_calendars_keep_the_provider_ids_and_drop_unusable_and_repeated_ones() -> TestResult {
+    let transport = Scripted::new()
+        .json(Method::Post, "/token", 200, TOKEN)
+        .json(
+            Method::Get,
+            "/me/calendars",
+            200,
+            r#"{"value": [
+                {"id": "AQMk-1=", "name": "Calendar", "canEdit": true},
+                {"id": "AQMk-1=", "name": "Calendar again", "canEdit": true},
+                {"id": "AQMk 2", "name": "Spaces are not allowed", "canEdit": true},
+                {"id": "AQMk-3=", "name": "Birthdays", "canEdit": false}]}"#,
+        );
+    let memory = crate::vault::memory::Memory::new().with(
+        "microsoft:bob@outlook.example",
+        &Record {
+            client_id: "client".to_string(),
+            client_secret: None,
+            refresh_token: "refresh".to_string(),
+            scope: MICROSOFT_SCOPES.to_string(),
+        }
+        .to_json(),
+    );
+    let calendars = Calendars::new(
+        Box::new(Untouchable::default()),
+        Box::new(transport),
+        Box::new(memory),
+        Box::new(Never),
+    );
+    let listed = calendars.calendars(Provider::Microsoft, "bob@outlook.example")?;
+    let shown: Vec<(&str, &str, bool)> = listed
+        .iter()
+        .map(|info| (info.id.as_str(), info.name.as_str(), info.writable))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("AQMk-1=", "Calendar", true),
+            ("AQMk-3=", "Birthdays", false)
+        ]
+    );
+    Ok(())
+}

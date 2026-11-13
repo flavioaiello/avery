@@ -644,11 +644,15 @@ impl Calendars {
         address: &str,
         list: impl FnOnce(&Api) -> ToolResult<Vec<CalendarInfo>>,
     ) -> ToolResult<Vec<CalendarInfo>> {
-        let found = self.remote(provider, address, list)?;
-        Ok(found
-            .into_iter()
-            .filter(|info| calendar_id(provider, address, &info.id).is_some())
-            .collect())
+        let mut kept: Vec<CalendarInfo> = Vec::new();
+        for info in self.remote(provider, address, list)? {
+            if calendar_id(provider, address, &info.id).is_some()
+                && !kept.iter().any(|known| known.id == info.id)
+            {
+                kept.push(info);
+            }
+        }
+        Ok(kept)
     }
 
     fn on_calendar<T>(
