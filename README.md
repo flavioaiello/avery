@@ -83,8 +83,8 @@ directly. Every account and calendar has its own level, and the model sees the s
 (`list_messages`, `send_message`, `list_events`, ...).
 
 **Personal accounts only.** `avery mail link google` accepts a Google account only if its address ends in `@gmail.com`
-or `@googlemail.com` (and Google reports it as verified): Gmail means those two domains. Google Workspace accounts and
-Google accounts with a custom domain are refused on purpose, and nothing is stored for them. Outlook.com signs in on
+or `@googlemail.com`: Gmail means those two domains. An address that Google reports as unverified is refused too, and so
+are Google Workspace accounts and Google accounts with a custom domain; nothing is stored for them. Outlook.com signs in on
 Microsoft's *consumers* tenant, so work or school accounts cannot sign in. Avery itself signs in to nothing else: it never
 signs in to IMAP, iCloud or Exchange accounts. Only the optional [Apple bridge](#apple-mail-and-calendar-optional) can
 reach such accounts, through whatever accounts Mail.app has, and Avery never sees their credentials.
@@ -349,7 +349,7 @@ Release: bump `AVERY_VERSION` in `bin/avery` and `version` in `avery-mail/Cargo.
 MIT
 
 The table that maps IANA time zone names to Windows time zone names for the Outlook.com calendar
-(`avery-mail/src/cloud/graph_calendar/zones.rs`) is generated from the Unicode CLDR file
+(`avery-mail/src/provider/graph_calendar/zones.rs`) is generated from the Unicode CLDR file
 `common/supplemental/windowsZones.xml` and the links of the IANA time zone database (public domain). The CLDR data is
 used under the Unicode License v3:
 
