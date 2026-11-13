@@ -208,8 +208,8 @@ pub(crate) fn list_calendars(ctx: &Context, _args: &Object) -> ToolResult<String
                 .as_ref()
                 .map(|list| list.iter().find(|c| c.id == calendar.id))
             {
-                Some(Some(info)) if !info.writable => " (read-only in Calendar)",
-                Some(None) => " (not found in Calendar)",
+                Some(Some(info)) if !info.writable => " (read-only)",
+                Some(None) => " (not found)",
                 _ => "",
             };
             format!("- {} [{level}]{note}", one_line_str(&calendar.label, 80))
@@ -429,7 +429,7 @@ mod tests {
         let text = list_calendars(&demo("FAKE-CAL-PRIVAT"), &args("{}")?)?;
         assert_eq!(
             text,
-            "- Demo Privat [write]\n- Demo Familie [read]\n- Demo Feiertage [read] (read-only in Calendar)"
+            "- Demo Privat [write]\n- Demo Familie [read]\n- Demo Feiertage [read] (read-only)"
         );
         assert!(!text.contains("Firma"));
         let dir = TempDir::new()?;

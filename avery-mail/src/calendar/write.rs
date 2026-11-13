@@ -365,18 +365,18 @@ fn existing(ctx: &Context, calendar: &Calendar, uid: &str) -> ToolResult<EventFi
     let detail = ctx.calendar.event(calendar, uid)?;
     if !detail.event.recurrence.is_empty() {
         return Err(ToolError::msg(
-            "This is a recurring event; only single events can be changed or deleted here. NOTHING was changed. The user has to do it in Calendar.",
+            "This is a recurring event; only single events can be changed or deleted here. NOTHING was changed. The user has to do it in their calendar app.",
         ));
     }
     if detail.event.attendees != Some(0) {
         return Err(ToolError::msg(
-            "This event has attendees; changing or deleting it would notify other people, so NOTHING was changed. The user has to do it in Calendar.",
+            "This event has attendees; changing or deleting it would notify other people, so NOTHING was changed. The user has to do it in their calendar app.",
         ));
     }
     let fields = EventFields::of(&detail);
     if !fields.fits_the_backup() {
         return Err(ToolError::msg(
-            "The title, place, notes or link of this event are too long to be backed up for undo, so NOTHING was changed. The user has to do it in Calendar.",
+            "The title, place, notes or link of this event are too long to be backed up for undo, so NOTHING was changed. The user has to do it in their calendar app.",
         ));
     }
     Ok(fields)

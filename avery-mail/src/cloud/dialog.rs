@@ -370,4 +370,143 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(target_os = "macos")]
+    const MOCK_DIALOG: &str = r#"
+var LOG = {text: null, title: null, button: null, calls: 0};
+var DECISION = 'approve';
+function MOCKAPP() {
+  return {
+    includeStandardAdditions: false,
+    activate: function () {},
+    displayDialog: function (text, opts) {
+      LOG.calls++; LOG.text = text; LOG.title = opts.withTitle; LOG.button = opts.buttons[1];
+      if (DECISION === 'timeout') { return {gaveUp: true, buttonReturned: ''}; }
+      if (DECISION === 'approve') { return {gaveUp: false, buttonReturned: opts.buttons[1]}; }
+      throw new Error('User canceled. (-128)');
+    }
+  };
+}
+function run(argv) {
+  var input = JSON.parse(argv[0]), out;
+  DECISION = input.decision || 'approve';
+  try { out = {ok: true, data: dispatch(input.req)}; }
+  catch (e) { out = {ok: false, error: String((e && e.message) || e)}; }
+  out.log = LOG;
+  return JSON.stringify(out);
+}
+"#;
+
+    #[cfg(target_os = "macos")]
+    fn probe(decision: &str, request: &Json) -> Result<Json, Box<dyn std::error::Error>> {
+        let script = format!(
+            "{}\n{MOCK_DIALOG}",
+            crate::osascript::dialog_script()
+                .replace("Application.currentApplication()", "MOCKAPP()")
+        );
+        let payload = format!(
+            r#"{{"decision": "{decision}", "req": {}}}"#,
+            json::dumps(request, true)
+        );
+        let output = std::process::Command::new(crate::osascript::OSASCRIPT)
+            .args(["-l", "JavaScript", "-e", &script, &payload])
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        Ok(json::parse(String::from_utf8_lossy(&output.stdout).trim())?)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn text_at(value: &Json, path: &[&str]) -> String {
+        let mut current = value;
+        for key in path {
+            match current.as_object().and_then(|object| object.get(key)) {
+                Some(next) => current = next,
+                None => return String::new(),
+            }
+        }
+        current.as_str().unwrap_or_default().to_string()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_send_dialog_script_shows_the_message_and_returns_the_decision() -> TestResult {
+        let request = json::parse(
+            r#"{"op": "approve_send", "from": "Alice <alice@gmail.example>", "to": ["anna@example.org", "bob@example.org"], "cc": [],
+                "subject": "Hallo\u200b Welt", "body": "Zeile 1\nZeile 2", "reply": {"subject": "Re: x", "from": "Anna <anna@example.org>"}, "seconds": 75}"#,
+        )?;
+        for (decision, wanted) in [
+            ("approve", "send"),
+            ("decline", "declined"),
+            ("timeout", "timeout"),
+        ] {
+            let answer = probe(decision, &request)?;
+            assert_eq!(
+                text_at(&answer, &["data", "decision"]),
+                wanted,
+                "{decision}"
+            );
+            let text = text_at(&answer, &["log", "text"]);
+            assert!(
+                text.contains("Von:        Alice <alice@gmail.example>"),
+                "{text}"
+            );
+            assert!(
+                text.contains("An:         anna@example.org, bob@example.org"),
+                "{text}"
+            );
+            assert!(!text.contains("Cc:"), "{text}");
+            assert!(text.contains("Betreff:    Hallo Welt"), "{text}");
+            assert!(
+                text.contains("Antwort auf: Re: x (von Anna <anna@example.org>)"),
+                "{text}"
+            );
+            assert!(text.contains("Zeile 1\nZeile 2"), "{text}");
+            assert_eq!(
+                text_at(&answer, &["log", "title"]),
+                "Goose möchte eine E-Mail senden"
+            );
+            assert_eq!(text_at(&answer, &["log", "button"]), "Senden");
+        }
+        let unknown = probe("approve", &json::parse(r#"{"op": "nope"}"#)?)?;
+        assert_eq!(
+            unknown.as_object().and_then(|o| o.get("ok")),
+            Some(&Json::Bool(false))
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_change_dialog_script_shows_before_and_after_for_every_action() -> TestResult {
+        let fields = |summary: &str, start: &str, end: &str| {
+            format!(
+                r#"{{"summary": "{summary}", "start": "{start}", "end": "{end}", "allDay": false, "location": "Büro", "notes": "", "url": ""}}"#
+            )
+        };
+        let before = fields("Alt", "2030-05-06 09:00", "2030-05-06 10:00");
+        let after = fields("Neu", "2030-05-06 11:00", "2030-05-06 12:00");
+        for (action, undo, before, after, title, button, lines) in [
+            ("create", false, "null", after.as_str(), "Goose möchte einen Termin anlegen", "Anlegen", vec!["Titel:      Neu"]),
+            ("update", false, before.as_str(), after.as_str(), "Goose möchte einen Termin ändern", "Ändern", vec!["Titel:      Alt  →  Neu", "Wann:       2030-05-06 09:00 bis 2030-05-06 10:00  →  2030-05-06 11:00 bis 2030-05-06 12:00"]),
+            ("delete", false, before.as_str(), "null", "Goose möchte einen Termin löschen", "Löschen", vec!["Titel:      Alt"]),
+            ("update", true, before.as_str(), after.as_str(), "Goose: Änderung rückgängig machen", "Ändern", vec!["RÜCKGÄNGIG"]),
+        ] {
+            let request = json::parse(&format!(
+                r#"{{"op": "approve_change", "action": "{action}", "undo": {undo}, "calendarLabel": "Privat", "before": {before}, "after": {after}, "seconds": 60}}"#
+            ))?;
+            let answer = probe("approve", &request)?;
+            assert_eq!(text_at(&answer, &["data", "decision"]), "approved", "{action}");
+            let text = text_at(&answer, &["log", "text"]);
+            assert!(text.contains("Kalender:   Privat"), "{text}");
+            for line in lines {
+                assert!(text.contains(line), "{action}: {text}");
+            }
+            assert_eq!(text_at(&answer, &["log", "title"]), title);
+            assert_eq!(text_at(&answer, &["log", "button"]), button);
+            let declined = probe("decline", &request)?;
+            assert_eq!(text_at(&declined, &["data", "decision"]), "declined");
+        }
+        Ok(())
+    }
 }

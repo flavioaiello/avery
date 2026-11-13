@@ -142,13 +142,13 @@ pub(crate) fn compose_request(
     let length = char_len(&body);
     if mode == Mode::Send && length > MAX_SEND_CHARS {
         return Err(ToolError::msg(format!(
-            "The text has {length} characters but send_message allows {MAX_SEND_CHARS}. Use create_draft so that the user can read and send it in Mail."
+            "The text has {length} characters but send_message allows {MAX_SEND_CHARS}. Use create_draft so that the user can read and send it in their mail app."
         )));
     }
     let lines = body.lines().count();
     if mode == Mode::Send && lines > MAX_SEND_LINES {
         return Err(ToolError::msg(format!(
-            "The text has {lines} lines but send_message allows {MAX_SEND_LINES}. Use create_draft so that the user can read and send it in Mail."
+            "The text has {lines} lines but send_message allows {MAX_SEND_LINES}. Use create_draft so that the user can read and send it in their mail app."
         )));
     }
     if length > MAX_DRAFT_CHARS {
@@ -349,7 +349,7 @@ pub(crate) fn create_draft(ctx: &Context, args: &Object) -> ToolResult<String> {
         " (the window is open; Mail saves it to Drafts when closed)"
     };
     Ok(format!(
-        "Draft opened in Mail{note}. NOTHING was sent. Tell the user to review it and send it in Mail.\n{UNTRUSTED}\n{}",
+        "Draft saved{note}. NOTHING was sent. Tell the user to review it in their mail app and send it there.\n{UNTRUSTED}\n{}",
         summary(&preview)
     ))
 }
