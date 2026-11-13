@@ -572,6 +572,29 @@ mod tests {
     }
 
     #[test]
+    fn a_top_level_link_that_bursts_or_leaves_its_path_is_refused_without_a_request() {
+        for link in [
+            "https://graph.microsoft.com/v1.0/me/mailFolders?$skip=[1-9999]",
+            "https://graph.microsoft.com/v1.0/me/mailFolders?$skip={1,2}",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/../messages",
+            "https://graph.microsoft.com/v1.0/me/%2e%2e/users",
+        ] {
+            let transport = Scripted::new().json(
+                Method::Get,
+                "/mailFolders?",
+                200,
+                &folders(&[folder("A=", "A", 0, 0)], Some(link)),
+            );
+            let result = listing(&api(&transport));
+            assert!(
+                matches!(&result, Err(ToolError::Msg(text)) if text.contains("continuation link")),
+                "{link}: {result:?}"
+            );
+            assert_eq!(transport.seen().len(), 1, "{link}");
+        }
+    }
+
+    #[test]
     fn no_name_means_the_inbox_and_needs_no_request() -> TestResult {
         for wanted in [None, Some(""), Some("   "), Some("\t")] {
             let transport = Scripted::new();
