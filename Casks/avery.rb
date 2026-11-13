@@ -34,7 +34,16 @@ cask "avery" do
     First run:
       avery init
       avery pull          # downloads the model once (about 17 GB); Ctrl+C when it says Ready
-      avery mail link google     # or: microsoft (personal accounts; you register your own OAuth app, see the README)
+
+    Then open Avery. While no account is linked, its first start guides you through the setup in macOS dialogs:
+    Gmail, Outlook.com (personal accounts; you register your own OAuth app once, see the README) and, optionally,
+    Apple Mail and Calendar. If macOS asks whether Avery may control System Events, allow it
+    (System Settings > Privacy & Security > Automation). Cancelling any dialog saves nothing more, and Avery still starts.
+
+    The same from a terminal:
+      avery mail onboard         # shows the dialogs again
+      avery mail link google     # or: microsoft
       avery mail setup           # per account and calendar: off, read or write
+    No dialogs at start: choose "Nicht mehr fragen" in the first one, or set AVERY_NO_ONBOARD=1 (in ~/.avery/avery.env).
   EOS
 end

@@ -39,11 +39,20 @@ class Avery < Formula
       First run:
         avery init
         avery pull     # downloads the model once (about 17 GB); Ctrl+C when it says Ready
-        avery mail link google     # or: microsoft (personal accounts; you register your own OAuth app, see the README)
+
+      Then open "Avery" (Spotlight, the Dock, or: avery up). While no account is linked, the first start guides you
+      through the setup in macOS dialogs: Gmail, Outlook.com (personal accounts; you register your own OAuth app once,
+      see the README) and, optionally, Apple Mail and Calendar. If macOS asks whether Avery may control System Events,
+      allow it (System Settings > Privacy & Security > Automation). Cancelling a dialog saves nothing more; Avery starts anyway.
+
+      The same from a terminal:
+        avery mail onboard         # shows the dialogs again
+        avery mail link google     # or: microsoft
         avery mail setup           # per account and calendar: off, read or write
         avery mail selftest
+      No dialogs at start: choose "Nicht mehr fragen" in the first one, or set AVERY_NO_ONBOARD=1 (in ~/.avery/avery.env).
 
-      Apple Mail and Calendar are optional and off until you run: avery mail setup apple
+      Apple Mail and Calendar are optional and off until you choose them in the dialogs or run: avery mail setup apple
 
       Daily use: open "Avery" with Spotlight or the Dock.
         It starts the model, opens Goose, and stops the model by itself a few minutes after Goose is closed.

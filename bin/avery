@@ -37,7 +37,7 @@ load_env() {
     key="${line%%=*}"
     val="${line#*=}"
     case "$key" in
-      AVERY_MODEL|AVERY_MAX_MEMORY|AVERY_MAX_CONTEXT|AVERY_MAX_CACHE_DISK|AVERY_OFFLINE|AVERY_IDLE_MINUTES|AVERY_GOOSE_APP|AVERY_GOOSE_ROOT)
+      AVERY_MODEL|AVERY_MAX_MEMORY|AVERY_MAX_CONTEXT|AVERY_MAX_CACHE_DISK|AVERY_OFFLINE|AVERY_IDLE_MINUTES|AVERY_GOOSE_APP|AVERY_GOOSE_ROOT|AVERY_NO_ONBOARD)
         if [ -z "$(printenv "$key" 2>/dev/null || true)" ]; then export "$key=$val"; fi ;;
     esac
   done < "$file"
@@ -140,6 +140,21 @@ mail_bin() {
   echo "$ROOT/bin/avery-mail"
 }
 
+# The guided first setup in macOS dialogs ("avery mail onboard --if-needed"): it asks only while no account is linked
+# and nothing was dismissed, and it never blocks the start. AVERY_NO_ONBOARD=1 switches it off.
+first_setup() {
+  local bin
+  if [ "${AVERY_NO_ONBOARD:-}" = "1" ]; then return 0; fi
+  bin="$(mail_bin)"
+  if [ "${AVERY_DRY_RUN:-}" = "1" ]; then
+    run_cmd "$bin" onboard --if-needed
+    return 0
+  fi
+  if [ ! -x "$bin" ]; then return 0; fi
+  "$bin" onboard --if-needed </dev/null || say "Hinweis: Die Einrichtung in Dialogen ist nicht abgeschlossen. Wiederholen: avery mail onboard" >&2
+  return 0
+}
+
 sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 
 render() {
@@ -173,10 +188,12 @@ avery $AVERY_VERSION - privater KI-Agent auf macOS (Goose + lokales Modell + Gma
 
 Befehle:
   avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)
-  avery mail <befehl>    Konten und Kalender verwalten: link, unlink, setup [apple], accounts, calendars,
+  avery mail <befehl>    Konten und Kalender verwalten: onboard, link, unlink, setup [apple], accounts, calendars,
                          selftest, selftest-write, sendlog, changes, undo, revoke, status, help
   avery up               Modell als Hintergrunddienst starten, warten bis es bereit ist, dann Goose oeffnen;
-                         das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist
+                         das Modell stoppt von selbst, wenn Goose einige Minuten geschlossen ist.
+                         Solange noch kein Konto eingerichtet ist, fuehren Dialoge durch die Einrichtung
+                         (avery mail onboard; AVERY_NO_ONBOARD=1 schaltet das aus)
   avery down             Modell sofort beenden (gibt den Arbeitsspeicher frei)
   avery install-app      Avery.app in ~/Applications anlegen (ohne Cask; mit Cask ist die App schon da)
   avery pull             Modell einmalig laden (ca. 17 GB), im Vordergrund; mit Ctrl+C beenden, sobald es 'Ready' meldet
@@ -186,7 +203,8 @@ Befehle:
   avery doctor           Voraussetzungen und Einrichtung pruefen
   avery version          Version anzeigen
 
-Erster Start: avery init, avery pull, avery mail link google|microsoft, avery mail setup, avery mail selftest
+Erster Start: avery init, avery pull, dann Avery oeffnen (avery up): die Konten werden in Dialogen eingerichtet
+              (im Terminal stattdessen: avery mail link google|microsoft, avery mail setup, avery mail selftest)
 Taeglich:     avery up   (und am Ende avery down)
 Einstellungen: $AVERY_HOME/avery.env (siehe README)
 EOF
@@ -215,6 +233,8 @@ cmd_init() {
   command -v splash >/dev/null 2>&1 || say "Hinweis: Splash fehlt. Installieren mit: brew install incoai/tap/splash"
   say ""
   say "Weiter mit:"
+  say "  avery up               (beim ersten Start fuehren Dialoge durch die Einrichtung der Konten; wiederholen: avery mail onboard)"
+  say "  oder im Terminal:"
   say "  avery mail link google (oder: microsoft; privates Gmail- oder Outlook.com-Konto verbinden)"
   say "  avery mail setup       (je Konto und Kalender die Stufe waehlen: aus/lesen/schreiben)"
   say "  avery mail selftest    (Lesezugriff pruefen)"
@@ -255,6 +275,11 @@ cmd_pull() {
 }
 
 cmd_app() {
+  first_setup
+  open_goose
+}
+
+open_goose() {
   if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
     [ -d "$GOOSE_APP" ] || die "Goose Desktop fehlt. Installieren mit: brew install --cask block-goose"
     [ -f "$GOOSE_ROOT/config/config.yaml" ] || die "Profil fehlt. Zuerst: avery init"
@@ -285,6 +310,7 @@ cmd_up() {
   local waited=0 limit="${AVERY_UP_TIMEOUT:-240}" started=0
   if model_healthy; then
     say "Das Modell laeuft bereits."
+    first_setup
   else
     if [ "${AVERY_OFFLINE:-1}" = "1" ] && [ "${AVERY_DRY_RUN:-}" != "1" ] && ! model_cached; then
       die "Das Modell ist noch nicht geladen. Einmalig 'avery pull' ausfuehren (laedt ca. 17 GB, mit Ctrl+C beenden, sobald es 'Ready' meldet)."
@@ -292,6 +318,7 @@ cmd_up() {
     say "Modell wird als Dienst gestartet (brew services) ..."
     run_cmd "$(brew_bin)" services run avery || die "Der Dienst liess sich nicht starten (ist avery per Homebrew installiert?)."
     started=1
+    first_setup
     if [ "${AVERY_DRY_RUN:-}" != "1" ]; then
       say "Warte auf das Modell, das Laden dauert 1-2 Minuten ..."
       while ! model_healthy; do
@@ -307,7 +334,7 @@ cmd_up() {
   # Only a model that "avery up" started is stopped automatically. A model started by hand or with
   # "brew services start avery" (at login) stays under your control.
   if [ "$started" = "1" ]; then start_watcher; fi
-  cmd_app
+  open_goose
 }
 
 # Internal: stops the model service when Goose has been closed for AVERY_IDLE_MINUTES.

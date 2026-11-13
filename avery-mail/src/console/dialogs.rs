@@ -402,7 +402,9 @@ impl<'a> Dialogs<'a> {
         request.insert("seconds", seconds(LIST_SECONDS));
         match self.asked(request, LIST_SECONDS)? {
             Parsed::List(selected)
-                if selected.windows(2).all(|pair| pair[0] < pair[1])
+                if selected
+                    .windows(2)
+                    .all(|pair| matches!(pair, [low, high] if low < high))
                     && selected.iter().all(|index| *index < ask.items.len())
                     && (ask.multiple || selected.len() <= 1) =>
             {

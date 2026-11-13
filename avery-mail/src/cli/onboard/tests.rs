@@ -1506,7 +1506,7 @@ fn a_dialog_that_breaks_in_the_middle_leaves_a_consistent_state() -> TestResult 
 
 #[test]
 fn hostile_answers_never_reach_the_config_the_output_or_the_next_dialog() -> TestResult {
-    let hostile_id = format!("{CLIENT}\u{202e}\u{200b}\u{0}\n\"; touch /tmp/x; echo \"");
+    let hostile_id = format!("{CLIENT}\u{202e}\u{200b}\u{0}\n\"; touch pwned; echo \"");
     let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
     let script = scripted(&[
         welcome(),

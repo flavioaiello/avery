@@ -1,16 +1,17 @@
 #!/bin/bash
 # Tests for everything around the mail server: bin/avery, libexec/avery-make-app, tools/*.sh, formula, cask.
 #
-#   tests/cli.sh [J L N P G W Q M]     all sections, or only the named ones
+#   tests/cli.sh [J L N P G O W Q M]   all sections, or only the named ones
 #
 # The mail server has its own tests: cargo test --manifest-path avery-mail/Cargo.toml
 #
 # Sections: J bin/avery, L hygiene of the repository, N service commands and formula, P the Avery.app builder,
-# G opening Goose with the Avery profile, W the watcher, Q icons, disk image, cask and publish-dmg.sh, M versions
-# agree.
+# G opening Goose with the Avery profile, O the setup dialogs (everything that needs no screen), W the watcher,
+# Q icons, disk image, cask and publish-dmg.sh, M versions agree.
 #
-# No Mail access, no real model, no Goose, no "brew services": whatever would start something runs with
-# AVERY_DRY_RUN=1 or against stand-ins in temporary folders. bin/avery always runs with its own HOME and without
+# No Mail access, no real model, no Goose, no "brew services", no dialog on your screen: whatever would start something
+# runs with AVERY_DRY_RUN=1 or against stand-ins in temporary folders, and the setup dialogs are only run in states in
+# which they stay silent. bin/avery always runs with its own HOME and without
 # the AVERY_* and MAIL_MCP_* variables of your environment.
 # Output: "PASS  <name>" or "FAIL  <name>   <detail>", at the end "N bestanden, M fehlgeschlagen" (exit code 1 if
 # any check failed). A check that needs a tool you do not have (ruby, brew, ...) prints "SKIP  <name>   <reason>".
@@ -44,8 +45,8 @@ export PATH
 SELECTED="$*"
 for section in $SELECTED; do
   case "$section" in
-    J|L|N|P|G|W|Q|M) ;;
-    *) echo "Aufruf: tests/cli.sh [J L N P G W Q M]" >&2; exit 2 ;;
+    J|L|N|P|G|O|W|Q|M) ;;
+    *) echo "Aufruf: tests/cli.sh [J L N P G O W Q M]" >&2; exit 2 ;;
   esac
 done
 
@@ -152,8 +153,10 @@ capture() {
 }
 
 # av_build [NAME=VALUE ...] ARGS...: AV_CMD runs bin/avery in a clean environment (only PATH, HOME, TMPDIR,
-# AVERY_MAIL_BIN and the given variables). HOME=... picks the home (default: a new temporary folder),
-# SCRIPT=... another copy of bin/avery, AVERY_MAIL_BIN= (empty) leaves the variable out. AHOME is the home used.
+# AVERY_MAIL_BIN, AVERY_NO_ONBOARD=1 and the given variables). HOME=... picks the home (default: a new temporary
+# folder), SCRIPT=... another copy of bin/avery, AVERY_MAIL_BIN= (empty) leaves the variable out. AHOME is the home
+# used. AVERY_NO_ONBOARD=1 keeps the setup dialogs off, so that no check can ever open a dialog on your screen:
+# only the checks of section O switch it off (AVERY_NO_ONBOARD=), and they run stand-ins or states without a question.
 av_build() {
   local home="" script="$AVERY" mailbin="$MAIL_BIN" entry
   local -a extra
@@ -170,7 +173,7 @@ av_build() {
   done
   [ -n "$home" ] || home="$(mkd home)"
   AHOME="$home"
-  AV_CMD=(env -i "PATH=$PATH" "HOME=$home" "TMPDIR=$TMPBASE")
+  AV_CMD=(env -i "PATH=$PATH" "HOME=$home" "TMPDIR=$TMPBASE" "AVERY_NO_ONBOARD=1")
   if [ -n "$mailbin" ]; then AV_CMD[${#AV_CMD[@]}]="AVERY_MAIL_BIN=$mailbin"; fi
   for entry in ${extra[@]+"${extra[@]}"}; do AV_CMD[${#AV_CMD[@]}]="$entry"; done
   AV_CMD[${#AV_CMD[@]}]="$script"
@@ -472,7 +475,7 @@ run_J() {
   [ ! -e "$pwned" ] && has "$OUT" '$(touch'
   check "J20 avery.env wird gelesen, nicht ausgefuehrt" $? "$OUT"
 
-  avery AVERY_DRY_RUN=1 app
+  avery AVERY_DRY_RUN=1 AVERY_NO_ONBOARD=1 app
   [ "$(trim "$OUT")" = "open -n -a /Applications/Goose.app --env GOOSE_PATH_ROOT=$AHOME/.avery/goose --env GOOSE_MOIM_MESSAGE_FILE=$AHOME/.avery/goose/top-of-mind.md" ]
   check "J21 app startet Goose mit dem Avery-Profil" $? "$OUT"
   avery AVERY_DRY_RUN=1 "AVERY_GOOSE_APP=/Opt/Mein Goose.app" app
@@ -814,6 +817,162 @@ run_G() {
   check "G3 Goose laeuft nicht: Start mit dem Avery-Profil" $? "stdout=$OUT stderr=$ERR open=$calls"
 }
 
+# ------------------------------------------------------------------ O: the setup dialogs (the parts that need no screen)
+# The dialogs themselves are never shown here: every run below is in a state in which "onboard --if-needed" is silent
+# (something is set up, dismissed, switched off, demo mode) or fails before it could ask.
+# line_of TEXT NEEDLE: number of the first line of TEXT that contains NEEDLE (empty if none).
+line_of() { printf '%s\n' "$1" | grep -n -F -- "$2" | head -n 1 | cut -d: -f1; }
+# before TEXT FIRST SECOND: 0 if both occur and FIRST comes on an earlier line than SECOND.
+before() {
+  local a b
+  a="$(line_of "$1" "$2")"
+  b="$(line_of "$1" "$3")"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+
+run_O() {
+  local want home dismissed_home broken_home mailstub mailstub_log failing quiet missing calls apps source
+  local -a env_o
+  ensure_mail_build
+  setup_health
+  setup_goose
+  want="$MAIL_BIN onboard --if-needed"
+
+  avery AVERY_DRY_RUN=1 AVERY_NO_ONBOARD= "AVERY_MODEL_URL=$DEAD_URL" up
+  [ "$(count "$OUT" "$want")" = 1 ] && before "$OUT" "services run avery" "$want" && before "$OUT" "$want" "open -n -a"
+  check "O1 up (Modell aus): die Einrichtung in Dialogen kommt nach dem Start des Dienstes und vor Goose" $? "$OUT"
+  avery AVERY_DRY_RUN=1 AVERY_NO_ONBOARD= "AVERY_MODEL_URL=$ALIVE_URL" up
+  [ "$(count "$OUT" "$want")" = 1 ] && before "$OUT" "laeuft bereits" "$want" && before "$OUT" "$want" "open -n -a"
+  check "O2 up (Modell laeuft): die Einrichtung kommt einmal, vor Goose" $? "$OUT"
+  avery AVERY_DRY_RUN=1 AVERY_NO_ONBOARD= app
+  [ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" = 2 ] && [ "$(printf '%s\n' "$OUT" | head -n 1)" = "$want" ] && begins "$(last_line "$OUT")" "open -n -a"
+  check "O3 app: erst 'onboard --if-needed', dann Goose" $? "$OUT"
+  avery AVERY_DRY_RUN=1 AVERY_NO_ONBOARD=1 "AVERY_MODEL_URL=$DEAD_URL" up
+  lacks "$OUT" "onboard --if-needed" && has "$OUT" "services run avery" && has "$OUT" "open -n -a"
+  check "O4 AVERY_NO_ONBOARD=1: up startet ohne Einrichtung" $? "$OUT"
+  avery AVERY_DRY_RUN=1 AVERY_NO_ONBOARD=1 app
+  lacks "$OUT" "onboard --if-needed" && begins "$(trim "$OUT")" "open -n -a"
+  check "O5 AVERY_NO_ONBOARD=1: app startet ohne Einrichtung" $? "$OUT"
+  home="$(mkd home)"
+  mkdir -p "$home/.avery"
+  printf 'AVERY_NO_ONBOARD=1\n' > "$home/.avery/avery.env"
+  avery HOME="$home" AVERY_DRY_RUN=1 AVERY_NO_ONBOARD= app
+  lacks "$OUT" "onboard --if-needed"
+  check "O6 AVERY_NO_ONBOARD=1 in avery.env gilt wie in der Umgebung" $? "$OUT"
+  avery HOME="$home" AVERY_DRY_RUN=1 AVERY_NO_ONBOARD=0 app
+  has "$OUT" "onboard --if-needed"
+  check "O7 die Umgebung hat Vorrang vor avery.env (AVERY_NO_ONBOARD=0)" $? "$OUT"
+
+  # The start is never blocked: a failing, a succeeding and a missing mail server (stand-ins, no dialog).
+  env_o=("AVERY_GOOSE_APP=$FAKE_APP" "AVERY_GOOSE_ROOT=$PROFILE" "AVERY_MODEL_URL=$DEAD_URL" "PATH=$GOOSE_DIR/stubs:$PATH")
+  mailstub="$(mkd mailstub)"
+  mailstub_log="$mailstub/calls.log"
+  failing="$mailstub/failing"
+  write_exec "$failing" <<STUB
+#!/bin/sh
+echo "\$@" >> "$mailstub_log"
+echo "boom" >&2
+exit 1
+STUB
+  quiet="$mailstub/quiet"
+  write_exec "$quiet" <<STUB
+#!/bin/sh
+echo "\$@" >> "$mailstub_log"
+exit 0
+STUB
+  missing="$mailstub/nirgends"
+  rm -f "$OPEN_LOG" "$mailstub_log"
+  avery "${env_o[@]}" AVERY_NO_ONBOARD= "AVERY_MAIL_BIN=$failing" app
+  calls="$(open_calls)"
+  [ "$RC" = 0 ] && [ "$(trim "$(cat "$mailstub_log" 2>/dev/null)")" = "onboard --if-needed" ] \
+    && [ "$calls" = "-n -a $FAKE_APP --env GOOSE_PATH_ROOT=$PROFILE --env GOOSE_MOIM_MESSAGE_FILE=$PROFILE/top-of-mind.md" ] \
+    && has "$ERR" "Hinweis: Die Einrichtung in Dialogen ist nicht abgeschlossen"
+  check "O8 eine fehlgeschlagene Einrichtung blockiert den Start nicht: Hinweis, Goose startet" $? "rc=$RC open=$calls stderr=$ERR"
+  rm -f "$OPEN_LOG" "$mailstub_log"
+  avery "${env_o[@]}" AVERY_NO_ONBOARD= "AVERY_MAIL_BIN=$quiet" app
+  calls="$(open_calls)"
+  [ "$RC" = 0 ] && [ "$(trim "$(cat "$mailstub_log" 2>/dev/null)")" = "onboard --if-needed" ] && lacks "$ERR" "Einrichtung in Dialogen" \
+    && begins "$calls" "-n -a $FAKE_APP"
+  check "O9 eine abgeschlossene oder uebersprungene Einrichtung (Exit 0): Goose startet ohne Hinweis" $? "rc=$RC open=$calls stderr=$ERR"
+  rm -f "$OPEN_LOG" "$mailstub_log"
+  avery "${env_o[@]}" AVERY_NO_ONBOARD= "AVERY_MAIL_BIN=$missing" app
+  calls="$(open_calls)"
+  [ "$RC" = 0 ] && [ ! -e "$mailstub_log" ] && begins "$calls" "-n -a $FAKE_APP"
+  check "O10 fehlt das Mail-Programm, startet Goose trotzdem (die Einrichtung wird uebersprungen)" $? "rc=$RC open=$calls stderr=$ERR"
+  rm -f "$OPEN_LOG" "$mailstub_log"
+  avery "${env_o[@]}" AVERY_NO_ONBOARD=1 "AVERY_MAIL_BIN=$failing" app
+  calls="$(open_calls)"
+  [ "$RC" = 0 ] && [ ! -e "$mailstub_log" ] && begins "$calls" "-n -a $FAKE_APP"
+  check "O11 AVERY_NO_ONBOARD=1 ruft das Mail-Programm gar nicht erst auf" $? "rc=$RC open=$calls stderr=$ERR"
+
+  # The real mail server, only in states without any question.
+  home="$(mkd home)"
+  mkdir -p "$home/.avery/mail"
+  printf '{"version": 3, "apple": {"calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}\n' > "$home/.avery/mail/config.json"
+  avery HOME="$home" AVERY_NO_ONBOARD= mail onboard --if-needed
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  check "O12 onboard --if-needed schweigt, wenn schon etwas eingerichtet ist (Apple-Eintrag)" $? "rc=$RC $OUT$ERR"
+  home="$(mkd home)"
+  mkdir -p "$home/.avery/mail"
+  printf '{"version": 3, "accounts": [{"provider": "microsoft", "address": "bob@outlook.example"}]}\n' > "$home/.avery/mail/config.json"
+  avery HOME="$home" AVERY_NO_ONBOARD= mail onboard --if-needed
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  check "O13 onboard --if-needed schweigt, wenn ein Konto verbunden ist" $? "rc=$RC $OUT$ERR"
+  dismissed_home="$(mkd home)"
+  mkdir -p "$dismissed_home/.avery/mail"
+  : > "$dismissed_home/.avery/mail/onboard.dismissed"
+  avery HOME="$dismissed_home" AVERY_NO_ONBOARD= mail onboard --if-needed
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  check "O14 onboard --if-needed schweigt nach 'Nicht mehr fragen' (onboard.dismissed)" $? "rc=$RC $OUT$ERR"
+  avery HOME="$(mkd home)" AVERY_NO_ONBOARD=1 mail onboard --if-needed
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]
+  check "O15 onboard --if-needed schweigt mit AVERY_NO_ONBOARD=1" $? "rc=$RC $OUT$ERR"
+  home="$(mkd home)"
+  avery HOME="$home" AVERY_NO_ONBOARD= MAIL_MCP_FAKE=1 mail onboard --if-needed
+  [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ ! -e "$home/.avery" ]
+  check "O16 onboard --if-needed schweigt im Demo-Modus und legt nichts an" $? "rc=$RC $OUT$ERR"
+  avery HOME="$home" MAIL_MCP_FAKE=1 mail onboard
+  [ "$RC" = 1 ] && has "$OUT" "Demo-Modus" && [ ! -e "$home/.avery" ]
+  check "O17 onboard ohne Option verweigert im Demo-Modus, bevor ein Dialog erscheint" $? "rc=$RC $OUT$ERR"
+  avery mail onboard --bogus
+  [ "$RC" = 2 ] && has "$OUT" "Benutzung: avery mail onboard [--if-needed]"
+  check "O18 onboard mit unbekannter Option: Benutzungshinweis, Exit 2" $? "rc=$RC $OUT"
+  broken_home="$(mkd home)"
+  mkdir -p "$broken_home/.avery/mail"
+  printf '{"version": 2}\n' > "$broken_home/.avery/mail/config.json"
+  avery HOME="$broken_home" AVERY_NO_ONBOARD= mail onboard --if-needed
+  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && [ "$(cat "$broken_home/.avery/mail/config.json")" = '{"version": 2}' ]
+  check "O19 onboard --if-needed meldet eine unlesbare Konfiguration, statt Dialoge zu zeigen, und aendert sie nicht" $? "rc=$RC $OUT"
+  avery mail help
+  has "$OUT" "avery mail onboard [--if-needed]" && has "$OUT" "onboard and revoke refuse in demo mode"
+  check "O20 die Hilfe des Mail-Programms nennt onboard" $? "$OUT"
+  avery help
+  has "$OUT" "onboard, link, unlink" && has "$OUT" "AVERY_NO_ONBOARD=1" && has "$OUT" "avery mail onboard"
+  check "O21 die Hilfe von avery nennt die Einrichtung in Dialogen und den Schalter" $? "$OUT"
+
+  if have osacompile; then
+    setup_stub
+    apps="$(mkd app)"
+    avery "AVERY_APP_DIR=$apps" "AVERY_APP_COMMAND=$STUB" AVERY_MACOS_VERSION=26.0 install-app
+    source="$(osadecompile "$apps/Avery.app" 2>/dev/null)"
+    [ "$RC" = 0 ] && has "$source" "set cliPath to \"$STUB\"" && has "$source" 'quoted form of cliPath & " up 2>&1"'
+    check "O22 Avery.app startet 'avery up', den Weg mit der Einrichtung (O1, O2)" $? "$source"
+  else
+    skip "O22 Avery.app startet 'avery up', den Weg mit der Einrichtung (O1, O2)" "osacompile fehlt"
+  fi
+  has "$(cat "$ROOT/Casks/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Casks/avery.rb")" "AVERY_NO_ONBOARD=1" \
+    && has "$(cat "$ROOT/Casks/avery.rb")" "System Events" && has "$(cat "$ROOT/Casks/avery.rb")" "Nicht mehr fragen"
+  check "O23 Cask: die Hinweise nennen die Dialoge, den Schalter und die Berechtigung" $?
+  has "$(cat "$ROOT/Formula/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Formula/avery.rb")" "AVERY_NO_ONBOARD=1" \
+    && has "$(cat "$ROOT/Formula/avery.rb")" "System Events"
+  check "O24 Formel: die Hinweise nennen die Dialoge, den Schalter und die Berechtigung" $?
+  has "$(cat "$SHARE/avery.env")" "AVERY_NO_ONBOARD"
+  check "O25 die Vorlage avery.env nennt AVERY_NO_ONBOARD" $?
+  has "$(cat "$ROOT/README.md")" "avery mail onboard --if-needed" && has "$(cat "$ROOT/README.md")" "onboard.dismissed" \
+    && has "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
+  check "O26 README: die Dialoge, der Schalter, die Markierung und die Berechtigung sind beschrieben" $?
+}
+
 # ------------------------------------------------------------------ W: the watcher stops the model after Goose was closed
 run_W() {
   local gp wpid w1home w3home output still ended
@@ -1046,6 +1205,7 @@ want L && run_L
 want N && run_N
 want P && run_P
 want G && run_G
+want O && run_O
 want W && run_W
 want Q && run_Q
 want M && run_M

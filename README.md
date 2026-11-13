@@ -19,7 +19,7 @@ and Avery never sees them (see [Apple Mail and Calendar](#apple-mail-and-calenda
 
 | Part | What it does |
 |---|---|
-| `Avery.app` | The icon in Spotlight and the Dock: starts the model, waits until it is ready and opens Goose with the Avery profile |
+| `Avery.app` | The icon in Spotlight and the Dock: starts the model, waits until it is ready and opens Goose with the Avery profile; while no account is linked, its first start guides you through the setup in dialogs |
 | `avery` | Command line: creates the Goose profile, starts the model and Goose, checks the setup |
 | `avery-mail` | MCP server for Goose (stdio, Rust, no dependencies) that reaches Gmail, Google Calendar and Outlook.com through their APIs (via `/usr/bin/curl`) and, only if you switch it on, Mail.app and Calendar.app through `osascript` |
 | Goose profile | Config, permissions and a local provider for Splash, created by `avery init` in `~/.avery/goose`; your default Goose profile is not touched |
@@ -55,6 +55,12 @@ Only install it from a tap you trust.
 ```sh
 avery init                # create the Goose profile in ~/.avery/goose
 avery pull                # download the model once (about 17 GB); stop it with Ctrl+C when it says Ready
+```
+
+Then open **Avery** (Spotlight, or `avery up`). While no account is linked, the first start shows dialogs that guide you
+through the setup (see [First start: the setup dialogs](#first-start-the-setup-dialogs)). The same steps from a terminal:
+
+```sh
 avery mail link google    # or: microsoft. Connect a personal Gmail or Outlook.com account (see below)
 avery mail setup          # choose a level per account and calendar: off, read or write
 avery mail selftest       # check read access
@@ -75,6 +81,45 @@ without a config entry. Then move the file away (`mv ~/.avery/mail/config.json ~
 the accounts again: `avery mail link google` or `avery mail link microsoft` for each one, then `avery mail setup`, and
 `avery mail setup apple` if you use Apple Mail and Calendar. If `avery doctor` reports profile files that do not ask before
 changes, `avery init --force` writes new ones (the old ones are kept as backup).
+
+## First start: the setup dialogs
+
+When you open Avery (`Avery.app` or `avery up`) and nothing is set up yet, native macOS dialogs guide you through the
+setup before Goose starts. They are a thin layer over the very same code as `avery mail link`, `avery mail setup`,
+`avery mail setup apple` and `avery mail selftest`: nothing is configured differently, and everything stays in
+`config.json` and the Keychain as described below. There is no menu bar app and nothing keeps running.
+
+1. **Welcome.** *Weiter* starts, *Später* asks again at the next start, *Nicht mehr fragen* never asks again (see below).
+2. **Accounts.** Choose Gmail and/or Outlook.com. Apple Mail and Calendar is optional and off unless you tick it.
+3. **Per account.** A short explanation that you need your own app registration once (with *Anleitung öffnen*, which opens
+   the README and the Google Cloud or Entra pages in the browser; the dialogs then end for now and the next start continues),
+   the client ID (for Gmail also the client secret, which is typed hidden), the level (*Nur lesen* or *Lesen und mit Freigabe
+   schreiben*), the sign-in in the browser (a notification says so while Avery waits, at most 3 minutes), and a dialog with the
+   result: the address that is now linked, or the reason why not.
+4. **Calendars.** Choose the calendars Avery may read, then which of them it may also write. A last dialog shows what will be
+   saved; only *Ja* saves it.
+5. **Apple** (only if you chose it). It first explains that macOS asks once for permission to control Mail and Calendar, then
+   asks for the levels like `avery mail setup apple`.
+6. **Summary.** What is linked, and the offer to run the read check (`avery mail selftest`) now and show its result.
+
+Every dialog can be cancelled, and cancelling means: stop, nothing more is saved. What was completed before stays
+(an account that is linked and saved, calendars that you confirmed) and the last dialog says so. Every dialog also gives up
+after at most ten minutes without an answer (the same as cancelling). The client secret goes from the dialog to the Keychain only:
+it is never on a command line, in a log, in an error message or in `config.json`.
+
+`avery mail onboard` shows the same dialogs whenever you want, also when everything is set up. `avery mail onboard
+--if-needed` is what the launcher runs before Goose starts: it stays silent and does nothing when an account is linked or
+Apple Mail and Calendar are enabled, after you chose *Nicht mehr fragen* (that creates the empty file
+`~/.avery/mail/onboard.dismissed`, owner-only: delete it to be asked again), when `AVERY_NO_ONBOARD=1` is set (in the
+environment or in `~/.avery/avery.env`), in demo mode and when there is no graphical session (for example over SSH). If the
+dialogs cannot be shown or are cancelled, Avery still starts. `avery mail onboard` changes the configuration like
+`link`, `unlink`, `setup` and `revoke`, so it refuses in demo mode.
+
+The dialogs come from the helper `/usr/bin/osascript` and show only on the Mac's screen; the agent can neither start
+them nor answer them (the server `avery-mail serve` has no code path to them). If macOS asks once whether Avery (or the
+app that starts it, such as Avery.app or Terminal) may control System Events, allow it in System Settings > Privacy &
+Security > Automation: without it no dialog can be shown, and Avery tells you so and starts as usual. If you prefer the
+terminal, `AVERY_NO_ONBOARD=1` keeps the dialogs away and the manual steps below stay as they were.
 
 ## Gmail and Outlook.com
 
@@ -110,7 +155,7 @@ Registering takes a few minutes and is free:
   application (client) ID.
 
 ```sh
-avery mail link google          # or: microsoft. Asks for the client ID, the level, opens the browser, stores the token
+avery mail link google          # or: microsoft. Asks for the client ID, the level, opens the browser, stores the token (the setup dialogs do the same)
 avery mail setup                # per account: the mail level, then its calendars (listed live from the provider)
 avery mail selftest             # read access; selftest-write tests the dialogs, a draft and a test event
 avery mail unlink alice@gmail.example   # remove the account, its grants and the stored token (then remove the app in your account settings)
@@ -155,7 +200,8 @@ scans all of its events (up to 20000), so very large calendars are slow.
 ## Daily use
 
 Open **Avery** with Spotlight (Cmd+Space) or drag it from the Applications folder to the Dock. It starts the model,
-waits until it is ready and opens Goose with the Avery profile. If Goose is already open with that profile, it just
+waits until it is ready and opens Goose with the Avery profile (while nothing is set up, the
+[setup dialogs](#first-start-the-setup-dialogs) come first). If Goose is already open with that profile, it just
 brings it to the front. When Goose has been closed for a few minutes (`AVERY_IDLE_MINUTES`, default 5), the model stops
 by itself and frees its memory. There is nothing to quit and no second icon.
 
@@ -180,7 +226,7 @@ The agent reads untrusted mail and calendar invitations, so the design assumes t
 doing something.
 
 - **Levels.** Only the accounts and calendars you gave a level with `avery mail link` and `avery mail setup` are ever
-  touched: `read` or `write`, set by you in a terminal. The model cannot change them. Mail rights are per account,
+  touched: `read` or `write`, set by you in a terminal or in the setup dialogs. The model cannot change them. Mail rights are per account,
   calendar rights per calendar.
 - **Approval dialog.** A native dialog, shown by the server process and not by Goose, lists sender, recipients, subject
   and the exact text before a mail is sent. Recipients are never shortened: a sent mail goes only to plain ASCII
@@ -224,6 +270,7 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 | Command | Purpose |
 |---|---|
 | `avery init [--force]` | Create the profile (existing files are kept; `--force` replaces them and keeps a backup) |
+| `avery mail onboard [--if-needed]` | The guided setup in macOS dialogs, over the same code as `link`, `setup`, `setup apple` and `selftest`; `--if-needed` asks only while nothing is set up and not dismissed (what the launcher runs) |
 | `avery mail link google\|microsoft` / `unlink <address>` | Connect Gmail or Outlook.com (OAuth in the browser, token in the Keychain) / disconnect it and delete the token (`unlink google:<address>` also deletes a token that has no config entry) |
 | `avery mail setup` / `setup apple` / `revoke` | Choose the level (off, read, write) per account and calendar / include Apple Mail and Calendar (optional) / remove all grants (Apple off again) |
 | `avery mail selftest` / `selftest-write` | Check read access / the approval dialogs, drafts, sending and a test event |
@@ -241,8 +288,8 @@ The command line output is German for now.
 ## Configuration
 
 `avery init` creates `~/.avery/avery.env` (a commented template). Known keys: `AVERY_MODEL`, `AVERY_MAX_MEMORY`,
-`AVERY_MAX_CONTEXT`, `AVERY_MAX_CACHE_DISK`, `AVERY_OFFLINE`, `AVERY_IDLE_MINUTES`, `AVERY_GOOSE_APP`, `AVERY_GOOSE_ROOT`. The file is parsed,
-not executed, and real environment variables win. The defaults are tuned for a 48 GB Mac.
+`AVERY_MAX_CONTEXT`, `AVERY_MAX_CACHE_DISK`, `AVERY_OFFLINE`, `AVERY_IDLE_MINUTES`, `AVERY_GOOSE_APP`, `AVERY_GOOSE_ROOT`,
+`AVERY_NO_ONBOARD` (1 = no setup dialogs when Avery starts). The file is parsed, not executed, and real environment variables win. The defaults are tuned for a 48 GB Mac.
 
 The model runs offline by default (`AVERY_OFFLINE=1`): Avery never downloads anything on its own, so a service start
 cannot pull a new multi-gigabyte model revision. `avery pull` is the one command that goes online.
@@ -250,9 +297,10 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 | Path | Content |
 |---|---|
 | `~/.avery/goose` | Goose profile (`config/`, `top-of-mind.md`, sessions) |
-| `~/.avery/mail/config.json` | Linked accounts with their levels and calendars, the optional `apple` section, hourly limits (format version 3, written by `avery mail link`, `unlink`, `setup` and `revoke`) |
+| `~/.avery/mail/config.json` | Linked accounts with their levels and calendars, the optional `apple` section, hourly limits (format version 3, written by `avery mail link`, `unlink`, `setup`, `revoke` and the setup dialogs of `avery mail onboard`) |
 | `~/.avery/mail/config.lock` | Empty lock file: those commands hold it only while they re-read and save `config.json` (a few milliseconds, never while you answer prompts or sign in), so two terminals never overwrite each other; a command that cannot get it within 5 seconds stops and saves nothing |
 | `~/.avery/mail/vault.lock` | Empty lock file beside `config.lock`: every write of a Keychain item (`link`, `unlink`, and the renewal of a token that the provider rotates) holds it only while that one operation runs, so a renewal that is in flight can never bring back a token you just removed with `unlink` or overwrite one you just linked again (such a renewal is dropped and the call fails with a retry hint; only when another Avery process renewed the same sign-in first does the call keep the access token it got); reading a token never waits for it; a command that cannot get it within 5 seconds stops and changes nothing. It is never held together with `config.lock` |
+| `~/.avery/mail/onboard.dismissed` | Empty marker file (owner-only), created when you choose *Nicht mehr fragen* in the first dialog: `avery mail onboard --if-needed` is silent while it exists. Delete it to be asked again; the config format is not involved |
 | Keychain item `avery-mail` | One OAuth token per linked Gmail or Outlook.com account (never in a file) |
 | `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
 | `~/.avery/mail/changes.jsonl` | Log of calendar changes with the event before and after (format version 1; used by `avery mail undo`) |
@@ -297,6 +345,9 @@ written.
   against real accounts. Run `avery mail selftest` and `selftest-write` after linking and look at the result.
 - Google lets the unverified app of a personal project expire its refresh token after 7 days while the consent screen is
   in *Testing*; publish it (still unverified) to avoid signing in again every week.
+- The setup dialogs were tested with a mock of the scripting interface and with scripted answers, not on a real screen:
+  watch the first start once. If the dialogs do not show, `avery mail onboard` in a terminal says why, and
+  `AVERY_NO_ONBOARD=1` with the manual steps always works.
 - Personal accounts only: Google accounts must have a gmail.com or googlemail.com address (Google Workspace and custom
   domains are refused) and work and school Microsoft accounts cannot sign in. Avery itself never signs in to IMAP, iCloud
   or Exchange; only the optional Apple bridge reaches the accounts that Mail.app has.
@@ -314,7 +365,7 @@ written.
 ```sh
 cargo test --manifest-path avery-mail/Cargo.toml   # mail and calendar server: unit and end-to-end tests on demo data, no Mail or Calendar access
 tests/cli.sh                                        # bin/avery, app builder, disk image tools, cask and formula
-MAIL_MCP_FAKE=1 cargo run --manifest-path avery-mail/Cargo.toml -- status   # demo data; link, unlink, setup and revoke refuse in demo mode
+MAIL_MCP_FAKE=1 cargo run --manifest-path avery-mail/Cargo.toml -- status   # demo data; link, unlink, setup, onboard and revoke refuse in demo mode
 AVERY_MAIL_BIN=$PWD/avery-mail/target/debug/avery-mail bin/avery doctor   # AVERY_MAIL_BIN: use another mail server binary
 AVERY_DRY_RUN=1 bin/avery model   # print the command instead of running it
 ```

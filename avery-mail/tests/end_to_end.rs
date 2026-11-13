@@ -344,6 +344,127 @@ fn demo_mode_refuses_the_commands_that_change_the_configuration() -> TestResult 
 }
 
 #[test]
+fn onboarding_refuses_in_demo_mode_before_any_dialog_and_with_an_unknown_option() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let demo = run_cli(&sandbox, &[("MAIL_MCP_FAKE", "1")], &["onboard"], "")?;
+    assert_eq!(demo.code, Some(1), "{}", demo.stdout);
+    assert!(demo.stdout.contains("Demo-Modus"), "{}", demo.stdout);
+    let unknown = run_cli(&sandbox, &[], &["onboard", "--now"], "")?;
+    assert_eq!(unknown.code, Some(2), "{}", unknown.stdout);
+    assert!(
+        unknown
+            .stdout
+            .contains("Benutzung: avery mail onboard [--if-needed]"),
+        "{}",
+        unknown.stdout
+    );
+    let typo = run_cli(&sandbox, &[], &["onbord"], "")?;
+    assert_eq!(typo.code, Some(2), "{}", typo.stdout);
+    assert!(
+        typo.stdout.contains("Meintest du: avery mail onboard"),
+        "{}",
+        typo.stdout
+    );
+    for name in [
+        "config.json",
+        "config.lock",
+        "vault.lock",
+        "onboard.dismissed",
+    ] {
+        assert!(!sandbox.path(name).exists(), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_flag_stays_silent_when_something_is_set_up_dismissed_switched_off_or_in_demo_mode(
+) -> TestResult {
+    let configured = [
+        r#"{"version": 3, "accounts": [{"provider": "microsoft", "address": "bob@outlook.example"}]}"#,
+        r#"{"version": 3, "apple": {"calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}"#,
+    ];
+    for config in configured {
+        let sandbox = Sandbox::new()?;
+        sandbox.write("config.json", config)?;
+        let output = run_cli(&sandbox, &[], &["onboard", "--if-needed"], "")?;
+        assert_eq!((output.code, output.stdout.as_str()), (Some(0), ""));
+        assert_eq!(sandbox.read("config.json"), config);
+        assert!(!sandbox.path("onboard.dismissed").exists());
+    }
+    let sandbox = Sandbox::new()?;
+    sandbox.write("onboard.dismissed", "")?;
+    let dismissed = run_cli(&sandbox, &[], &["onboard", "--if-needed"], "")?;
+    assert_eq!((dismissed.code, dismissed.stdout.as_str()), (Some(0), ""));
+    let sandbox = Sandbox::new()?;
+    for env in [[("AVERY_NO_ONBOARD", "1")], [("MAIL_MCP_FAKE", "1")]] {
+        let output = run_cli(&sandbox, &env, &["onboard", "--if-needed"], "")?;
+        assert_eq!(
+            (output.code, output.stdout.as_str()),
+            (Some(0), ""),
+            "{env:?}"
+        );
+    }
+    for name in [
+        "config.json",
+        "config.lock",
+        "vault.lock",
+        "onboard.dismissed",
+    ] {
+        assert!(!sandbox.path(name).exists(), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_config_that_cannot_be_read_is_reported_by_the_flag_and_never_gets_a_dialog() -> TestResult {
+    for original in [
+        r#"{"version": 2, "allowed_accounts": []}"#,
+        "not json",
+        r#"{"version": 3, "accounts": 5}"#,
+    ] {
+        let sandbox = Sandbox::new()?;
+        sandbox.write("config.json", original)?;
+        let output = run_cli(&sandbox, &[], &["onboard", "--if-needed"], "")?;
+        assert_eq!(output.code, Some(1), "{original}: {}", output.stdout);
+        assert!(output.stdout.starts_with("Fehler: "), "{}", output.stdout);
+        assert_eq!(sandbox.read("config.json"), original);
+        assert!(!sandbox.path("onboard.dismissed").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn the_server_offers_no_onboarding_and_refuses_to_run_one() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut server = Server::start(&sandbox, &[("MAIL_MCP_FAKE", "1")])?;
+    let names = server.tool_names()?;
+    for name in &names {
+        for word in ["onboard", "link", "setup", "dialog", "dismiss", "ask"] {
+            assert!(!name.contains(word), "{name}");
+        }
+    }
+    for name in [
+        "onboard",
+        "link",
+        "setup",
+        "onboard_if_needed",
+        "ask_text",
+        "open_url",
+    ] {
+        let (error, text) = server.call(name, "{}")?;
+        assert!(
+            error && text.starts_with("Unknown tool: "),
+            "{name}: {text}"
+        );
+    }
+    assert_eq!(server.finish()?, Some(0));
+    for name in ["config.json", "config.lock", "onboard.dismissed"] {
+        assert!(!sandbox.path(name).exists(), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
 fn an_unsupported_configuration_is_never_overwritten() -> TestResult {
     let sandbox = Sandbox::new()?;
     let originals = [
