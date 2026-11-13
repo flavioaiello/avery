@@ -1557,6 +1557,121 @@ mod tests {
         Ok(())
     }
 
+    const VISIBLE: &[(&str, &str)] = &[
+        ("a", "a"),
+        ("w\u{f6}rld", "w\u{f6}rld"),
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&#65;", "A"),
+        ("&#x42;", "B"),
+        ("&euro;", "\u{20ac}"),
+        ("it's", "it's"),
+        ("3>2", "3>2"),
+        ("\"q\"", "\"q\""),
+        ("\u{1f600}", "\u{1f600}"),
+        ("\u{65e5}\u{672c}", "\u{65e5}\u{672c}"),
+    ];
+    const SPACES: &[&str] = &[
+        " ", "  ", "\n", "\r\n", "\t", "\r", "\u{a0}", "\u{2003}", " \n ", "\n\n\n", "&nbsp;",
+    ];
+    const INVISIBLE: &[&str] = &[
+        "<b>",
+        "</b>",
+        "<a href=\"x>y\" title='a>b'>",
+        "</a>",
+        "<span class=c>",
+        "<!-- <b>x</b> > -->",
+        "<script>if (a < b) { x(); }</script>",
+        "<style>p > a {}</style>",
+        "<br>",
+        "<p>",
+        "</p>",
+        "<div>",
+        "</div>",
+        "<ul><li>",
+        "</li></ul>",
+        "<td>",
+        "<!DOCTYPE html>",
+        "<img src=x alt=\"SECRET\">",
+        "<o:p></o:p>",
+        "<?xml version=\"1.0\"?>",
+    ];
+
+    struct Sample {
+        pieces: Vec<(usize, usize)>,
+        visible: String,
+    }
+
+    impl Sample {
+        fn generate(seed: &mut u32) -> Result<Sample, Box<dyn std::error::Error>> {
+            let mut pieces = Vec::new();
+            let mut visible = String::new();
+            for _ in 0..40 {
+                *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let kind = usize::try_from(*seed >> 16)? % 3;
+                *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let pick = usize::try_from(*seed >> 16)?;
+                match kind {
+                    0 => {
+                        let index = pick % VISIBLE.len();
+                        visible.push_str(VISIBLE.get(index).ok_or("visible")?.1);
+                        pieces.push((0, index));
+                    }
+                    1 => pieces.push((1, pick % SPACES.len())),
+                    _ => pieces.push((2, pick % INVISIBLE.len())),
+                }
+            }
+            Ok(Sample { pieces, visible })
+        }
+
+        fn render(&self, shift: usize) -> Result<String, Box<dyn std::error::Error>> {
+            let mut document = String::new();
+            for (kind, index) in &self.pieces {
+                let piece = match kind {
+                    0 => VISIBLE.get(*index).ok_or("visible")?.0,
+                    1 => SPACES.get((index + shift) % SPACES.len()).ok_or("space")?,
+                    _ => INVISIBLE.get(*index).ok_or("invisible")?,
+                };
+                document.push_str(piece);
+            }
+            Ok(document)
+        }
+    }
+
+    fn without_whitespace(text: &str) -> String {
+        text.split_whitespace().collect()
+    }
+
+    #[test]
+    fn generated_documents_keep_exactly_their_visible_text() -> TestResult {
+        let mut seed: u32 = 0x1357_9bdf;
+        for _ in 0..2_000 {
+            let sample = Sample::generate(&mut seed)?;
+            let document = sample.render(0)?;
+            for out in both(&document) {
+                assert_eq!(without_whitespace(&out), sample.visible, "{document:?}");
+                assert!(!out.contains("SECRET"), "{document:?}");
+                assert!(well_formed(&out), "{document:?} -> {out:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn whitespace_runs_are_interchangeable_when_collapsing() -> TestResult {
+        let mut seed: u32 = 0x2468_ace0;
+        for _ in 0..2_000 {
+            let sample = Sample::generate(&mut seed)?;
+            let reference = to_text(&sample.render(0)?);
+            for shift in 1..SPACES.len() {
+                let variant = sample.render(shift)?;
+                assert_eq!(to_text(&variant), reference, "{variant:?}");
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn markup_never_leaks_into_the_output() -> TestResult {
         const WRAPPED: &[&str] = &[
