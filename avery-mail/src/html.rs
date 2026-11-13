@@ -1387,6 +1387,76 @@ mod tests {
     }
 
     #[test]
+    fn inline_data_uris_and_long_style_attributes_are_not_text() {
+        let image = format!(
+            "a<img src=\"data:image/png;base64,{}\" alt=x>b",
+            "QUJD".repeat(75_000)
+        );
+        for out in both(&image) {
+            assert_eq!(out, "ab");
+        }
+        let style = format!("<p style=\"{}\">x</p>y", "color:red;".repeat(50_000));
+        assert_eq!(to_text(&style), "x\n\ny");
+        let css = format!("a<style>{}</style>b", "p{color:red}".repeat(100_000));
+        assert_eq!(to_text(&css), "ab");
+    }
+
+    #[test]
+    fn the_scanners_report_exact_lengths() {
+        assert_eq!(tag_length("<a>"), Some(3));
+        assert_eq!(tag_length("<a title=\">\">x"), Some(13));
+        assert_eq!(tag_length("<a title='>' b=\"'\">"), Some(19));
+        assert_eq!(tag_length("<a"), None);
+        assert_eq!(tag_length("<a title=\"x>"), None);
+        assert_eq!(tag_length(""), None);
+        assert_eq!(comment("<!---->"), 7);
+        assert_eq!(comment("<!-->x"), 5);
+        assert_eq!(comment("<!--->x"), 6);
+        assert_eq!(comment("<!-- x -->y"), 10);
+        assert_eq!(comment("<!-- x"), 6);
+        assert_eq!(comment("<!--"), 4);
+        assert_eq!(to_close("<!x>y"), 4);
+        assert_eq!(to_close("<!x"), 3);
+        assert_eq!(raw_length("abc</script>d", "script"), Some(12));
+        assert_eq!(raw_length("abc</SCRIPT >d", "script"), Some(13));
+        assert_eq!(raw_length("abc</scriptx>d", "script"), None);
+        assert_eq!(raw_length("abc</script", "script"), None);
+        assert_eq!(raw_length("abc</script/", "script"), Some(12));
+        assert_eq!(raw_length("abc", "script"), None);
+        assert_eq!(decode("&amp;x"), Some(('&', 5)));
+        assert_eq!(decode("&#65;"), Some(('A', 5)));
+        assert_eq!(decode("&#x41;"), Some(('A', 6)));
+        assert_eq!(decode("&amp"), None);
+        assert_eq!(decode("&"), None);
+        assert_eq!(decode("&;"), None);
+        assert_eq!(decode("&#0000000065;"), Some(('A', 13)));
+        assert_eq!(decode("&#00000000065;"), Some(('A', 14)));
+        assert_eq!(decode("&#000000000065;"), None);
+        assert_eq!(decode("&abcdefghijkl;"), None);
+    }
+
+    #[test]
+    fn numeric_references_parse_strictly() {
+        assert_eq!(numeric("65"), Some('A'));
+        assert_eq!(numeric("x41"), Some('A'));
+        assert_eq!(numeric("X41"), Some('A'));
+        assert_eq!(numeric("0"), Some('\0'));
+        assert_eq!(numeric("1114111"), Some('\u{10ffff}'));
+        assert_eq!(numeric(""), None);
+        assert_eq!(numeric("x"), None);
+        assert_eq!(numeric("+65"), None);
+        assert_eq!(numeric("-65"), None);
+        assert_eq!(numeric("6 5"), None);
+        assert_eq!(numeric("1114112"), None);
+        assert_eq!(numeric("55296"), None);
+        assert_eq!(numeric("xD800"), None);
+        assert_eq!(numeric("4294967296"), None);
+        assert_eq!(numeric("xFFFFFFFFFF"), None);
+        assert_eq!(numeric("\u{665}"), None);
+        assert_eq!(numeric("x\u{ff21}"), None);
+    }
+
+    #[test]
     fn hostile_documents_are_processed_in_linear_time() {
         let started = Instant::now();
         for hostile in [
