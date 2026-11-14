@@ -1,12 +1,12 @@
 class Avery < Formula
   desc "Private AI agent for macOS: Goose, a local model, Apple Mail and Calendar bridge"
   homepage "https://github.com/flavioaiello/avery"
-  url "git@github.com:flavioaiello/avery.git",
+  url "https://github.com/flavioaiello/avery.git",
       using:    :git,
-      tag:      "v0.6.1",
+      tag:      "v0.7.0",
       revision: "21dc4a4eb12e9d04c658857289b0edfef3533d42"
   license "MIT"
-  head "git@github.com:flavioaiello/avery.git", using: :git, branch: "main"
+  head "https://github.com/flavioaiello/avery.git", using: :git, branch: "main"
 
   depends_on arch: :arm64
   depends_on "incoai/tap/splash"
@@ -14,10 +14,7 @@ class Avery < Formula
   depends_on :macos
 
   def install
-    system "cargo", "install", *std_cargo_args(path: "avery-mail")
-    bin.install "bin/avery"
-    libexec.install "libexec/avery-make-app"
-    pkgshare.install Dir["share/avery/*"]
+    system "cargo", "install", *std_cargo_args
   end
 
   service do
@@ -33,19 +30,17 @@ class Avery < Formula
       Goose Desktop is a cask and is not installed by this formula:
         brew install --cask block-goose
 
-      The app (Avery.app with its own icon, in /Applications) is a cask from the same tap:
-        brew install --cask flavioaiello/avery/avery
-
       First run:
         avery init
-        avery pull     # downloads the model once (about 17 GB); Ctrl+C when it says Ready
+        avery pull                  # downloads the model once (about 17 GB); Ctrl+C when it says Ready
+        brew services start avery   # runs the model, also at every login (it holds up to 28 GB of memory, AVERY_MAX_MEMORY)
 
-      Then open "Avery" (Spotlight, the Dock, or: avery up). While nothing is set up, the first start guides you
+      Then open Goose with the Avery profile: avery app. While nothing is set up, the first start guides you
       through the setup in macOS dialogs: Avery lists the accounts and calendars of Apple Mail and Calendar and you
       choose what it may read or write. macOS may ask for permission to show notifications; macOS asks once for
       Automation (Mail and Calendar): allow what Avery should use. A failed setup is also shown as a notification;
       if no dialog and no notification appears, run "avery mail onboard" in a terminal to see the reason.
-      Cancelling a dialog saves nothing more; Avery starts anyway.
+      Cancelling a dialog saves nothing more; Goose starts anyway.
 
       The same from a terminal:
         avery mail onboard         # shows the dialogs again
@@ -57,13 +52,16 @@ class Avery < Formula
       only format 4 and uses only Apple Mail and Calendar: move ~/.avery/mail/config.json away and run avery mail setup.
       The sign-ins that 0.5.0 stored in the Keychain stay there until you remove them (see the README, "Update from 0.5.0").
 
-      Daily use: open "Avery" with Spotlight or the Dock.
-        It starts the model, opens Goose, and stops the model by itself a few minutes after Goose is closed.
-        The same from a terminal: avery up   (avery down stops the model right away)
-        Without the cask, "avery install-app" creates the app in ~/Applications.
+      Upgrading from 0.6.1 and earlier: "avery" is now one program, and it also serves Goose ("avery serve"). Avery.app,
+      "avery up", "avery down", "avery install-app" and the idle stop are gone: the model runs as the Homebrew service.
+        brew install flavioaiello/avery/avery            # only if you installed just the Avery cask: Homebrew removes a formula that only the cask needed
+        brew uninstall --cask flavioaiello/avery/avery   # if you installed the Avery cask
+        rm -rf ~/Applications/Avery.app                  # if you made the app with "avery install-app"
+        avery init --force                               # the Goose profile must start "avery serve" (the old files are kept as backups)
+        brew services start avery
 
-      The model service holds up to 28 GB of memory while it runs (AVERY_MAX_MEMORY).
-      To start it at every login instead: brew services start avery
+      Daily use: the model runs as a service, so only Goose needs to be opened: avery app
+      Stop the model: brew services stop avery
     EOS
   end
 
@@ -72,7 +70,7 @@ class Avery < Formula
     assert_match "avery #{version}", shell_output("#{bin}/avery version")
 
     system bin/"avery", "init"
-    assert_match "avery-mail", (testpath/".avery/goose/config/config.yaml").read
+    assert_match "- serve", (testpath/".avery/goose/config/config.yaml").read
     assert_path_exists testpath/".avery/goose/top-of-mind.md"
 
     ENV["MAIL_MCP_FAKE"] = "1"
@@ -80,7 +78,7 @@ class Avery < Formula
       {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
       {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
     JSON
-    output = pipe_output("#{bin}/avery-mail serve", requests)
+    output = pipe_output("#{bin}/avery serve", requests)
     assert_match "list_messages", output
     assert_match "list_events", output
     refute_match "send_message", output

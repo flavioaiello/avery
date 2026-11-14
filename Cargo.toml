@@ -1,0 +1,38 @@
+[package]
+name = "avery"
+version = "0.7.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Private AI agent for macOS: starts Goose with a local model and serves private mail and calendars from Apple Mail and Calendar over MCP (stdio): reading, drafts, sending, moving mail and calendar changes with approval."
+license = "MIT"
+publish = false
+
+[dependencies]
+
+[lints.rust]
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+unused_mut = "deny"
+unused_must_use = "deny"
+unreachable_pub = "deny"
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+unimplemented = "deny"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+overflow-checks = true

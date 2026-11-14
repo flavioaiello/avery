@@ -1,0 +1,1595 @@
+use crate::account::{Account, MailAccount};
+use crate::backend::{
+    Backend, ComposeRequest, Mailbox, MessageBody, MessageId, MessageList, MessageQuery,
+    MoveReport, MoveRequest, Preview,
+};
+use crate::error::{ToolError, ToolResult};
+use crate::json::{Json, Object};
+use crate::jxa::exchange;
+use crate::mailerror::failure;
+use crate::osascript::{App, Host, OsascriptHost};
+use crate::texts::{
+    APPROVAL_SECONDS, JXA_TIMEOUT, MAX_HITS, MAX_MOVE_MESSAGES, MAX_RECIPIENTS, MOVE_SECONDS,
+};
+
+pub(crate) struct RealBackend {
+    host: Box<dyn Host>,
+}
+
+impl RealBackend {
+    pub(crate) fn new(host: Box<dyn Host>) -> RealBackend {
+        RealBackend { host }
+    }
+
+    pub(crate) fn system() -> RealBackend {
+        RealBackend::new(Box::new(OsascriptHost))
+    }
+
+    fn call(&self, request: Object, timeout_seconds: u64) -> ToolResult<Json> {
+        let op = request.get("op").and_then(Json::as_str).unwrap_or_default();
+        if !matches!(op, "ping" | "approval_test") {
+            self.host.ensure_running(App::Mail);
+        }
+        exchange(
+            self.host.as_ref(),
+            App::Mail,
+            request,
+            timeout_seconds,
+            failure,
+        )
+    }
+
+    fn account_request(op: &str, account: &Account) -> Object {
+        let mut request = Object::new();
+        request.insert("op", op);
+        request.insert("accountId", account.id.as_str());
+        request
+    }
+
+    fn unexpected(op: &str) -> ToolError {
+        failure("unexpected answer from osascript", Some(op), true)
+    }
+
+    fn number_of(id: &MessageId) -> ToolResult<i64> {
+        id.number().ok_or_else(|| {
+            ToolError::msg(
+                "Message ids of Apple Mail accounts are whole numbers. Use an id from list_messages or search_messages.",
+            )
+        })
+    }
+}
+
+fn optional_text(value: &Option<String>) -> Json {
+    value.as_deref().map_or(Json::Null, Json::from)
+}
+
+impl Backend for RealBackend {
+    fn all_accounts(&self) -> ToolResult<Vec<MailAccount>> {
+        let mut request = Object::new();
+        request.insert("op", "accounts");
+        let data = self.call(request, JXA_TIMEOUT)?;
+        let items = data
+            .as_array()
+            .ok_or_else(|| Self::unexpected("accounts"))?;
+        Ok(items.iter().filter_map(MailAccount::from_json).collect())
+    }
+
+    fn account_info(&self, account: &Account) -> ToolResult<MailAccount> {
+        let data = self.call(Self::account_request("account_info", account), JXA_TIMEOUT)?;
+        MailAccount::from_json(&data).ok_or_else(|| Self::unexpected("account_info"))
+    }
+
+    fn mailboxes(&self, account: &Account) -> ToolResult<Vec<Mailbox>> {
+        let mut request = Self::account_request("mailboxes", account);
+        request.insert("depth", 2i64);
+        let data = self.call(request, JXA_TIMEOUT)?;
+        Mailbox::list_from_json(&data).ok_or_else(|| Self::unexpected("mailboxes"))
+    }
+
+    fn messages(&self, account: &Account, query: &MessageQuery) -> ToolResult<MessageList> {
+        let mut request = Self::account_request("messages", account);
+        request.insert("mailbox", optional_text(&query.mailbox));
+        request.insert("sinceDays", query.since_days);
+        request.insert("unreadOnly", Json::Bool(query.unread_only));
+        request.insert("query", optional_text(&query.query));
+        request.insert("field", query.field.as_str());
+        request.insert("limit", query.limit);
+        request.insert("maxHits", MAX_HITS);
+        let data = self.call(request, JXA_TIMEOUT)?;
+        MessageList::from_json(&data).ok_or_else(|| Self::unexpected("messages"))
+    }
+
+    fn read(
+        &self,
+        account: &Account,
+        mailbox: Option<&str>,
+        id: &MessageId,
+        max_chars: usize,
+    ) -> ToolResult<MessageBody> {
+        let mut request = Self::account_request("read", account);
+        request.insert("mailbox", mailbox.map_or(Json::Null, Json::from));
+        request.insert("id", Self::number_of(id)?);
+        request.insert("maxChars", i64::try_from(max_chars).unwrap_or(i64::MAX));
+        let data = self.call(request, JXA_TIMEOUT)?;
+        MessageBody::from_json(&data).ok_or_else(|| Self::unexpected("read"))
+    }
+
+    fn compose(&self, account: &Account, request: &ComposeRequest) -> ToolResult<Preview> {
+        let reply = match &request.reply {
+            Some(reply) => Json::object(vec![
+                ("mailbox", optional_text(&reply.mailbox)),
+                ("id", Json::Int(Self::number_of(&reply.id)?)),
+                ("all", Json::Bool(reply.all)),
+            ]),
+            None => Json::Null,
+        };
+        let mut payload = Self::account_request("compose", account);
+        payload.insert("mode", request.mode.as_str());
+        payload.insert("to", request.to.as_slice());
+        payload.insert("cc", request.cc.as_slice());
+        payload.insert("subject", request.subject.as_str());
+        payload.insert("body", request.body.as_str());
+        payload.insert("reply", reply);
+        payload.insert(
+            "seconds",
+            i64::try_from(APPROVAL_SECONDS).unwrap_or(i64::MAX),
+        );
+        payload.insert(
+            "maxRecipients",
+            i64::try_from(MAX_RECIPIENTS).unwrap_or(i64::MAX),
+        );
+        let data = self.call(payload, APPROVAL_SECONDS + 60)?;
+        Preview::from_json(&data).ok_or_else(|| Self::unexpected("compose"))
+    }
+
+    fn move_messages(&self, account: &Account, request: &MoveRequest) -> ToolResult<MoveReport> {
+        let ids = request
+            .ids
+            .iter()
+            .map(|id| Self::number_of(id).map(Json::Int))
+            .collect::<ToolResult<Vec<Json>>>()?;
+        let mut payload = Self::account_request("move", account);
+        payload.insert("accountLabel", account.label.as_str());
+        payload.insert("mailbox", optional_text(&request.mailbox));
+        payload.insert("ids", Json::Arr(ids));
+        payload.insert("target", request.target.as_str());
+        payload.insert("create", Json::Bool(request.create));
+        payload.insert(
+            "seconds",
+            i64::try_from(APPROVAL_SECONDS).unwrap_or(i64::MAX),
+        );
+        payload.insert(
+            "maxIds",
+            i64::try_from(MAX_MOVE_MESSAGES).unwrap_or(i64::MAX),
+        );
+        let data = self.call(payload, APPROVAL_SECONDS + MOVE_SECONDS)?;
+        MoveReport::from_json(&data).ok_or_else(|| Self::unexpected("move"))
+    }
+
+    fn approval_test(&self, seconds: u64) -> ToolResult<String> {
+        let mut request = Object::new();
+        request.insert("op", "approval_test");
+        request.insert("seconds", i64::try_from(seconds).unwrap_or(i64::MAX));
+        let data = self.call(request, seconds + 30)?;
+        match data.as_object().and_then(|object| object.get("decision")) {
+            Some(Json::Str(decision)) => Ok(decision.clone()),
+            _ => Err(Self::unexpected("approval_test")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::with_labels;
+    use crate::backend::{Mode, ReplySpec};
+    use crate::osascript::Finished;
+    use crate::testutil::{j, mid, TestResult};
+    use crate::text::text_of;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    #[cfg(target_os = "macos")]
+    use std::process::Command;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Script {
+        answers: VecDeque<Finished>,
+        payloads: Vec<String>,
+        timeouts: Vec<Duration>,
+        mail_checks: usize,
+    }
+
+    struct Scripted(Rc<RefCell<Script>>);
+
+    impl Host for Scripted {
+        fn ensure_running(&self, app: App) {
+            assert_eq!(app, App::Mail);
+            self.0.borrow_mut().mail_checks += 1;
+        }
+
+        fn run(&self, app: App, payload: &str, timeout: Duration) -> Finished {
+            assert_eq!(app, App::Mail);
+            let mut script = self.0.borrow_mut();
+            script.payloads.push(payload.to_string());
+            script.timeouts.push(timeout);
+            script.answers.pop_front().unwrap_or(Finished::NotStarted)
+        }
+    }
+
+    fn backend(answers: Vec<Finished>) -> (RealBackend, Rc<RefCell<Script>>) {
+        let script = Rc::new(RefCell::new(Script {
+            answers: answers.into(),
+            ..Script::default()
+        }));
+        (
+            RealBackend::new(Box::new(Scripted(Rc::clone(&script)))),
+            script,
+        )
+    }
+
+    fn ok(data: &str) -> Finished {
+        Finished::Done {
+            code: Some(0),
+            stdout: format!("{{\"ok\": true, \"data\": {data}}}\n"),
+            stderr: String::new(),
+        }
+    }
+
+    fn failed(error: &str) -> Finished {
+        Finished::Done {
+            code: Some(0),
+            stdout: format!("{{\"ok\": false, \"error\": \"{error}\"}}"),
+            stderr: String::new(),
+        }
+    }
+
+    fn raw(stdout: &str, stderr: &str) -> Finished {
+        Finished::Done {
+            code: Some(1),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    fn gmail() -> Account {
+        let entry = MailAccount {
+            id: "ACC-1".into(),
+            name: "Privat".into(),
+            kind: "imap".into(),
+            addresses: vec!["me@example.org".into()],
+        };
+        with_labels(vec![entry]).remove(0)
+    }
+
+    fn payload(
+        script: &Rc<RefCell<Script>>,
+        index: usize,
+    ) -> Result<Json, Box<dyn std::error::Error>> {
+        let text = script
+            .borrow()
+            .payloads
+            .get(index)
+            .cloned()
+            .ok_or("no payload")?;
+        Ok(j(&text)?)
+    }
+
+    fn request(mode: Mode, reply: Option<ReplySpec>) -> ComposeRequest {
+        ComposeRequest {
+            mode,
+            to: vec!["anna@example.org".into()],
+            cc: vec![],
+            subject: "Hallo".into(),
+            body: "Text".into(),
+            reply,
+        }
+    }
+
+    #[test]
+    fn accounts_are_decoded_and_mail_is_started_first() -> TestResult {
+        let (backend, script) = backend(vec![ok(
+            r#"[{"id": "A", "name": "N", "type": "imap", "addresses": ["a@example.org"]}, 5]"#,
+        )]);
+        let accounts = backend.all_accounts()?;
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].addresses, ["a@example.org"]);
+        assert_eq!(script.borrow().mail_checks, 1);
+        assert_eq!(script.borrow().timeouts, [Duration::from_secs(90)]);
+        Ok(())
+    }
+
+    #[test]
+    fn requests_carry_only_json_data_for_every_operation() -> TestResult {
+        let (backend, script) = backend(vec![
+            ok(r#"{"id": "A", "name": "N", "type": "imap", "addresses": []}"#),
+            ok(r#"[{"path": "INBOX", "unread": 3}]"#),
+            ok(r#"{"mailbox": "INBOX", "total": 0, "items": []}"#),
+            ok(
+                r#"{"mailbox": "INBOX", "subject": "S", "from": "F", "date": "d", "read": true, "to": [], "cc": [], "attachments": [], "bodyChars": 4, "body": "text"}"#,
+            ),
+        ]);
+        let account = gmail();
+        backend.account_info(&account)?;
+        backend.mailboxes(&account)?;
+        let query = MessageQuery {
+            mailbox: Some("INBOX".into()),
+            since_days: 30,
+            unread_only: true,
+            query: Some("a\"b".into()),
+            field: "both".into(),
+            limit: 5,
+        };
+        backend.messages(&account, &query)?;
+        backend.read(&account, None, &mid("7")?, 500)?;
+        let first = payload(&script, 0)?;
+        assert_eq!(first, j(r#"{"op": "account_info", "accountId": "ACC-1"}"#)?);
+        assert_eq!(
+            payload(&script, 1)?,
+            j(r#"{"op": "mailboxes", "accountId": "ACC-1", "depth": 2}"#)?
+        );
+        assert_eq!(
+            payload(&script, 2)?,
+            j(
+                r#"{"op": "messages", "accountId": "ACC-1", "mailbox": "INBOX", "sinceDays": 30,
+                "unreadOnly": true, "query": "a\"b", "field": "both", "limit": 5, "maxHits": 1500}"#
+            )?
+        );
+        assert_eq!(
+            payload(&script, 3)?,
+            j(
+                r#"{"op": "read", "accountId": "ACC-1", "mailbox": null, "id": 7, "maxChars": 500}"#
+            )?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_sends_the_request_with_the_approval_time_and_a_longer_deadline() -> TestResult {
+        let preview = r#"{"from": "F", "to": ["anna@example.org"], "cc": [], "subject": "Hallo", "body": "Text", "reply": null, "status": "drafted", "saved": true}"#;
+        let (backend, script) = backend(vec![ok(preview), ok(preview)]);
+        let account = gmail();
+        let reply = ReplySpec {
+            mailbox: Some("INBOX".into()),
+            id: mid("9")?,
+            all: true,
+        };
+        backend.compose(&account, &request(Mode::Draft, None))?;
+        let sent = backend.compose(&account, &request(Mode::Send, Some(reply)))?;
+        assert_eq!(sent.status, "drafted");
+        assert_eq!(
+            payload(&script, 0)?,
+            j(
+                r#"{"op": "compose", "accountId": "ACC-1", "mode": "draft", "to": ["anna@example.org"],
+                "cc": [], "subject": "Hallo", "body": "Text", "reply": null, "seconds": 75, "maxRecipients": 5}"#
+            )?
+        );
+        assert_eq!(
+            payload(&script, 1)?,
+            j(
+                r#"{"op": "compose", "accountId": "ACC-1", "mode": "send", "to": ["anna@example.org"],
+                "cc": [], "subject": "Hallo", "body": "Text",
+                "reply": {"mailbox": "INBOX", "id": 9, "all": true}, "seconds": 75, "maxRecipients": 5}"#
+            )?
+        );
+        assert_eq!(script.borrow().timeouts, [Duration::from_secs(135); 2]);
+        Ok(())
+    }
+
+    fn moving(ids: &[&str], create: bool) -> Result<MoveRequest, Box<dyn std::error::Error>> {
+        Ok(MoveRequest {
+            mailbox: Some("INBOX".into()),
+            ids: ids
+                .iter()
+                .map(|id| mid(id))
+                .collect::<Result<Vec<_>, _>>()?,
+            target: "Werbung".into(),
+            create,
+        })
+    }
+
+    #[test]
+    fn a_move_sends_numeric_ids_the_label_the_limits_and_a_longer_deadline() -> TestResult {
+        let (backend, script) = backend(vec![
+            ok(
+                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 2, "kept": 1}"#,
+            ),
+            ok(r#"{"status": "declined"}"#),
+            ok(r#"{"status": "timeout"}"#),
+        ]);
+        let account = gmail();
+        assert_eq!(
+            backend.move_messages(&account, &moving(&["7", "8"], true)?)?,
+            MoveReport::Moved {
+                source: "INBOX".into(),
+                target: "Werbung".into(),
+                created: true,
+                count: 2,
+                kept: 1
+            }
+        );
+        assert_eq!(
+            backend.move_messages(&account, &moving(&["7"], false)?)?,
+            MoveReport::Declined
+        );
+        assert_eq!(
+            backend.move_messages(&account, &moving(&["7"], false)?)?,
+            MoveReport::Timeout
+        );
+        assert_eq!(
+            payload(&script, 0)?,
+            j(
+                r#"{"op": "move", "accountId": "ACC-1", "accountLabel": "Privat", "mailbox": "INBOX",
+                "ids": [7, 8], "target": "Werbung", "create": true, "seconds": 75, "maxIds": 30}"#
+            )?
+        );
+        assert_eq!(script.borrow().mail_checks, 3);
+        assert_eq!(script.borrow().timeouts, [Duration::from_secs(195); 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_move_refuses_ids_without_a_number_and_answers_of_the_wrong_shape() -> TestResult {
+        let (backend, script) = backend(vec![
+            ok(r#"{"status": "sent"}"#),
+            failed("target_missing"),
+            Finished::TimedOut,
+            raw("", ""),
+        ]);
+        let account = gmail();
+        assert!(backend
+            .move_messages(&account, &moving(&["18c3f"], false)?)
+            .is_err());
+        assert!(script.borrow().payloads.is_empty());
+        let request = moving(&["7"], false)?;
+        let next = || backend.move_messages(&account, &request);
+        assert!(matches!(next(), Err(ToolError::Msg(m)) if m.starts_with("Mail error:")));
+        assert!(
+            matches!(next(), Err(ToolError::Msg(m)) if m.contains("create_mailbox=true") && m.contains("NOTHING was moved"))
+        );
+        assert!(
+            matches!(next(), Err(ToolError::Msg(m)) if m.contains("Some messages may have been moved"))
+        );
+        assert!(matches!(next(), Err(ToolError::Msg(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn the_approval_test_skips_the_mail_start_and_reads_the_decision() -> TestResult {
+        let (backend, script) = backend(vec![ok(r#"{"decision": "declined"}"#), ok("{}")]);
+        assert_eq!(backend.approval_test(20)?, "declined");
+        assert_eq!(script.borrow().mail_checks, 0);
+        assert_eq!(script.borrow().timeouts, [Duration::from_secs(50)]);
+        assert!(backend.approval_test(20).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn script_errors_are_mapped_for_the_model() {
+        let (backend, _) = backend(vec![
+            failed("account_not_found"),
+            failed("mailbox_not_found"),
+            failed("-1743 not authorized"),
+        ]);
+        let account = gmail();
+        assert_eq!(
+            backend.mailboxes(&account),
+            Err(ToolError::msg(
+                "The account no longer exists in Mail. Ask the user to run `avery mail setup` again."
+            ))
+        );
+        assert!(
+            matches!(backend.mailboxes(&account), Err(ToolError::Msg(m)) if m.starts_with("Mailbox not found."))
+        );
+        assert!(
+            matches!(backend.mailboxes(&account), Err(ToolError::Msg(m)) if m.starts_with("macOS blocks access to Mail."))
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_uncertain_only_for_compose() {
+        let (backend, _) = backend(vec![Finished::TimedOut, Finished::TimedOut]);
+        let account = gmail();
+        let query = MessageQuery {
+            mailbox: None,
+            since_days: 3,
+            unread_only: false,
+            query: None,
+            field: "both".into(),
+            limit: 5,
+        };
+        assert!(
+            matches!(backend.messages(&account, &query), Err(ToolError::Msg(m)) if m.contains("Retry with a smaller range"))
+        );
+        assert!(matches!(
+            backend.compose(&account, &request(Mode::Send, None)),
+            Err(ToolError::Uncertain(m)) if m.contains("may or may not")
+        ));
+    }
+
+    #[test]
+    fn empty_or_garbled_answers_are_uncertain_for_compose_and_plain_errors_otherwise() {
+        let (backend, _) = backend(vec![
+            raw("", ""),
+            raw("", "execution error: boom"),
+            raw("not json", ""),
+            raw("[]", ""),
+            Finished::NotStarted,
+            Finished::TooLarge,
+            raw("   \n", ""),
+        ]);
+        let account = gmail();
+        let compose = request(Mode::Send, None);
+        assert!(matches!(
+            backend.compose(&account, &compose),
+            Err(ToolError::Uncertain(_))
+        ));
+        assert!(
+            matches!(backend.compose(&account, &compose), Err(ToolError::Uncertain(m)) if m.contains("boom"))
+        );
+        assert!(matches!(
+            backend.compose(&account, &compose),
+            Err(ToolError::Uncertain(_))
+        ));
+        assert!(matches!(
+            backend.compose(&account, &compose),
+            Err(ToolError::Uncertain(_))
+        ));
+        assert!(matches!(
+            backend.compose(&account, &compose),
+            Err(ToolError::Uncertain(_))
+        ));
+        assert!(matches!(
+            backend.compose(&account, &compose),
+            Err(ToolError::Uncertain(_))
+        ));
+        assert!(
+            matches!(backend.mailboxes(&account), Err(ToolError::Msg(m)) if m.starts_with("Mail error:"))
+        );
+    }
+
+    #[test]
+    fn an_answer_of_the_wrong_shape_is_an_error_not_a_guess() {
+        let (backend, _) = backend(vec![ok("{}"), ok("[1, 2]"), ok("null")]);
+        let account = gmail();
+        assert!(backend.mailboxes(&account).is_err());
+        assert!(backend.account_info(&account).is_err());
+        assert!(backend.all_accounts().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    const MOCK_MAIL: &str = r#"
+var LOG = {dialog: null, sendCalled: false, deleted: 0};
+var DECISION = 'Senden';
+var SCENARIO = null;
+var CURRENT = null;
+function MOCKAPP() {
+  return {
+    includeStandardAdditions: false,
+    activate: function () {},
+    delay: function () {},
+    displayDialog: function (text, opts) {
+      LOG.dialog = text;
+      if (SCENARIO.afterDialog) { SCENARIO.afterDialog(); }
+      if (DECISION === 'Senden') { return {buttonReturned: 'Senden', gaveUp: false}; }
+      throw new Error('User canceled. (-128)');
+    }
+  };
+}
+function collection(list) {
+  return {
+    push: function (x) { list.push(x); },
+    address: function () { return list.map(function (r) { return r.address; }); },
+    name: function () { return list.map(function () { return ''; }); }
+  };
+}
+function makeMsg(o) {
+  var stored = o.content || '', to = o.to || [], cc = [];
+  var msg = {
+    sender: function () { return o.sender; },
+    subject: function () { return o.subject; },
+    toRecipients: collection(to),
+    ccRecipients: collection(cc),
+    send: function () { LOG.sendCalled = true; if (SCENARIO.sendThrows) { throw new Error(SCENARIO.sendThrows); } },
+    save: function () {}
+  };
+  Object.defineProperty(msg, 'content', {
+    get: function () { return function () { return stored; }; },
+    set: function (v) { stored = v; }
+  });
+  CURRENT = {to: to};
+  return msg;
+}
+var ACC = {id: function () { return 'ACC-1'; }, emailAddresses: function () { return ['me@example.org']; }, fullName: function () { return 'Me'; }};
+var fakeMail = {
+  accounts: function () { return [ACC]; },
+  outgoingMessages: {push: function () {}},
+  OutgoingMessage: function (p) { return makeMsg({sender: p.sender, subject: p.subject, content: p.content}); },
+  ToRecipient: function (p) { return {address: p.address}; },
+  CcRecipient: function (p) { return {address: p.address}; },
+  reply: function () {
+    var to = SCENARIO.replyRecipients.map(function (a) { return {address: a}; });
+    return makeMsg({sender: 'Me <me@example.org>', subject: SCENARIO.replySubject, content: 'quoted', to: to});
+  },
+  'delete': function () { LOG.deleted++; }
+};
+function mail() { return fakeMail; }
+function original() {
+  return {
+    subject: function () { return SCENARIO.origSubject; },
+    sender: function () { return SCENARIO.origFrom; },
+    dateReceived: function () { return new Date(1700000000000); },
+    readStatus: function () { return true; },
+    toRecipients: collection([]),
+    ccRecipients: collection([]),
+    mailAttachments: {name: function () { return []; }, fileSize: function () { return []; }},
+    content: function () { return 'Hallo'; },
+    mailbox: function () {
+      return {account: function () { return {id: function () { return SCENARIO.owner || 'ACC-1'; }}; }};
+    }
+  };
+}
+function findMailbox() { return {path: 'INBOX', ref: {messages: {byId: original}}}; }
+function run(argv) {
+  var input = JSON.parse(argv[0]), out;
+  SCENARIO = input.scenario;
+  DECISION = input.decision || 'Senden';
+  if (SCENARIO.mutate) { SCENARIO.afterDialog = function () { CURRENT.to.push({address: 'extra@evil.example'}); }; }
+  try { out = {ok: true, data: dispatch(input.req)}; }
+  catch (e) { out = {ok: false, error: String((e && e.message) || e)}; }
+  out.log = LOG;
+  return JSON.stringify(out);
+}
+"#;
+
+    #[cfg(target_os = "macos")]
+    struct Probe {
+        ok: bool,
+        error: String,
+        dialog: Option<String>,
+        sent: bool,
+        deleted: i64,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn compose_probe(
+        scenario: &str,
+        req: &str,
+        decision: &str,
+    ) -> Result<Probe, Box<dyn std::error::Error>> {
+        let script = format!(
+            "{}\n{MOCK_MAIL}",
+            crate::osascript::mail_script()
+                .replace("Application.currentApplication()", "MOCKAPP()")
+        );
+        let payload =
+            format!(r#"{{"scenario": {scenario}, "req": {req}, "decision": "{decision}"}}"#);
+        let output = Command::new(crate::osascript::OSASCRIPT)
+            .args(["-l", "JavaScript", "-e", &script, &payload])
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        let answer = j(String::from_utf8_lossy(&output.stdout).trim())?;
+        let object = answer.as_object().ok_or("no object")?;
+        let log = object
+            .get("log")
+            .and_then(Json::as_object)
+            .ok_or("no log")?;
+        Ok(Probe {
+            ok: object.get("ok") == Some(&Json::Bool(true)),
+            error: text_of(object.get("error")),
+            dialog: log.get("dialog").and_then(Json::as_str).map(str::to_string),
+            sent: log.get("sendCalled") == Some(&Json::Bool(true)),
+            deleted: match log.get("deleted") {
+                Some(Json::Int(count)) => *count,
+                _ => -1,
+            },
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    const NO_REPLY: &str =
+        r#"{"replyRecipients": [], "replySubject": "", "origSubject": "", "origFrom": ""}"#;
+
+    #[cfg(target_os = "macos")]
+    fn new_mail(to: &str, mode: &str) -> String {
+        format!(
+            r#"{{"op": "compose", "accountId": "ACC-1", "mode": "{mode}", "to": {to}, "cc": [], "subject": "Hi", "body": "Text", "reply": null, "seconds": 75, "maxRecipients": 5}}"#
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn reply_mail(all: bool) -> String {
+        format!(
+            r#"{{"op": "compose", "accountId": "ACC-1", "mode": "send", "to": [], "cc": [], "subject": "", "body": "Text", "reply": {{"mailbox": null, "id": 5, "all": {all}}}, "seconds": 75, "maxRecipients": 5}}"#
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_clean_send_shows_the_dialog_and_sends_after_the_click() -> TestResult {
+        let probe = compose_probe(
+            NO_REPLY,
+            &new_mail(r#"["anna@example.org"]"#, "send"),
+            "Senden",
+        )?;
+        assert!(
+            probe.ok && probe.sent && probe.deleted == 0,
+            "{}",
+            probe.error
+        );
+        let dialog = probe.dialog.ok_or("no dialog")?;
+        assert!(dialog.contains("An:         anna@example.org"));
+        assert!(dialog.contains("Betreff:    Hi"));
+        let declined = compose_probe(
+            NO_REPLY,
+            &new_mail(r#"["anna@example.org"]"#, "send"),
+            "Abbrechen",
+        )?;
+        assert!(declined.ok && !declined.sent && declined.deleted == 1);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mail_script_refuses_every_operation_of_the_setup_dialogs() -> TestResult {
+        for op in [
+            "ask_buttons",
+            "choose_list",
+            "notify",
+            "ask_text",
+            "open_url",
+            "approve_send",
+            "approve_change",
+            "calendars",
+            "events",
+            "change",
+        ] {
+            let request = format!(
+                r#"{{"op": "{op}", "accountId": "ACC-1", "title": "T", "text": "x", "buttons": ["OK"], "items": ["a"], "seconds": 5}}"#
+            );
+            let probe = compose_probe(NO_REPLY, &request, "Senden")?;
+            assert!(!probe.ok, "{op}");
+            assert_eq!(probe.error, "unknown_op", "{op}");
+            assert!(
+                probe.dialog.is_none() && !probe.sent && probe.deleted == 0,
+                "{op}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reply_to_many_recipients_is_refused_before_any_dialog() -> TestResult {
+        let many: Vec<String> = (0..40).map(|i| format!("\"p{i}@example.org\"")).collect();
+        let scenario = format!(
+            r#"{{"replyRecipients": [{}], "replySubject": "Re: Hi", "origSubject": "Hi", "origFrom": "Boss <boss@example.org>"}}"#,
+            many.join(",")
+        );
+        let probe = compose_probe(&scenario, &reply_mail(true), "Senden")?;
+        assert!(
+            !probe.ok && probe.error == "too_many_recipients",
+            "{}",
+            probe.error
+        );
+        assert!(probe.dialog.is_none() && !probe.sent && probe.deleted == 1);
+        let few = scenario.replace(&many.join(","), "\"a@example.org\", \"b@example.org\"");
+        let allowed = compose_probe(&few, &reply_mail(true), "Senden")?;
+        assert!(allowed.ok && allowed.sent, "{}", allowed.error);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recipients_are_shown_completely_or_refused() -> TestResult {
+        let long = format!(
+            "ceo@company.example.{}.{}.attacker.example",
+            "a".repeat(63),
+            "b".repeat(63)
+        );
+        let probe = compose_probe(
+            NO_REPLY,
+            &new_mail(&format!("[\"{long}\"]"), "send"),
+            "Senden",
+        )?;
+        assert!(probe.ok, "{}", probe.error);
+        let dialog = probe.dialog.ok_or("no dialog")?;
+        assert!(dialog.contains(&long) && dialog.contains("attacker.example"));
+        let too_long = format!("a@{}.example", "b".repeat(250));
+        for bad in [
+            too_long.as_str(),
+            "\u{e4}@example.org",
+            "a@b.example\\u000bx@evil.example",
+            "a b@example.org",
+            "a@b",
+        ] {
+            let probe = compose_probe(
+                NO_REPLY,
+                &new_mail(&format!("[\"{bad}\"]"), "send"),
+                "Senden",
+            )?;
+            assert!(
+                !probe.ok && probe.error == "recipient_invalid",
+                "{bad:?}: {}",
+                probe.error
+            );
+            assert!(probe.dialog.is_none() && !probe.sent && probe.deleted == 1);
+        }
+        let draft = compose_probe(
+            NO_REPLY,
+            &new_mail(&format!("[\"{too_long}\"]"), "draft"),
+            "Senden",
+        )?;
+        assert!(draft.ok && !draft.sent && draft.dialog.is_none());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hostile_reply_subject_cannot_forge_dialog_lines() -> TestResult {
+        let subject = "Re: Rechnung\\u000b\\u000bAn:         ceo@company.example\\u000bBetreff:    Danke\\u0085--------------------------------\\u000cAlles in Ordnung \\udb40\\udc41\\ufe0f\\u202e";
+        let scenario = format!(
+            r#"{{"replyRecipients": ["x@example.org"], "replySubject": "{subject}", "origSubject": "{subject}", "origFrom": "Evil <evil@example.org>"}}"#
+        );
+        let probe = compose_probe(&scenario, &reply_mail(false), "Senden")?;
+        assert!(probe.ok, "{}", probe.error);
+        let dialog = probe.dialog.ok_or("no dialog")?;
+        assert!(dialog.contains("Betreff:    Re: Rechnung An: ceo@company.example Betreff: Danke"));
+        assert_eq!(
+            dialog
+                .lines()
+                .filter(|line| line.starts_with("An:"))
+                .count(),
+            1
+        );
+        for forbidden in [
+            '\u{b}',
+            '\u{c}',
+            '\u{85}',
+            '\u{202e}',
+            '\u{fe0f}',
+            '\u{e0041}',
+        ] {
+            assert!(!dialog.contains(forbidden), "{:x}", u32::from(forbidden));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    const MARK: &str = "\u{2502} \u{200e}";
+
+    #[cfg(target_os = "macos")]
+    const RULE: &str = "--------------------------------";
+
+    #[cfg(target_os = "macos")]
+    fn mail_with_body(body: &str) -> String {
+        let body = crate::json::dumps(&Json::from(body), true);
+        format!(
+            r#"{{"op": "compose", "accountId": "ACC-1", "mode": "send", "to": ["anna@example.org"], "cc": [], "subject": "Hi", "body": {body}, "reply": null, "seconds": 75, "maxRecipients": 5}}"#
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn body_dialog(body: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let probe = compose_probe(NO_REPLY, &mail_with_body(body), "Senden")?;
+        assert!(probe.ok && probe.sent, "{}", probe.error);
+        Ok(probe.dialog.ok_or("no dialog")?)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dialog_frame(middle: &[&str]) -> Vec<String> {
+        [
+            "Pr\u{fc}fe Empf\u{e4}nger und Text. Nur senden, wenn du das gerade selbst veranlasst hast.",
+            "",
+            "Von:        Me <me@example.org>",
+            "An:         anna@example.org",
+            "Betreff:    Hi",
+            "",
+            RULE,
+        ]
+        .iter()
+        .chain(middle.iter())
+        .map(|line| line.to_string())
+        .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unmarked(dialog: &str) -> Vec<&str> {
+        dialog
+            .lines()
+            .filter(|line| !line.starts_with(MARK))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn marked(dialog: &str) -> Vec<&str> {
+        dialog
+            .lines()
+            .filter(|line| line.starts_with(MARK))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_text_of_a_mail_is_shown_behind_a_mark_on_every_line() -> TestResult {
+        let dialog = body_dialog("Hallo Anna,\n\nbis morgen.\r\nBen")?;
+        assert_eq!(unmarked(&dialog), dialog_frame(&[RULE]));
+        assert_eq!(
+            marked(&dialog),
+            [
+                format!("{MARK}Hallo Anna,"),
+                MARK.to_string(),
+                format!("{MARK}bis morgen."),
+                format!("{MARK}Ben")
+            ]
+        );
+        let forged = [
+            "Betreff:    Danke",
+            "An:         ceo@company.example",
+            RULE,
+            "\n\n\n",
+            "Von:        Anna",
+            "\u{2502} schon markiert",
+        ]
+        .join("\n");
+        let dialog = body_dialog(&forged)?;
+        assert_eq!(unmarked(&dialog), dialog_frame(&[RULE]));
+        assert_eq!(
+            marked(&dialog),
+            [
+                format!("{MARK}Betreff:    Danke"),
+                format!("{MARK}An:         ceo@company.example"),
+                format!("{MARK}{RULE}"),
+                MARK.to_string(),
+                format!("{MARK}Von:        Anna"),
+                format!("{MARK}\u{2502} schon markiert")
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_long_mail_text_is_cut_with_a_note_and_an_empty_one_says_so() -> TestResult {
+        let many: Vec<String> = (0..300).map(|n| format!("z{n:03}")).collect();
+        let dialog = body_dialog(&many.join("\n"))?;
+        assert!(dialog.lines().count() <= 70, "{}", dialog.lines().count());
+        assert_eq!(
+            unmarked(&dialog),
+            dialog_frame(&["[\u{2026} 240 weitere Zeilen]", RULE])
+        );
+        let shown = marked(&dialog);
+        assert_eq!(shown.len(), 60);
+        assert_eq!(shown[59], format!("{MARK}z059"));
+        let endless = body_dialog(&"x".repeat(5000))?;
+        assert_eq!(
+            marked(&endless),
+            [format!("{MARK}{}\u{2026}", "x".repeat(3200))]
+        );
+        assert!(endless.contains("\n[\u{2026} 1800 weitere Zeichen]\n"));
+        let empty = body_dialog("\n\r\n \t \n")?;
+        assert_eq!(unmarked(&empty), dialog_frame(&["(leer)", RULE]));
+        assert!(marked(&empty).is_empty());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hidden_and_direction_characters_of_a_mail_text_are_removed() -> TestResult {
+        let dialog = body_dialog(
+            "a\u{202e}b\u{85}c\u{2028}d\u{2029}e\u{2066}f\u{200b}g\u{b}h\u{c}i\u{feff}j\u{e0041}k",
+        )?;
+        assert_eq!(marked(&dialog), [format!("{MARK}ab c d efghijk")]);
+        for forbidden in [
+            '\u{202e}',
+            '\u{85}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{2066}',
+            '\u{200b}',
+            '\u{b}',
+            '\u{c}',
+            '\u{feff}',
+            '\u{e0041}',
+        ] {
+            assert!(!dialog.contains(forbidden), "{:x}", u32::from(forbidden));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failure_after_the_click_is_marked_as_unknown_state() -> TestResult {
+        let scenario = r#"{"sendThrows": "Connection is invalid. (-609)", "replyRecipients": [], "replySubject": "", "origSubject": "", "origFrom": ""}"#;
+        let probe = compose_probe(
+            scenario,
+            &new_mail(r#"["anna@example.org"]"#, "send"),
+            "Senden",
+        )?;
+        assert!(!probe.ok && probe.sent);
+        assert!(
+            probe.error.starts_with("send_state_unknown:"),
+            "{}",
+            probe.error
+        );
+        assert_eq!(probe.deleted, 0);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recipients_changed_after_the_click_abort_the_send() -> TestResult {
+        let scenario = r#"{"mutate": true, "replyRecipients": [], "replySubject": "", "origSubject": "", "origFrom": ""}"#;
+        let probe = compose_probe(
+            scenario,
+            &new_mail(r#"["anna@example.org"]"#, "send"),
+            "Senden",
+        )?;
+        assert!(
+            !probe.ok && probe.error == "content_mismatch",
+            "{}",
+            probe.error
+        );
+        assert!(!probe.sent && probe.deleted == 1);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_message_of_another_account_is_neither_read_nor_answered() -> TestResult {
+        let foreign = r#"{"owner": "ACC-2", "replyRecipients": ["x@example.org"], "replySubject": "Re: Hi", "origSubject": "Hi", "origFrom": "Boss <boss@example.org>"}"#;
+        let probe = compose_probe(foreign, &reply_mail(false), "Senden")?;
+        assert!(!probe.ok && probe.error == "message_not_in_account" && !probe.sent);
+        let read =
+            r#"{"op": "read", "accountId": "ACC-1", "mailbox": null, "id": 5, "maxChars": 100}"#;
+        let probe = compose_probe(foreign, read, "Senden")?;
+        assert!(!probe.ok && probe.error == "message_not_in_account");
+        let own = foreign.replace("ACC-2", "ACC-1");
+        let probe = compose_probe(&own, read, "Senden")?;
+        assert!(probe.ok, "{}", probe.error);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn probe(body: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let script = format!("{}\n{body}", crate::osascript::mail_script());
+        let output = Command::new(crate::osascript::OSASCRIPT)
+            .args(["-l", "JavaScript", "-e", &script])
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dialog_fields_are_one_line_and_cut_in_the_script() -> TestResult {
+        let answer = probe(
+            r"
+function run(argv) {
+  return JSON.stringify([flat('a\nb\r\nc\td', 50), flat('x'.repeat(300), 20).length, flat(null, 5),
+                         flatList(['a@b.c', 'd\n@e.f']), squash(' a b\n c\u00a0d '), squash(null)]);
+}
+",
+        )?;
+        assert_eq!(
+            j(&answer)?,
+            j(r#"["a b c d", 20, "", "a@b.c, d @e.f", "abcd", ""]"#)?
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn whose_clauses_are_built_the_way_mail_accepts_them() -> TestResult {
+        let answer = probe(
+            r"
+var calls = [];
+var mock = {
+  whose: function (arg) {
+    calls.push(arg);
+    if (arg && arg._and && arg._and.length < 2) { throw new Error('Whose clause _and needs two elements.'); }
+    return {id: function () { return []; }};
+  }
+};
+function findMailbox() { return {ref: {messages: mock}, path: 'INBOX'}; }
+function run(argv) {
+  var cases = [{sinceDays: 30}, {sinceDays: 30, unreadOnly: true}, {sinceDays: 30, query: 'x', field: 'both'},
+               {sinceDays: 30, unreadOnly: true, query: 'x', field: 'subject'}], out = [];
+  for (var i = 0; i < cases.length; i++) {
+    calls = [];
+    var req = cases[i]; req.maxHits = 1500; req.limit = 5; req.mailbox = null;
+    try {
+      queryMessages({}, req);
+      out.push(calls.map(function (c) { return c._and ? '_and:' + c._and.length : Object.keys(c)[0]; }).join(','));
+    } catch (e) { out.push('ERROR ' + String(e.message)); }
+  }
+  return JSON.stringify(out);
+}
+",
+        )?;
+        assert_eq!(
+            j(&answer)?,
+            j(r#"["dateReceived", "_and:2", "_and:2", "_and:3"]"#)?
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    const MOCK_MOVE: &str = r#"
+var LOG = {dialog: null, dialogs: 0, moves: [], created: []};
+var DECISION = 'Verschieben';
+var SCENARIO = null;
+var WORLD = null;
+var ACC = null;
+function MOCKAPP() {
+  return {
+    includeStandardAdditions: false,
+    activate: function () {},
+    delay: function () {},
+    displayDialog: function (text) {
+      LOG.dialog = text;
+      LOG.dialogs++;
+      if (SCENARIO.afterDialog === 'change') { WORLD.inbox.items[0].subject = 'Changed after the click'; }
+      if (DECISION === 'Verschieben') { return {buttonReturned: 'Verschieben', gaveUp: false}; }
+      if (DECISION === 'timeout') { return {gaveUp: true}; }
+      throw new Error('User canceled. (-128)');
+    }
+  };
+}
+function named(list) {
+  list.name = function () { return list.map(function (c) { return c.title; }); };
+  list.byName = function (title) {
+    var hit = null;
+    list.forEach(function (c) { if (c.title === title) { hit = c; } });
+    if (!hit) { throw new Error("Can't get mailbox " + title); }
+    return hit;
+  };
+  return list;
+}
+function box(title) {
+  var b = {title: title, items: [], mailboxes: named([])};
+  b.messages = {byId: function (id) { return message(b, id); }};
+  return b;
+}
+function message(b, want) {
+  var found = null;
+  b.items.forEach(function (m) { if (m.id === want) { found = m; } });
+  function need(read) {
+    if (!found) { throw new Error("Can't get message id " + want + " of mailbox " + b.title); }
+    return read();
+  }
+  return {
+    box: b, want: want, found: found,
+    id: function () { return need(function () { return found.id; }); },
+    subject: function () { return need(function () { return found.subject; }); },
+    sender: function () { return need(function () { return found.sender; }); },
+    dateReceived: function () { return need(function () { return new Date(found.ts * 1000); }); },
+    mailbox: function () {
+      return {account: function () { return {id: function () { return SCENARIO.owner || 'ACC-1'; }}; }};
+    }
+  };
+}
+function build() {
+  var inbox = box('INBOX'), archive = box('Archiv'), gmail = box('[Gmail]'), all = box('All Mail'), top = named([]);
+  inbox.items = SCENARIO.messages.map(function (m) { return {id: m.id, subject: m.subject, sender: m.sender, ts: m.ts}; });
+  gmail.mailboxes.push(all);
+  top.push(inbox); top.push(archive); top.push(gmail);
+  top.push = function (b) {
+    if (SCENARIO.createThrows) { throw new Error('Mail got an error: cannot create'); }
+    LOG.created.push(b.title);
+    if (SCENARIO.createLost) { return top.length; }
+    if (SCENARIO.reorder) { Array.prototype.unshift.call(top, b); } else { Array.prototype.push.call(top, b); }
+    return top.length;
+  };
+  return {inbox: inbox, archive: archive, all: all, top: top};
+}
+var fakeMail = {
+  accounts: function () { return [ACC]; },
+  Mailbox: function (p) { return box(p.name); },
+  move: function (m, opts) {
+    if (SCENARIO.moveThrowsAt === LOG.moves.length + 1) { throw new Error('Mail got an error: boom'); }
+    LOG.moves.push(m.want + '>' + opts.to.title);
+    if (SCENARIO.stay || !m.found) { return; }
+    if (!SCENARIO.label) { m.box.items = m.box.items.filter(function (x) { return x.id !== m.want; }); }
+    opts.to.items.push(m.found);
+  }
+};
+function mail() { return fakeMail; }
+function idsOf(b) { return b.items.map(function (m) { return m.id; }); }
+function run(argv) {
+  var input = JSON.parse(argv[0]), out;
+  SCENARIO = input.scenario;
+  DECISION = input.decision;
+  WORLD = build();
+  ACC = {id: function () { return 'ACC-1'; }, mailboxes: WORLD.top, serverName: function () { return SCENARIO.server || 'imap.example.org'; }};
+  try { out = {ok: true, data: dispatch(input.req)}; }
+  catch (e) { out = {ok: false, error: String((e && e.message) || e)}; }
+  out.log = LOG;
+  out.after = {inbox: idsOf(WORLD.inbox), archive: idsOf(WORLD.archive), all: idsOf(WORLD.all)};
+  return JSON.stringify(out);
+}
+"#;
+
+    #[cfg(target_os = "macos")]
+    const MOVE_MARK: &str = "\u{2502} \u{200e}";
+
+    #[cfg(target_os = "macos")]
+    const MESSAGES: &str = r#"[
+        {"id": 5, "subject": "Newsletter November", "sender": "Shop <news@shop.example>", "ts": 1700000000},
+        {"id": 6, "subject": "Rechnung Oktober", "sender": "Stadtwerke <rechnung@stadtwerke.example>", "ts": 1700003600},
+        {"id": 7, "subject": "Angebot f\u00fcr dich", "sender": "Markt <angebot@markt.example>", "ts": 1700007200}]"#;
+
+    #[cfg(target_os = "macos")]
+    fn scenario(extra: &str) -> String {
+        if extra.is_empty() {
+            format!(r#"{{"messages": {MESSAGES}}}"#)
+        } else {
+            format!(r#"{{"messages": {MESSAGES}, {extra}}}"#)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn move_req(ids: &str, target: &str, create: bool) -> String {
+        format!(
+            r#"{{"op": "move", "accountId": "ACC-1", "accountLabel": "Privat", "mailbox": null, "ids": {ids}, "target": "{target}", "create": {create}, "seconds": 75, "maxIds": 30}}"#
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn move_probe(
+        scenario: &str,
+        req: &str,
+        decision: &str,
+    ) -> Result<Json, Box<dyn std::error::Error>> {
+        let script = format!(
+            "{}\n{MOCK_MOVE}",
+            crate::osascript::mail_script()
+                .replace("Application.currentApplication()", "MOCKAPP()")
+        );
+        let payload =
+            format!(r#"{{"scenario": {scenario}, "req": {req}, "decision": "{decision}"}}"#);
+        let output = Command::new(crate::osascript::OSASCRIPT)
+            .args(["-l", "JavaScript", "-e", &script, &payload])
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        Ok(j(String::from_utf8_lossy(&output.stdout).trim())?)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn at<'a>(answer: &'a Json, path: &[&str]) -> Option<&'a Json> {
+        let mut current = answer;
+        for key in path {
+            current = current.as_object()?.get(key)?;
+        }
+        Some(current)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn numbers(value: Option<&Json>) -> Vec<i64> {
+        match value {
+            Some(Json::Arr(items)) => items
+                .iter()
+                .filter_map(|item| match item {
+                    Json::Int(number) => Some(*number),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn untouched(answer: &Json) -> bool {
+        crate::account::string_list(at(answer, &["log", "moves"])).is_empty()
+            && crate::account::string_list(at(answer, &["log", "created"])).is_empty()
+            && numbers(at(answer, &["after", "inbox"])) == [5, 6, 7]
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_approved_move_lists_every_message_behind_the_mark_and_moves_them_in_order() -> TestResult
+    {
+        let answer = move_probe(
+            &scenario(""),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(at(&answer, &["ok"]), Some(&Json::Bool(true)), "{answer:?}");
+        assert_eq!(
+            at(&answer, &["data"]),
+            Some(&j(
+                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 0}"#
+            )?)
+        );
+        assert_eq!(
+            crate::account::string_list(at(&answer, &["log", "moves"])),
+            ["5>Archiv", "6>Archiv", "7>Archiv"]
+        );
+        assert!(crate::account::string_list(at(&answer, &["log", "created"])).is_empty());
+        assert!(numbers(at(&answer, &["after", "inbox"])).is_empty());
+        assert_eq!(numbers(at(&answer, &["after", "archive"])), [5, 6, 7]);
+        let dialog = text_of(at(&answer, &["log", "dialog"]));
+        let lines: Vec<&str> = dialog.lines().collect();
+        assert!(lines[0].starts_with("Goose m\u{f6}chte 3 E-Mails verschieben."));
+        let row = |label: &str| {
+            lines
+                .iter()
+                .find(|line| line.starts_with(label))
+                .copied()
+                .unwrap_or_default()
+        };
+        assert!(row("Konto:").ends_with("Privat") && row("Von:").ends_with("INBOX"));
+        assert!(row("Nach:").ends_with("Archiv") && !row("Nach:").contains("neu"));
+        let items: Vec<&&str> = lines
+            .iter()
+            .filter(|line| line.starts_with(MOVE_MARK))
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert!(
+            items[0].contains("Shop <news@shop.example>")
+                && items[0].contains("Newsletter November")
+        );
+        assert!(items[2].contains("Angebot f\u{fc}r dich"));
+        let nested = move_probe(
+            &scenario(""),
+            &move_req("[6]", "[Gmail]/All Mail", false),
+            "Verschieben",
+        )?;
+        assert_eq!(numbers(at(&nested, &["after", "all"])), [6]);
+        assert_eq!(
+            at(&nested, &["data", "target"]),
+            Some(&Json::from("[Gmail]/All Mail"))
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_target_is_created_only_after_the_click_and_the_dialog_says_so() -> TestResult {
+        let request = move_req("[5]", "Werbung", true);
+        let approved = move_probe(&scenario(""), &request, "Verschieben")?;
+        assert_eq!(
+            at(&approved, &["data"]),
+            Some(&j(
+                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 1, "kept": 0}"#
+            )?),
+            "{approved:?}"
+        );
+        assert_eq!(
+            crate::account::string_list(at(&approved, &["log", "created"])),
+            ["Werbung"]
+        );
+        assert_eq!(
+            crate::account::string_list(at(&approved, &["log", "moves"])),
+            ["5>Werbung"]
+        );
+        let dialog = text_of(at(&approved, &["log", "dialog"]));
+        let nach = dialog
+            .lines()
+            .find(|line| line.starts_with("Nach:"))
+            .ok_or("no target row")?;
+        assert!(nach.contains("Werbung") && nach.contains("(wird neu angelegt)"));
+        for (decision, status) in [("Abbrechen", "declined"), ("timeout", "timeout")] {
+            let answer = move_probe(&scenario(""), &request, decision)?;
+            assert_eq!(
+                at(&answer, &["data"]),
+                Some(&j(&format!(r#"{{"status": "{status}"}}"#))?),
+                "{decision}"
+            );
+            assert!(untouched(&answer), "{decision}");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn everything_that_can_be_checked_is_refused_before_any_dialog() -> TestResult {
+        let many = (1..=31)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let in_nope =
+            move_req("[5]", "Archiv", false).replace(r#""mailbox": null"#, r#""mailbox": "Nope""#);
+        let cases = [
+            (
+                scenario(""),
+                move_req("[99]", "Archiv", false),
+                "message_not_found",
+            ),
+            (
+                scenario(""),
+                move_req("[5, 99]", "Archiv", false),
+                "message_not_found",
+            ),
+            (
+                scenario(""),
+                move_req("[1.5]", "Archiv", false),
+                "message_not_found",
+            ),
+            (
+                scenario(""),
+                move_req(r#"["5"]"#, "Archiv", false),
+                "message_not_found",
+            ),
+            (
+                scenario(r#""owner": "ACC-2""#),
+                move_req("[5]", "Archiv", false),
+                "message_not_in_account",
+            ),
+            (
+                scenario(""),
+                move_req("[5]", "Nope", false),
+                "target_missing",
+            ),
+            (
+                scenario(""),
+                move_req("[5]", "inbox", false),
+                "same_mailbox",
+            ),
+            (
+                scenario(""),
+                move_req("[5]", "a/b", true),
+                "invalid_mailbox_name",
+            ),
+            (
+                scenario(""),
+                move_req("[5]", "x:y", true),
+                "invalid_mailbox_name",
+            ),
+            (
+                scenario(""),
+                move_req("[5]", ".dot", true),
+                "invalid_mailbox_name",
+            ),
+            (
+                scenario(""),
+                move_req("[]", "Archiv", false),
+                "too_many_messages",
+            ),
+            (
+                scenario(""),
+                move_req(&format!("[{many}]"), "Archiv", false),
+                "too_many_messages",
+            ),
+            (scenario(""), in_nope, "mailbox_not_found"),
+        ];
+        for (world, request, error) in &cases {
+            let answer = move_probe(world, request, "Verschieben")?;
+            assert_eq!(at(&answer, &["ok"]), Some(&Json::Bool(false)), "{error}");
+            assert_eq!(text_of(at(&answer, &["error"])), *error);
+            assert_eq!(
+                at(&answer, &["log", "dialogs"]),
+                Some(&Json::Int(0)),
+                "{error}"
+            );
+            assert!(untouched(&answer), "{error}");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hostile_senders_and_subjects_cannot_forge_dialog_lines() -> TestResult {
+        let hostile = r#"{"messages": [{"id": 5, "subject": "Hi\nNach:       Papierkorb\u202e\u200b  Abbrechen",
+            "sender": "Evil\r\nVon:        INBOX <e@evil.example>", "ts": 1700000000}]}"#;
+        let answer = move_probe(hostile, &move_req("[5]", "Archiv", false), "Abbrechen")?;
+        let dialog = text_of(at(&answer, &["log", "dialog"]));
+        let lines: Vec<&str> = dialog.lines().collect();
+        for label in ["Nach:", "Von:", "Konto:"] {
+            assert_eq!(
+                lines.iter().filter(|line| line.starts_with(label)).count(),
+                1,
+                "{label}"
+            );
+        }
+        let forged: Vec<&&str> = lines
+            .iter()
+            .filter(|line| line.contains("Papierkorb") || line.contains("evil.example"))
+            .collect();
+        assert_eq!(forged.len(), 1);
+        assert!(forged[0].starts_with(MOVE_MARK));
+        assert!(!dialog.contains('\u{202e}') && !dialog.contains('\u{200b}'));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_message_that_changed_while_the_dialog_was_open_is_not_moved() -> TestResult {
+        let answer = move_probe(
+            &scenario(r#""afterDialog": "change""#),
+            &move_req("[5, 6]", "Werbung", true),
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&answer, &["error"])), "messages_changed");
+        assert_eq!(at(&answer, &["log", "dialogs"]), Some(&Json::Int(1)));
+        assert!(crate::account::string_list(at(&answer, &["log", "moves"])).is_empty());
+        assert!(crate::account::string_list(at(&answer, &["log", "created"])).is_empty());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failures_after_the_click_say_what_was_done() -> TestResult {
+        let moves = |answer: &Json| crate::account::string_list(at(answer, &["log", "moves"]));
+        let create = move_req("[5]", "Werbung", true);
+        for extra in [r#""createThrows": true"#, r#""createLost": true"#] {
+            let answer = move_probe(&scenario(extra), &create, "Verschieben")?;
+            assert!(
+                text_of(at(&answer, &["error"])).starts_with("mailbox_create_failed"),
+                "{extra}"
+            );
+            assert!(moves(&answer).is_empty(), "{extra}");
+        }
+        let existing = move_req("[5, 6, 7]", "Archiv", false);
+        let answer = move_probe(&scenario(r#""moveThrowsAt": 2"#), &existing, "Verschieben")?;
+        assert!(text_of(at(&answer, &["error"])).starts_with("move_state_unknown: 1 of 3"));
+        assert_eq!(moves(&answer), ["5>Archiv"]);
+        let answer = move_probe(&scenario(r#""stay": true"#), &existing, "Verschieben")?;
+        assert_eq!(text_of(at(&answer, &["error"])), "move_incomplete:3");
+        assert_eq!(moves(&answer).len(), 3);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn in_gmail_the_label_is_added_the_mail_stays_and_the_dialog_says_so() -> TestResult {
+        let gmail = scenario(r#""server": "imap.gmail.com", "label": true"#);
+        let answer = move_probe(
+            &gmail,
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(
+            at(&answer, &["data"]),
+            Some(&j(
+                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 3}"#
+            )?),
+            "{answer:?}"
+        );
+        assert_eq!(numbers(at(&answer, &["after", "inbox"])), [5, 6, 7]);
+        assert_eq!(numbers(at(&answer, &["after", "archive"])), [5, 6, 7]);
+        let dialog = text_of(at(&answer, &["log", "dialog"]));
+        let hint = dialog
+            .lines()
+            .find(|line| line.starts_with("Hinweis:"))
+            .ok_or("no hint")?;
+        assert!(hint.contains("Gmail setzt nur das Etikett"));
+        let plain = move_probe(
+            &scenario(""),
+            &move_req("[5]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert!(!text_of(at(&plain, &["log", "dialog"])).contains("Hinweis:"));
+        let lost = move_probe(
+            &scenario(r#""server": "imap.gmail.com", "stay": true"#),
+            &move_req("[5]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&lost, &["error"])), "move_incomplete:1");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_new_mailbox_is_addressed_by_name_even_when_mail_reorders_the_list() -> TestResult {
+        let answer = move_probe(
+            &scenario(r#""reorder": true"#),
+            &move_req("[5, 6]", "Werbung", true),
+            "Verschieben",
+        )?;
+        assert_eq!(at(&answer, &["ok"]), Some(&Json::Bool(true)), "{answer:?}");
+        assert_eq!(
+            crate::account::string_list(at(&answer, &["log", "moves"])),
+            ["5>Werbung", "6>Werbung"]
+        );
+        assert_eq!(numbers(at(&answer, &["after", "inbox"])), [7]);
+        Ok(())
+    }
+}

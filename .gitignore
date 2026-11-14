@@ -3,5 +3,4 @@
 *.bak-*
 config.json
 sendlog.jsonl
-dist/
-avery-mail/target/
+target/

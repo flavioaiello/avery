@@ -1,0 +1,23 @@
+user:
+  always_allow:
+  - mail__list_accounts
+  - mail__list_mailboxes
+  - mail__list_messages
+  - mail__search_messages
+  - mail__read_message
+  - mail__create_draft
+  - mail__list_calendars
+  - mail__list_events
+  - mail__get_event
+  - todo__todo_write
+  ask_before:
+  - mail__send_message
+  - mail__move_messages
+  - mail__create_event
+  - mail__update_event
+  - mail__delete_event
+  never_allow: []
+smart_approve:
+  always_allow: []
+  ask_before: []
+  never_allow: []
