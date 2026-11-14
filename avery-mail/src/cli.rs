@@ -12,7 +12,7 @@ use crate::changelog::{self, ChangeEntry};
 use crate::civil::DateTime;
 use crate::config::{UpdateError, WriteSettings};
 use crate::console::{
-    failed, level_word, Area, Choice, Console, GrantChange, Recap, Screen, PRIVATE_ONLY,
+    failed, level_word, Area, Choice, Console, GrantChange, Recap, Screen, Terminal, PRIVATE_ONLY,
     RESTART_GOOSE,
 };
 use crate::context::Context;
@@ -596,16 +596,16 @@ fn undo_text(entry: &ChangeEntry) -> &'static str {
     }
 }
 
-fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
+fn cmd_undo(ctx: &Context, terminal: &mut Terminal, wanted: Option<&str>) -> u8 {
     let view = match changelog::read_entries(&ctx.settings, CHANGES_LINES) {
         Ok(view) => view,
-        Err(error) => return failed(console, &error),
+        Err(error) => return terminal.failed(&error),
     };
     let open = changelog::undoable(&view.entries);
     let first = open.len().saturating_sub(CHANGES_SHOWN);
     let candidates: Vec<&ChangeEntry> = open[first..].iter().rev().copied().collect();
     if candidates.is_empty() {
-        console.say("Nichts zum Rueckgaengigmachen.");
+        terminal.say("Nichts zum Rueckgaengigmachen.");
         return 0;
     }
     let entry = match wanted {
@@ -617,7 +617,7 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
             match hits.as_slice() {
                 [only] => **only,
                 _ => {
-                    console.say(
+                    terminal.say(
                         "Keine eindeutige Aenderung mit dieser Kennung. Siehe: avery mail changes",
                     );
                     return 1;
@@ -626,7 +626,7 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         }
         None => {
             for (index, candidate) in candidates.iter().enumerate() {
-                console.say(&format!(
+                terminal.say(&format!(
                     "{}) {}  {:<7} {} | {}",
                     index + 1,
                     localtime::minute(candidate.ts),
@@ -635,15 +635,15 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
                     title_of(candidate)
                 ));
             }
-            let Some(answer) = console.ask(
+            let Some(answer) = terminal.ask(
                 "Nummer der Aenderung, die rueckgaengig gemacht werden soll (leer = Abbruch): ",
             ) else {
-                console.say("Ungueltige Eingabe.");
+                terminal.say("Ungueltige Eingabe.");
                 return 1;
             };
             let answer = answer.trim();
             if answer.is_empty() {
-                console.say("Unveraendert.");
+                terminal.say("Unveraendert.");
                 return 0;
             }
             match answer
@@ -654,14 +654,14 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
             {
                 Some(found) => *found,
                 None => {
-                    console.say("Ungueltige Eingabe.");
+                    terminal.say("Ungueltige Eingabe.");
                     return 1;
                 }
             }
         }
     };
     let Some(change) = inverse(entry) else {
-        console.say("Der Eintrag enthaelt nicht genug Angaben fuer das Rueckgaengigmachen.");
+        terminal.say("Der Eintrag enthaelt nicht genug Angaben fuer das Rueckgaengigmachen.");
         return 1;
     };
     let writable = ctx
@@ -669,20 +669,20 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         .rights()
         .is_ok_and(|rights| rights.calendar_level(&entry.calendar_id) == Some(Level::Write));
     if !writable {
-        console.say(
+        terminal.say(
             "Dieser Kalender ist nicht mehr zum Schreiben freigegeben. Zuerst: avery mail setup",
         );
         return 1;
     }
-    console.say(&format!(
+    terminal.say(&format!(
         "\n{} | {} | {}: {}",
         one_line_str(&entry.calendar, 60),
         entry.action.as_str(),
         title_of(entry),
         undo_text(entry)
     ));
-    if !console.confirm("Rueckgaengig machen? Ein Freigabedialog erscheint.") {
-        console.say("Abgebrochen.");
+    if !terminal.confirm("Rueckgaengig machen? Ein Freigabedialog erscheint.") {
+        terminal.say("Abgebrochen.");
         return 1;
     }
     let calendar = Calendar {
@@ -691,18 +691,18 @@ fn cmd_undo(ctx: &Context, console: &mut Console, wanted: Option<&str>) -> u8 {
         label: entry.calendar.clone(),
     };
     match perform(ctx, &calendar, &change, Origin::Human, Some(&entry.id)) {
-        Err(error) => failed(console, &error),
+        Err(error) => terminal.failed(&error),
         Ok(performed) => match performed.decision {
             Decision::Applied => {
-                console.say("Rueckgaengig gemacht.");
+                terminal.say("Rueckgaengig gemacht.");
                 0
             }
             Decision::Declined => {
-                console.say("Im Dialog abgelehnt, nichts geaendert.");
+                terminal.say("Im Dialog abgelehnt, nichts geaendert.");
                 1
             }
             Decision::TimedOut => {
-                console.say("Keine Antwort im Dialog, nichts geaendert.");
+                terminal.say("Keine Antwort im Dialog, nichts geaendert.");
                 1
             }
         },
@@ -979,21 +979,21 @@ fn self_message(
 
 fn selftest_write_mail(
     ctx: &Context,
-    console: &mut Console,
+    terminal: &mut Terminal,
     settings: &WriteSettings,
     failures: &mut Vec<String>,
 ) {
-    console.say(
+    terminal.say(
         "1) Freigabedialog. Gleich erscheint ein Testdialog, klicke 'Weiter' oder 'Abbrechen'.",
     );
-    console.say("   Es wird nichts gesendet.");
+    terminal.say("   Es wird nichts gesendet.");
     match ctx.backend.approval_test(60) {
         Err(error) => {
             failures.push("dialog".into());
-            console.say(&format!("FAIL  Freigabedialog: {error}"));
+            terminal.say(&format!("FAIL  Freigabedialog: {error}"));
         }
         Ok(decision) if decision == "send" || decision == "declined" => {
-            console.say(&format!(
+            terminal.say(&format!(
                 "PASS  Freigabedialog funktioniert (Antwort: {})",
                 if decision == "send" {
                     "Weiter"
@@ -1004,7 +1004,7 @@ fn selftest_write_mail(
         }
         Ok(_) => {
             failures.push("dialog".into());
-            console.say("FAIL  Freigabedialog: keine Antwort innerhalb von 60 s");
+            terminal.say("FAIL  Freigabedialog: keine Antwort innerhalb von 60 s");
         }
     }
     for account in &settings.accounts {
@@ -1012,19 +1012,19 @@ fn selftest_write_mail(
             Ok(info) => info.addresses,
             Err(error) => {
                 failures.push("account".into());
-                console.say(&format!("FAIL  {}: {error}", account.label));
+                terminal.say(&format!("FAIL  {}: {error}", account.label));
                 continue;
             }
         };
         let Some(own) = addresses.first().cloned() else {
             failures.push("account".into());
-            console.say(&format!(
+            terminal.say(&format!(
                 "FAIL  {}: Mail kennt keine Absenderadresse fuer dieses Konto",
                 account.label
             ));
             continue;
         };
-        console.say(&format!(
+        terminal.say(&format!(
             "\n2) Entwurf an dich selbst ({}). Ein Mail-Fenster oeffnet sich, nichts wird gesendet.",
             account.label
         ));
@@ -1036,7 +1036,7 @@ fn selftest_write_mail(
             None,
         );
         match write_tools::perform_draft(ctx, account, &draft, Origin::Human) {
-            Ok(preview) => console.say(&format!(
+            Ok(preview) => terminal.say(&format!(
                 "PASS  Entwurf angelegt, Absender: {}{}",
                 one_line_str(&preview.from, 100),
                 if preview.saved.unwrap_or(true) {
@@ -1047,10 +1047,10 @@ fn selftest_write_mail(
             )),
             Err(error) => {
                 failures.push("draft".into());
-                console.say(&format!("FAIL  Entwurf: {error}"));
+                terminal.say(&format!("FAIL  Entwurf: {error}"));
             }
         }
-        if console.confirm("\n3) Test-Mail an dich selbst senden? Der Freigabedialog erscheint.") {
+        if terminal.confirm("\n3) Test-Mail an dich selbst senden? Der Freigabedialog erscheint.") {
             let send = self_message(
                 Mode::Send,
                 vec![own.clone()],
@@ -1061,23 +1061,23 @@ fn selftest_write_mail(
             match write_tools::perform_send(ctx, account, &send, Origin::Human) {
                 Err(error) => {
                     failures.push("send".into());
-                    console.say(&format!("FAIL  Senden: {error}"));
+                    terminal.say(&format!("FAIL  Senden: {error}"));
                 }
                 Ok((preview, outcome)) => {
                     if outcome == Outcome::Sent {
-                        console.say(&format!(
+                        terminal.say(&format!(
                             "PASS  Mail an {own} an Mail uebergeben (Posteingang und Gesendet pruefen)"
                         ));
                     } else {
-                        console.say(&format!("INFO  Nicht gesendet ({})", preview.status));
+                        terminal.say(&format!("INFO  Nicht gesendet ({})", preview.status));
                     }
                 }
             }
         }
-        if console
+        if terminal
             .confirm("\n4) Antworten testen: Entwurf und Antwort auf die Test-Mail an dich selbst?")
         {
-            console.say(
+            terminal.say(
                 "   Suche die Test-Mail 'Scout Selbsttest - Mail' im Posteingang (bis zu 60 s) ...",
             );
             let rounds = if ctx.settings.fake { 1 } else { 12 };
@@ -1102,7 +1102,7 @@ fn selftest_write_mail(
                 }
             }
             let Some(id) = found else {
-                console.say("INFO  Test-Mail nicht gefunden, Schritt uebersprungen (zuerst Schritt 3 mit 'j' ausfuehren)");
+                terminal.say("INFO  Test-Mail nicht gefunden, Schritt uebersprungen (zuerst Schritt 3 mit 'j' ausfuehren)");
                 continue;
             };
             for (mode, body) in [
@@ -1124,7 +1124,7 @@ fn selftest_write_mail(
                     }),
                 );
                 if mode == Mode::Send {
-                    console.say("   Jetzt erscheint der Freigabedialog fuer die Antwort (geht an dich selbst).");
+                    terminal.say("   Jetzt erscheint der Freigabedialog fuer die Antwort (geht an dich selbst).");
                 }
                 let result = match mode {
                     Mode::Draft => {
@@ -1136,10 +1136,10 @@ fn selftest_write_mail(
                 match result {
                     Err(error) => {
                         failures.push(format!("reply-{}", mode.as_str()));
-                        console.say(&format!("FAIL  Antwort ({}): {error}", mode.as_str()));
+                        terminal.say(&format!("FAIL  Antwort ({}): {error}", mode.as_str()));
                     }
                     Ok(preview) => {
-                        console.say(&format!(
+                        terminal.say(&format!(
                             "PASS  Antwort ({}): Status {}, An: {}",
                             if mode == Mode::Draft {
                                 "Entwurf"
@@ -1158,11 +1158,11 @@ fn selftest_write_mail(
             }
         }
     }
-    console.say("\nTest-Entwurf und Test-Mail kannst du loeschen.");
+    terminal.say("\nTest-Entwurf und Test-Mail kannst du loeschen.");
 }
 
 fn change_line(
-    console: &mut Console,
+    terminal: &mut Terminal,
     failures: &mut Vec<String>,
     title: &str,
     outcome: ToolResult<ChangeResult>,
@@ -1170,22 +1170,22 @@ fn change_line(
     match outcome {
         Err(error) => {
             failures.push(title.to_string());
-            console.say(&format!("FAIL  {title}: {error}"));
+            terminal.say(&format!("FAIL  {title}: {error}"));
             None
         }
         Ok(performed) => match performed.decision {
             Decision::Applied => {
-                console.say(&format!("PASS  {title}"));
+                terminal.say(&format!("PASS  {title}"));
                 Some(performed)
             }
             Decision::Declined => {
-                console.say(&format!(
+                terminal.say(&format!(
                     "INFO  {title}: im Dialog abgelehnt, nichts geaendert"
                 ));
                 None
             }
             Decision::TimedOut => {
-                console.say(&format!(
+                terminal.say(&format!(
                     "INFO  {title}: keine Antwort im Dialog, nichts geaendert"
                 ));
                 None
@@ -1196,7 +1196,7 @@ fn change_line(
 
 fn selftest_write_calendar(
     ctx: &Context,
-    console: &mut Console,
+    terminal: &mut Terminal,
     calendar: &Calendar,
     failures: &mut Vec<String>,
 ) {
@@ -1206,19 +1206,19 @@ fn selftest_write_calendar(
         .and_then(|day| DateTime::new(day, 180))
     else {
         failures.push("clock".to_string());
-        console.say("FAIL  Datum nicht lesbar");
+        terminal.say("FAIL  Datum nicht lesbar");
         return;
     };
     let Some(end) = start.add_minutes(15) else {
         failures.push("clock".to_string());
-        console.say("FAIL  Datum ausserhalb des Bereichs");
+        terminal.say("FAIL  Datum ausserhalb des Bereichs");
         return;
     };
-    console.say(&format!(
+    terminal.say(&format!(
         "\nKalender-Test fuer {}. Es wird ein Test-Termin angelegt, geaendert und wieder geloescht, jeweils mit Freigabedialog.",
         one_line_str(&calendar.label, 80)
     ));
-    if !console.confirm("Test-Termin anlegen? Der Freigabedialog erscheint.") {
+    if !terminal.confirm("Test-Termin anlegen? Der Freigabedialog erscheint.") {
         return;
     }
     let created_fields = EventFields {
@@ -1239,16 +1239,16 @@ fn selftest_write_calendar(
         origin,
         None,
     );
-    let Some(created) = change_line(console, failures, "Termin angelegt", created) else {
+    let Some(created) = change_line(terminal, failures, "Termin angelegt", created) else {
         return;
     };
     let Some(uid) = created.uid.clone() else {
         failures.push("uid".to_string());
-        console.say("FAIL  Calendar nannte keine Termin-ID");
+        terminal.say("FAIL  Calendar nannte keine Termin-ID");
         return;
     };
     let mut current = created.after.clone().unwrap_or(created_fields);
-    if console.confirm("Test-Termin aendern (Titel)? Der Freigabedialog erscheint.") {
+    if terminal.confirm("Test-Termin aendern (Titel)? Der Freigabedialog erscheint.") {
         let after = EventFields {
             summary: "Scout Selbsttest - Termin geaendert (bitte loeschen)".to_string(),
             ..current.clone()
@@ -1259,7 +1259,7 @@ fn selftest_write_calendar(
             after: after.clone(),
         };
         if let Some(changed) = change_line(
-            console,
+            terminal,
             failures,
             "Termin geaendert",
             perform(ctx, calendar, &change, origin, None),
@@ -1267,13 +1267,13 @@ fn selftest_write_calendar(
             current = changed.after.clone().unwrap_or(after);
         }
     }
-    if console.confirm("Test-Termin loeschen? Der Freigabedialog erscheint.") {
+    if terminal.confirm("Test-Termin loeschen? Der Freigabedialog erscheint.") {
         let change = Change::Delete {
             uid,
             before: current,
         };
         if change_line(
-            console,
+            terminal,
             failures,
             "Termin geloescht",
             perform(ctx, calendar, &change, origin, None),
@@ -1283,26 +1283,26 @@ fn selftest_write_calendar(
             return;
         }
     }
-    console.say("INFO  Der Test-Termin bleibt in Calendar bestehen: bitte dort loeschen.");
+    terminal.say("INFO  Der Test-Termin bleibt in Calendar bestehen: bitte dort loeschen.");
 }
 
 fn selftest_write_all_day(
     ctx: &Context,
-    console: &mut Console,
+    terminal: &mut Terminal,
     calendar: &Calendar,
     failures: &mut Vec<String>,
 ) {
     let Some(first) = local_today().and_then(|today| today.add_days(3)) else {
         failures.push("clock".to_string());
-        console.say("FAIL  Datum nicht lesbar");
+        terminal.say("FAIL  Datum nicht lesbar");
         return;
     };
     let Some(next) = first.add_days(1) else {
         failures.push("clock".to_string());
-        console.say("FAIL  Datum ausserhalb des Bereichs");
+        terminal.say("FAIL  Datum ausserhalb des Bereichs");
         return;
     };
-    if !console.confirm(
+    if !terminal.confirm(
         "Ganztaegigen Test-Termin anlegen? Das prueft, wie Calendar das Ende von Ganztagsterminen speichert.",
     ) {
         return;
@@ -1325,12 +1325,12 @@ fn selftest_write_all_day(
         Origin::Human,
         None,
     );
-    let Some(created) = change_line(console, failures, "Ganztagstermin angelegt", created) else {
+    let Some(created) = change_line(terminal, failures, "Ganztagstermin angelegt", created) else {
         return;
     };
     let Some(uid) = created.uid.clone() else {
         failures.push("uid".to_string());
-        console.say("FAIL  Calendar nannte keine Termin-ID");
+        terminal.say("FAIL  Calendar nannte keine Termin-ID");
         return;
     };
     let stored = ctx
@@ -1341,28 +1341,28 @@ fn selftest_write_all_day(
         Ok(stored)
             if stored.all_day && stored.start == fields.start && stored.end == fields.end =>
         {
-            console.say("PASS  Ganztags-Ende wie erwartet (00:00 des Folgetags)");
+            terminal.say("PASS  Ganztags-Ende wie erwartet (00:00 des Folgetags)");
         }
         Ok(stored) => {
             failures.push("all-day".to_string());
-            console.say(&format!(
+            terminal.say(&format!(
                 "FAIL  Ganztagstermin gespeichert als {} bis {} (ganztaegig: {}), erwartet {} bis {}",
                 stored.start, stored.end, stored.all_day, fields.start, fields.end
             ));
         }
         Err(error) => {
             failures.push("all-day".to_string());
-            console.say(&format!("FAIL  Ganztagstermin nicht lesbar: {error}"));
+            terminal.say(&format!("FAIL  Ganztagstermin nicht lesbar: {error}"));
         }
     }
     let current = created.after.clone().unwrap_or(fields);
-    if console.confirm("Ganztaegigen Test-Termin loeschen? Der Freigabedialog erscheint.") {
+    if terminal.confirm("Ganztaegigen Test-Termin loeschen? Der Freigabedialog erscheint.") {
         let change = Change::Delete {
             uid,
             before: current,
         };
         if change_line(
-            console,
+            terminal,
             failures,
             "Ganztagstermin geloescht",
             perform(ctx, calendar, &change, Origin::Human, None),
@@ -1372,10 +1372,10 @@ fn selftest_write_all_day(
             return;
         }
     }
-    console.say("INFO  Der Ganztags-Test-Termin bleibt bestehen: bitte im Kalender loeschen.");
+    terminal.say("INFO  Der Ganztags-Test-Termin bleibt bestehen: bitte im Kalender loeschen.");
 }
 
-fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
+fn cmd_selftest_write(ctx: &Context, terminal: &mut Terminal) -> u8 {
     let settings = (|| {
         let mail = ctx.settings.write_settings()?;
         let calendars = ctx.settings.calendar_write_settings()?;
@@ -1384,29 +1384,29 @@ fn cmd_selftest_write(ctx: &Context, console: &mut Console) -> u8 {
     let (mail, calendars) = match settings {
         Ok(settings) => settings,
         Err(error) => {
-            console.say(&format!("FAIL  config: {error}"));
+            terminal.say(&format!("FAIL  config: {error}"));
             return 1;
         }
     };
     if mail.accounts.is_empty() && calendars.calendars.is_empty() {
-        console.say(WRITE_OFF);
-        console.say(CALENDAR_WRITE_OFF);
+        terminal.say(WRITE_OFF);
+        terminal.say(CALENDAR_WRITE_OFF);
         return 1;
     }
     let mut failures: Vec<String> = Vec::new();
     if !mail.accounts.is_empty() {
-        selftest_write_mail(ctx, console, &mail, &mut failures);
+        selftest_write_mail(ctx, terminal, &mail, &mut failures);
     }
     for calendar in &calendars.calendars {
-        selftest_write_calendar(ctx, console, calendar, &mut failures);
-        selftest_write_all_day(ctx, console, calendar, &mut failures);
+        selftest_write_calendar(ctx, terminal, calendar, &mut failures);
+        selftest_write_all_day(ctx, terminal, calendar, &mut failures);
     }
-    console.say("");
+    terminal.say("");
     if !failures.is_empty() {
-        console.say(&format!("{} Pruefung(en) fehlgeschlagen.", failures.len()));
+        terminal.say(&format!("{} Pruefung(en) fehlgeschlagen.", failures.len()));
         return 1;
     }
-    console.say("Fertig.");
+    terminal.say("Fertig.");
     0
 }
 
@@ -1480,6 +1480,17 @@ pub(crate) fn dispatch(
     if command == "serve" {
         return u8::from(server::serve(ctx, input, out).is_err());
     }
+    match command {
+        "undo" => {
+            return cmd_undo(
+                ctx,
+                &mut Terminal::new(input, out),
+                args.get(1).map(String::as_str),
+            )
+        }
+        "selftest-write" => return cmd_selftest_write(ctx, &mut Terminal::new(input, out)),
+        _ => {}
+    }
     let mut console = Console::terminal(input, out);
     match command {
         "accounts" => cmd_accounts(ctx, &mut console),
@@ -1490,8 +1501,6 @@ pub(crate) fn dispatch(
         "selftest" => cmd_selftest(ctx, &mut console),
         "sendlog" => cmd_sendlog(ctx, &mut console),
         "changes" => cmd_changes(ctx, &mut console),
-        "undo" => cmd_undo(ctx, &mut console, args.get(1).map(String::as_str)),
-        "selftest-write" => cmd_selftest_write(ctx, &mut console),
         "status" => cmd_status(ctx, &mut console),
         unknown => {
             console.say(&format!("Unbekannter Befehl: {unknown}"));

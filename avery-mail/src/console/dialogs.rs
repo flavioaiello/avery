@@ -9,7 +9,6 @@ use crate::rights::{Level, MAX_NAME};
 use crate::text::{char_len, clean_str, one_line_str};
 
 const SLACK: u64 = 60;
-const ANSWER_SECONDS: u64 = 600;
 const BUTTON_SECONDS: u64 = 300;
 const LIST_SECONDS: u64 = 300;
 const SIGNAL_SECONDS: u64 = 20;
@@ -20,7 +19,6 @@ const MAX_SIGNAL: usize = 240;
 const MAX_LABEL: usize = 32;
 const MAX_ITEMS: usize = 500;
 const MAX_ITEM: usize = 140;
-const MAX_ANSWER: usize = 512;
 const MAX_NOTE_LINE: usize = 400;
 const MAX_NOTE_LINES: usize = 200;
 const MAX_NOTE_CHARS: usize = 1500;
@@ -28,7 +26,6 @@ const MAX_RECAP_LINES: usize = 30;
 const SETUP_COMMAND: &str = "avery mail setup";
 const CUT: &str = "[...]";
 const TIMED_OUT: &str = "Keine Antwort im Dialog.";
-const TOO_LONG: &str = "Die Eingabe war zu lang.";
 const MALFORMED: &str = "Der Dialog hat eine unerwartete Antwort geliefert.";
 const BAD_REQUEST: &str = "Der Dialog konnte nicht angezeigt werden (interner Fehler).";
 const READ_PROMPT: &str = "Welche davon soll Avery lesen?";
@@ -148,13 +145,6 @@ impl Talk {
     }
 }
 
-pub(crate) struct Text<'a> {
-    pub(crate) text: &'a str,
-    pub(crate) default: &'a str,
-    pub(crate) max: usize,
-    pub(crate) ok: &'a str,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Icon {
     Note,
@@ -182,17 +172,14 @@ pub(crate) struct List<'a> {
     pub(crate) text: &'a str,
     pub(crate) items: &'a [String],
     pub(crate) defaults: &'a [usize],
-    pub(crate) multiple: bool,
     pub(crate) ok: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Parsed {
-    Text(String),
     Button(usize),
     List(Vec<usize>),
     Done,
-    TooLong,
     Cancelled,
     TimedOut,
 }
@@ -208,17 +195,15 @@ fn parse_reply(data: &Json) -> Option<Parsed> {
     let object = data.as_object()?;
     let result = object.get("result")?.as_str()?;
     let keys: &[&str] = match result {
-        "text" => &["result", "text"],
         "button" => &["result", "index"],
         "list" => &["result", "selected"],
-        "cancel" | "timeout" | "too_long" | "ok" => &["result"],
+        "cancel" | "timeout" | "ok" => &["result"],
         _ => return None,
     };
     if !object.keys().all(|key| keys.contains(&key)) || object.len() != keys.len() {
         return None;
     }
     match result {
-        "text" => Some(Parsed::Text(object.get("text")?.as_str()?.to_string())),
         "button" => Some(Parsed::Button(index_of(object.get("index")?)?)),
         "list" => {
             let selected: Option<Vec<usize>> = object
@@ -231,7 +216,6 @@ fn parse_reply(data: &Json) -> Option<Parsed> {
         }
         "cancel" => Some(Parsed::Cancelled),
         "timeout" => Some(Parsed::TimedOut),
-        "too_long" => Some(Parsed::TooLong),
         _ => Some(Parsed::Done),
     }
 }
@@ -429,28 +413,6 @@ impl<'a> Dialogs<'a> {
         stop
     }
 
-    pub(crate) fn ask_text(&mut self, ask: &Text) -> Result<String, Stop> {
-        let max = ask.max.clamp(1, MAX_ANSWER);
-        let text = self.framed(ask.text).text;
-        let mut request = self.base("ask_text", &text);
-        request.insert("default", one_line_str(ask.default, max));
-        request.insert("max", max);
-        request.insert("ok", label(ask.ok));
-        request.insert("cancel", CANCEL);
-        request.insert("seconds", seconds(ANSWER_SECONDS));
-        match self.asked(request, ANSWER_SECONDS + SLACK)? {
-            Parsed::Text(answer) => {
-                let answer = clean_str(&answer, None);
-                if answer.chars().count() > max {
-                    return Err(self.fail(TOO_LONG));
-                }
-                Ok(answer)
-            }
-            Parsed::TooLong => Err(self.fail(TOO_LONG)),
-            _ => Err(self.fail(MALFORMED)),
-        }
-    }
-
     pub(crate) fn ask_buttons(&mut self, ask: &Buttons) -> Result<usize, Stop> {
         let valid = (1..=3).contains(&ask.buttons.len())
             && ask.default < ask.buttons.len()
@@ -496,15 +458,11 @@ impl<'a> Dialogs<'a> {
             .collect();
         defaults.sort_unstable();
         defaults.dedup();
-        if !ask.multiple {
-            defaults.truncate(1);
-        }
         request.insert("items", items);
         request.insert(
             "defaults",
             Json::Arr(defaults.into_iter().map(Json::from).collect()),
         );
-        request.insert("multiple", ask.multiple);
         request.insert("ok", label(ask.ok));
         request.insert("cancel", CANCEL);
         request.insert("seconds", seconds(LIST_SECONDS));
@@ -513,8 +471,7 @@ impl<'a> Dialogs<'a> {
                 if selected
                     .windows(2)
                     .all(|pair| matches!(pair, [low, high] if low < high))
-                    && selected.iter().all(|index| *index < ask.items.len())
-                    && (ask.multiple || selected.len() <= 1) =>
+                    && selected.iter().all(|index| *index < ask.items.len()) =>
             {
                 Ok(selected)
             }
@@ -530,20 +487,6 @@ impl<'a> Dialogs<'a> {
 
     pub(crate) fn say(&mut self, text: &str) {
         self.talk.notes.push(text);
-    }
-
-    pub(crate) fn ask(&mut self, prompt: &str) -> Option<String> {
-        self.ask_text(&Text {
-            text: prompt,
-            default: "",
-            max: MAX_ANSWER,
-            ok: "OK",
-        })
-        .ok()
-    }
-
-    pub(crate) fn confirm(&mut self, question: &str) -> bool {
-        self.confirmed(question)
     }
 
     pub(crate) fn confirm_grants(&mut self, recap: &Recap) -> bool {
@@ -601,7 +544,6 @@ impl<'a> Dialogs<'a> {
                 text: READ_PROMPT,
                 items: &titles,
                 defaults: &current,
-                multiple: true,
                 ok: NEXT,
             })
             .map_err(|_| 1u8)?;
@@ -631,7 +573,6 @@ impl<'a> Dialogs<'a> {
                 text: WRITE_PROMPT,
                 items: &items,
                 defaults: &preset,
-                multiple: true,
                 ok: NEXT,
             })
             .map_err(|_| 1u8)?;
@@ -663,73 +604,18 @@ mod tests {
             .collect()
     }
 
-    fn text(prompt: &str) -> Text<'_> {
-        Text {
-            text: prompt,
-            default: "",
-            max: 40,
-            ok: "Weiter",
-        }
-    }
-
     fn chars(value: &str) -> usize {
         value.chars().count()
     }
 
-    #[test]
-    fn a_text_question_is_a_strict_bounded_request_and_returns_the_answer() -> TestResult {
-        let script = Script::new().then("ask_text", Reply::text("abc-123"));
-        let mut talk = Talk::new();
-        talk.set_title("Mail einrichten");
-        let answer = Dialogs::new(&script, &mut talk).ask_text(&Text {
-            text: "Nummer",
-            default: "alt",
-            max: 40,
-            ok: "Weiter",
-        })?;
-        assert_eq!(answer, "abc-123");
-        let seen = script.seen();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].wait, Duration::from_secs(ANSWER_SECONDS + SLACK));
-        let request = json::parse(&seen[0].payload)?;
-        let object = request.as_object().ok_or("object")?;
-        let mut keys: Vec<&str> = object.keys().collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["cancel", "default", "max", "ok", "op", "seconds", "text", "title"]
-        );
-        assert_eq!(seen[0].text("op"), "ask_text");
-        assert_eq!(seen[0].text("title"), "Mail einrichten");
-        assert_eq!(seen[0].text("text"), "Nummer");
-        assert_eq!(seen[0].text("default"), "alt");
-        assert_eq!(seen[0].text("cancel"), "Abbrechen");
-        assert_eq!(seen[0].field("max"), Some(Json::Int(40)));
-        assert_eq!(seen[0].field("seconds"), Some(Json::Int(600)));
-        assert!(script.mismatches().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn answers_beyond_the_bound_are_refused_and_never_returned() -> TestResult {
-        for reply in [
-            Reply::text(&"x".repeat(41)),
-            Reply::text(&"x".repeat(200_000)),
-            Reply::TooLong,
-        ] {
-            let script = Script::new().then("ask_text", reply);
-            let mut talk = Talk::new();
-            let answer = Dialogs::new(&script, &mut talk).ask_text(&text("Frage"));
-            assert_eq!(answer, Err(Stop::Failed(TOO_LONG.to_string())));
-            assert_eq!(talk.take_stop(), Some(Stop::Failed(TOO_LONG.to_string())));
+    fn ask(prompt: &str) -> Buttons<'_> {
+        Buttons {
+            text: prompt,
+            buttons: &["OK"],
+            default: 0,
+            cancel: None,
+            icon: Icon::Note,
         }
-        let script = Script::new().then("ask_text", Reply::text(&"x".repeat(40)));
-        let mut talk = Talk::new();
-        assert_eq!(
-            Dialogs::new(&script, &mut talk).ask_text(&text("Frage")),
-            Ok("x".repeat(40))
-        );
-        Ok(())
     }
 
     #[test]
@@ -739,10 +625,10 @@ mod tests {
             (Reply::Timeout, Stop::TimedOut),
             (Reply::Hung, Stop::TimedOut),
         ] {
-            let script = Script::new().then("ask_text", reply);
+            let script = Script::new().then("ask_buttons", reply);
             let mut talk = Talk::new();
             assert_eq!(
-                Dialogs::new(&script, &mut talk).ask_text(&text("Frage")),
+                Dialogs::new(&script, &mut talk).ask_buttons(&ask("Frage")),
                 Err(expected.clone())
             );
             assert_eq!(talk.take_stop(), Some(expected));
@@ -768,7 +654,7 @@ mod tests {
             Reply::Data("[1]".to_string()),
             Reply::Data("\"text\"".to_string()),
             Reply::Data("null".to_string()),
-            Reply::Data("{\"result\": \"button\", \"index\": 0}".to_string()),
+            Reply::Data("{\"result\": \"too_long\"}".to_string()),
             Reply::Data("{\"result\": \"list\", \"selected\": []}".to_string()),
             Reply::Raw {
                 code: Some(0),
@@ -794,9 +680,10 @@ mod tests {
             Reply::Flood,
         ];
         for reply in hostile {
-            let script = Script::new().then("ask_text", reply.clone());
+            let script = Script::new().then("ask_buttons", reply.clone());
             let mut talk = Talk::new();
-            let Err(Stop::Failed(message)) = Dialogs::new(&script, &mut talk).ask_text(&text("F"))
+            let Err(Stop::Failed(message)) =
+                Dialogs::new(&script, &mut talk).ask_buttons(&ask("F"))
             else {
                 return Err(format!("{reply:?} was accepted").into());
             };
@@ -820,7 +707,7 @@ mod tests {
             "Nicht berechtigt",
         ] {
             let script = Script::new().then(
-                "ask_text",
+                "ask_buttons",
                 Reply::Raw {
                     code: Some(1),
                     stdout: String::new(),
@@ -828,7 +715,8 @@ mod tests {
                 },
             );
             let mut talk = Talk::new();
-            let Err(Stop::Failed(message)) = Dialogs::new(&script, &mut talk).ask_text(&text("F"))
+            let Err(Stop::Failed(message)) =
+                Dialogs::new(&script, &mut talk).ask_buttons(&ask("F"))
             else {
                 return Err("expected a failure".into());
             };
@@ -838,7 +726,7 @@ mod tests {
             assert!(!message.contains("System Events"), "{message}");
         }
         let script = Script::new().then(
-            "ask_text",
+            "ask_buttons",
             Reply::Raw {
                 code: Some(0),
                 stdout: "{\"ok\": false, \"error\": \"dialog_failed: no window\"}".to_string(),
@@ -846,7 +734,7 @@ mod tests {
             },
         );
         let mut talk = Talk::new();
-        let Err(Stop::Failed(message)) = Dialogs::new(&script, &mut talk).ask_text(&text("F"))
+        let Err(Stop::Failed(message)) = Dialogs::new(&script, &mut talk).ask_buttons(&ask("F"))
         else {
             return Err("expected a failure".into());
         };
@@ -857,18 +745,18 @@ mod tests {
     #[test]
     fn shown_text_is_cleaned_bounded_and_carries_the_notes_before_the_question() -> TestResult {
         let script = Script::new()
-            .then("ask_text", Reply::text("a"))
-            .then("ask_text", Reply::text("b"))
-            .then("ask_text", Reply::text("c"));
+            .then("ask_buttons", Reply::Button(0))
+            .then("ask_buttons", Reply::Button(0))
+            .then("ask_buttons", Reply::Button(0));
         let mut talk = Talk::new();
         talk.set_title(&format!("Ti\u{202e}tel\u{200b}{}", "t".repeat(500)));
         let mut dialogs = Dialogs::new(&script, &mut talk);
         dialogs.say("Hinweis\u{200b} eins\u{202e}");
         dialogs.say("zwei\r\ndrei");
-        dialogs.ask_text(&text(&format!("Frage\u{0}{}", "q".repeat(500))))?;
-        dialogs.ask_text(&text("Zweite"))?;
+        dialogs.ask_buttons(&ask(&format!("Frage\u{0}{}", "q".repeat(500))))?;
+        dialogs.ask_buttons(&ask("Zweite"))?;
         dialogs.say("verloren");
-        dialogs.ask_text(&text(&"g".repeat(10_000)))?;
+        dialogs.ask_buttons(&ask(&"g".repeat(10_000)))?;
         let seen = script.seen();
         let first = seen[0].text("text");
         assert!(
@@ -917,13 +805,13 @@ mod tests {
 
     #[test]
     fn the_notes_keep_the_newest_lines_within_their_bound() -> TestResult {
-        let script = Script::new().then("ask_text", Reply::text("a"));
+        let script = Script::new().then("ask_buttons", Reply::Button(0));
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&script, &mut talk);
         for number in 0..5000 {
             dialogs.say(&format!("Zeile {number} {}", "x".repeat(300)));
         }
-        dialogs.ask_text(&text("Frage"))?;
+        dialogs.ask_buttons(&ask("Frage"))?;
         let shown = script.seen()[0].text("text");
         assert!(chars(&shown) <= MAX_TEXT + 6, "{}", chars(&shown));
         assert!(shown.starts_with(CUT), "{shown}");
@@ -1036,7 +924,7 @@ mod tests {
             Reply::Data("{\"result\": \"button\", \"index\": 1.5}".to_string()),
             Reply::Data("{\"result\": \"button\", \"index\": \"1\"}".to_string()),
             Reply::Data("{\"result\": \"button\"}".to_string()),
-            Reply::text("1"),
+            Reply::Data("{\"result\": \"text\", \"text\": \"1\"}".to_string()),
             Reply::List(vec![0]),
         ] {
             let script = Script::new().then("ask_buttons", reply.clone());
@@ -1073,7 +961,6 @@ mod tests {
             text: "Welche?",
             items: &items,
             defaults: &[2, 0, 2, 9],
-            multiple: true,
             ok: "Weiter",
         };
         assert_eq!(dialogs.choose_list(&ask), Ok(vec![0, 2]));
@@ -1088,7 +975,7 @@ mod tests {
             )?)
         );
         assert_eq!(seen[0].field("defaults"), Some(json::parse("[0, 2]")?));
-        assert_eq!(seen[0].field("multiple"), Some(Json::Bool(true)));
+        assert_eq!(seen[0].field("multiple"), None);
         assert_eq!(seen[0].text("cancel"), "Abbrechen");
         Ok(())
     }
@@ -1096,26 +983,16 @@ mod tests {
     #[test]
     fn a_list_refuses_selections_that_make_no_sense_and_requests_that_are_too_big() -> TestResult {
         let items = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        for (reply, multiple) in [
-            (Reply::List(vec![3]), true),
-            (Reply::List(vec![1, 1]), true),
-            (Reply::List(vec![2, 1]), true),
-            (Reply::List(vec![0, 1]), false),
-            (Reply::List(vec![0, 1, 2, 3]), true),
-            (
-                Reply::Data("{\"result\": \"list\", \"selected\": [-1]}".to_string()),
-                true,
-            ),
-            (
-                Reply::Data("{\"result\": \"list\", \"selected\": [\"0\"]}".to_string()),
-                true,
-            ),
-            (
-                Reply::Data("{\"result\": \"list\", \"selected\": 0}".to_string()),
-                true,
-            ),
-            (Reply::Data("{\"result\": \"list\"}".to_string()), true),
-            (Reply::text("A"), true),
+        for reply in [
+            Reply::List(vec![3]),
+            Reply::List(vec![1, 1]),
+            Reply::List(vec![2, 1]),
+            Reply::List(vec![0, 1, 2, 3]),
+            Reply::Data("{\"result\": \"list\", \"selected\": [-1]}".to_string()),
+            Reply::Data("{\"result\": \"list\", \"selected\": [\"0\"]}".to_string()),
+            Reply::Data("{\"result\": \"list\", \"selected\": 0}".to_string()),
+            Reply::Data("{\"result\": \"list\"}".to_string()),
+            Reply::Data("{\"result\": \"text\", \"text\": \"A\"}".to_string()),
         ] {
             let script = Script::new().then("choose_list", reply.clone());
             let mut talk = Talk::new();
@@ -1123,7 +1000,6 @@ mod tests {
                 text: "x",
                 items: &items,
                 defaults: &[],
-                multiple,
                 ok: "OK",
             });
             assert!(
@@ -1141,29 +1017,12 @@ mod tests {
                     text: "x",
                     items: list,
                     defaults: &[],
-                    multiple: true,
                     ok: "OK"
                 }),
                 Err(Stop::Failed(_))
             ));
         }
         assert!(quiet.seen().is_empty());
-        let single = Script::new().then("choose_list", Reply::List(vec![1]));
-        let mut talk = Talk::new();
-        assert_eq!(
-            Dialogs::new(&single, &mut talk).choose_list(&List {
-                text: "x",
-                items: &items,
-                defaults: &[2, 0],
-                multiple: false,
-                ok: "OK",
-            }),
-            Ok(vec![1])
-        );
-        assert_eq!(
-            single.seen()[0].field("defaults"),
-            Some(json::parse("[0]")?)
-        );
         let wide = vec!["w".repeat(5000)];
         let long = Script::new().then("choose_list", Reply::List(vec![0]));
         let mut talk = Talk::new();
@@ -1171,7 +1030,6 @@ mod tests {
             text: "x",
             items: &wide,
             defaults: &[],
-            multiple: true,
             ok: "OK",
         })?;
         let item = long.seen()[0]
@@ -1303,14 +1161,14 @@ mod tests {
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&script, &mut talk);
         dialogs.say("Neue Freigaben:");
-        assert!(dialogs.confirm("Korrekt?"));
-        assert!(!dialogs.confirm("Korrekt?"));
+        assert!(dialogs.confirmed("Korrekt?"));
+        assert!(!dialogs.confirmed("Korrekt?"));
         assert_eq!(talk.take_stop(), Some(Stop::Cancelled));
         let mut dialogs = Dialogs::new(&script, &mut talk);
-        assert!(!dialogs.confirm("Korrekt?"));
+        assert!(!dialogs.confirmed("Korrekt?"));
         assert_eq!(talk.take_stop(), Some(Stop::TimedOut));
         let mut dialogs = Dialogs::new(&script, &mut talk);
-        assert!(!dialogs.confirm("Korrekt?"));
+        assert!(!dialogs.confirmed("Korrekt?"));
         let seen = script.seen();
         assert_eq!(seen[0].text("text"), "Neue Freigaben:\n\nKorrekt?");
         assert_eq!(seen[0].field("default"), Some(Json::Int(0)));
@@ -1547,7 +1405,7 @@ mod tests {
             for line in &lines {
                 dialogs.say(line);
             }
-            assert!(!dialogs.confirm("Korrekt?"));
+            assert!(!dialogs.confirmed("Korrekt?"));
             assert!(script.seen().is_empty());
             let notes = talk.take_notes();
             assert!(
@@ -1559,14 +1417,14 @@ mod tests {
         let script = Script::new();
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&script, &mut talk);
-        assert!(!dialogs.confirm(&"q".repeat(2000)));
+        assert!(!dialogs.confirmed(&"q".repeat(2000)));
         assert!(script.seen().is_empty());
         let fits = Script::new().then("ask_buttons", Reply::Button(1));
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&fits, &mut talk);
         dialogs.say("Eins");
         dialogs.say("Zwei");
-        assert!(dialogs.confirm("Korrekt?"));
+        assert!(dialogs.confirmed("Korrekt?"));
         assert_eq!(fits.seen()[0].text("text"), "Eins\nZwei\n\nKorrekt?");
         Ok(())
     }
@@ -1642,25 +1500,8 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_question_uses_the_text_dialog() -> TestResult {
-        let script = Script::new()
-            .then("ask_text", Reply::text("42"))
-            .then("ask_text", Reply::Cancel);
-        let mut talk = Talk::new();
-        let mut dialogs = Dialogs::new(&script, &mut talk);
-        assert_eq!(dialogs.ask("Nummer?"), Some("42".to_string()));
-        assert_eq!(dialogs.ask("Nummer?"), None);
-        assert_eq!(script.seen()[0].field("max"), Some(Json::Int(512)));
-        Ok(())
-    }
-
-    #[test]
     fn replies_are_parsed_strictly() -> TestResult {
         for (text, expected) in [
-            (
-                "{\"result\": \"text\", \"text\": \"a\"}",
-                Some(Parsed::Text("a".into())),
-            ),
             (
                 "{\"result\": \"button\", \"index\": 2}",
                 Some(Parsed::Button(2)),
@@ -1676,13 +1517,10 @@ mod tests {
             ("{\"result\": \"ok\"}", Some(Parsed::Done)),
             ("{\"result\": \"cancel\"}", Some(Parsed::Cancelled)),
             ("{\"result\": \"timeout\"}", Some(Parsed::TimedOut)),
-            ("{\"result\": \"too_long\"}", Some(Parsed::TooLong)),
+            ("{\"result\": \"text\", \"text\": \"a\"}", None),
+            ("{\"result\": \"too_long\"}", None),
             ("{\"result\": \"ok\", \"x\": 1}", None),
             ("{\"result\": \"cancel\", \"text\": \"a\"}", None),
-            (
-                "{\"result\": \"text\", \"text\": \"a\", \"index\": 1}",
-                None,
-            ),
             (
                 "{\"result\": \"button\", \"index\": 1, \"text\": \"a\"}",
                 None,
@@ -1743,7 +1581,6 @@ mod tests {
             text: "x",
             items: &["a".to_string()],
             defaults: &[],
-            multiple: true,
             ok: "OK",
         })?;
         for seen in script.seen() {
@@ -1877,104 +1714,6 @@ function run(argv) {
     }
 
     #[cfg(target_os = "macos")]
-    fn ask_text_request(extra: &str) -> String {
-        format!(
-            r#"{{"op": "ask_text", "title": "Titel", "text": "Frage", "default": "", "max": 20,
-                 "ok": "Weiter", "cancel": "Abbrechen", "seconds": 30{extra}}}"#
-        )
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_text_script_shows_clean_text_and_maps_every_way_out() -> TestResult {
-        let request = r#"{"op": "ask_text", "title": "Ti\u200btel", "text": "Frage\u202e?\nZweite Zeile", "default": "d",
-                          "max": 20, "ok": "Weiter", "cancel": "Abbrechen", "seconds": 30}"#;
-        let shown = probe(r#"{"typed": "abc"}"#, request)?;
-        assert!(shown.ok, "{}", shown.error);
-        assert_eq!(shown.result(), "text");
-        assert_eq!(
-            shown.data,
-            json::parse(r#"{"result": "text", "text": "abc"}"#)?
-        );
-        assert_eq!(shown.calls(), ["activate", "displayDialog"]);
-        assert_eq!(shown.logged("text"), Json::from("Frage?\nZweite Zeile"));
-        assert_eq!(shown.option("withTitle"), Json::from("Titel"));
-        assert_eq!(shown.option("defaultAnswer"), Json::from("d"));
-        assert_eq!(shown.option("givingUpAfter"), Json::Int(30));
-        assert_eq!(shown.option("defaultButton"), Json::from("Weiter"));
-        assert_eq!(shown.option("cancelButton"), Json::from("Abbrechen"));
-        assert_eq!(
-            shown.option("buttons"),
-            json::parse(r#"["Abbrechen", "Weiter"]"#)?
-        );
-        for (mock, expected) in [
-            (r#"{"button": "Abbrechen"}"#, "cancel"),
-            (r#"{"fail": "User canceled. (-128)"}"#, "cancel"),
-            (r#"{"gaveUp": true}"#, "timeout"),
-            (r#"{"typed": "123456789012345678901"}"#, "too_long"),
-        ] {
-            let answer = probe(mock, &ask_text_request(""))?;
-            assert!(answer.ok, "{mock}: {}", answer.error);
-            assert_eq!(answer.result(), expected, "{mock}");
-        }
-        let exact = probe(
-            r#"{"typed": "12345678901234567890"}"#,
-            &ask_text_request(""),
-        )?;
-        assert_eq!(exact.result(), "text");
-        let broken = probe(r#"{"fail": "boom"}"#, &ask_text_request(""))?;
-        assert!(!broken.ok);
-        assert_eq!(broken.error, "dialog_failed: boom");
-        let separators = probe(
-            r#"{"typed": "abc"}"#,
-            &ask_text_request("").replace(
-                "\"Frage\"",
-                r#""Zeile\u2028Zwei\u2029Drei\u0085Vier\nFuenf""#,
-            ),
-        )?;
-        assert!(separators.ok, "{}", separators.error);
-        assert_eq!(
-            separators.logged("text"),
-            Json::from("Zeile Zwei Drei Vier\nFuenf")
-        );
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_text_script_refuses_malformed_requests_before_any_window_opens() -> TestResult {
-        let long = |count: usize| "x".repeat(count);
-        let bad = [
-            ask_text_request("").replace("\"Titel\"", "5"),
-            ask_text_request("").replace("\"Titel\"", &quote(&long(81))),
-            ask_text_request("").replace("\"Frage\"", &quote(&long(2001))),
-            ask_text_request("").replace("\"default\": \"\"", "\"default\": 1"),
-            ask_text_request("").replace("\"max\": 20", "\"max\": 0"),
-            ask_text_request("").replace("\"max\": 20", "\"max\": 1001"),
-            ask_text_request("").replace("\"max\": 20", "\"max\": 1.5"),
-            ask_text_request("").replace("\"seconds\": 30", "\"seconds\": 0"),
-            ask_text_request("").replace("\"seconds\": 30", "\"seconds\": 3601"),
-            ask_text_request("").replace("\"seconds\": 30", "\"seconds\": \"30\""),
-            ask_text_request("").replace("\"Abbrechen\"", "\"Weiter\""),
-            ask_text_request("").replace("\"Weiter\"", "\"\""),
-            ask_text_request("").replace("\"Weiter\"", &quote(&long(41))),
-            ask_text_request("").replace(r#""cancel": "Abbrechen", "#, ""),
-            ask_text_request(r#", "icon": "weird""#),
-        ];
-        for request in bad {
-            let answer = probe(r#"{"typed": "x"}"#, &request)?;
-            assert!(!answer.ok, "{request}");
-            assert!(
-                answer.error.starts_with("bad_request"),
-                "{request}: {}",
-                answer.error
-            );
-            assert!(answer.calls().is_empty(), "{request}: {:?}", answer.calls());
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
     fn buttons_request(extra: &str) -> String {
         format!(
             r#"{{"op": "ask_buttons", "title": "Titel", "text": "Frage\u200b?", "buttons": ["Abbrechen", "Später", "Weiter"],
@@ -2021,6 +1760,18 @@ function run(argv) {
         let unknown = probe(r#"{"button": "Ganz anders"}"#, &buttons_request(""))?;
         assert!(!unknown.ok);
         assert_eq!(unknown.error, "dialog_failed: unknown button");
+        let separators = probe(
+            "{}",
+            &buttons_request("").replace(
+                r#""Frage\u200b?""#,
+                r#""Zeile\u2028Zwei\u2029Drei\u0085Vier\nFuenf""#,
+            ),
+        )?;
+        assert!(separators.ok, "{}", separators.error);
+        assert_eq!(
+            separators.logged("text"),
+            Json::from("Zeile Zwei Drei Vier\nFuenf")
+        );
         Ok(())
     }
 
@@ -2060,7 +1811,7 @@ function run(argv) {
     fn list_request(extra: &str) -> String {
         format!(
             r#"{{"op": "choose_list", "title": "Titel", "text": "Welche?", "items": ["1. A\u200b", "2.  B ", "3. C"],
-                 "defaults": [0, 2], "multiple": true, "ok": "Weiter", "cancel": "Abbrechen", "seconds": 30{extra}}}"#
+                 "defaults": [0, 2], "ok": "Weiter", "cancel": "Abbrechen", "seconds": 30{extra}}}"#
         )
     }
 
@@ -2140,8 +1891,6 @@ function run(argv) {
             list_request("").replace(r#""defaults": [0, 2]"#, r#""defaults": [0, 3]"#),
             list_request("").replace(r#""defaults": [0, 2]"#, r#""defaults": [0, 0]"#),
             list_request("").replace(r#""defaults": [0, 2]"#, r#""defaults": [-1]"#),
-            list_request("").replace(r#""multiple": true"#, r#""multiple": 1"#),
-            list_request("").replace(r#""multiple": true"#, r#""multiple": false"#),
             list_request("").replace(r#""ok": "Weiter""#, r#""ok": """#),
             list_request("").replace(r#""seconds": 30"#, r#""seconds": 0"#),
         ];
@@ -2155,20 +1904,6 @@ function run(argv) {
             );
             assert!(answer.calls().is_empty(), "{request}");
         }
-        let single = probe(
-            r#"{"chosen": ["2. B"]}"#,
-            &list_request("")
-                .replace(r#""multiple": true"#, r#""multiple": false"#)
-                .replace(r#""defaults": [0, 2]"#, r#""defaults": [1]"#),
-        )?;
-        assert_eq!(
-            single.data,
-            json::parse(r#"{"result": "list", "selected": [1]}"#)?
-        );
-        assert_eq!(
-            single.option("multipleSelectionsAllowed"),
-            Json::Bool(false)
-        );
         Ok(())
     }
 

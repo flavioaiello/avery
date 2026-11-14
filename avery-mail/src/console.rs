@@ -53,7 +53,7 @@ pub(crate) struct Terminal<'a> {
 
 impl<'a> Console<'a> {
     pub(crate) fn terminal(input: &'a mut dyn BufRead, out: &'a mut dyn Write) -> Console<'a> {
-        Console::Terminal(Terminal { input, out })
+        Console::Terminal(Terminal::new(input, out))
     }
 
     pub(crate) fn say(&mut self, text: &str) {
@@ -67,20 +67,6 @@ impl<'a> Console<'a> {
         match self {
             Console::Terminal(terminal) => terminal.say(text),
             Console::Dialogs(_) => {}
-        }
-    }
-
-    pub(crate) fn ask(&mut self, prompt: &str) -> Option<String> {
-        match self {
-            Console::Terminal(terminal) => terminal.ask(prompt),
-            Console::Dialogs(dialogs) => dialogs.ask(prompt),
-        }
-    }
-
-    pub(crate) fn confirm(&mut self, question: &str) -> bool {
-        match self {
-            Console::Terminal(terminal) => terminal.confirm(question),
-            Console::Dialogs(dialogs) => dialogs.confirm(question),
         }
     }
 
@@ -106,12 +92,21 @@ impl<'a> Console<'a> {
     }
 }
 
-impl Terminal<'_> {
-    fn say(&mut self, text: &str) {
+impl<'a> Terminal<'a> {
+    pub(crate) fn new(input: &'a mut dyn BufRead, out: &'a mut dyn Write) -> Terminal<'a> {
+        Terminal { input, out }
+    }
+
+    pub(crate) fn say(&mut self, text: &str) {
         let _ = writeln!(self.out, "{text}");
     }
 
-    fn ask(&mut self, prompt: &str) -> Option<String> {
+    pub(crate) fn failed(&mut self, error: &ToolError) -> u8 {
+        self.say(&format!("Fehler: {error}"));
+        1
+    }
+
+    pub(crate) fn ask(&mut self, prompt: &str) -> Option<String> {
         let _ = write!(self.out, "{prompt}");
         let _ = self.out.flush();
         match server::next_line(self.input, MAX_ANSWER_BYTES) {
@@ -120,7 +115,7 @@ impl Terminal<'_> {
         }
     }
 
-    fn confirm(&mut self, question: &str) -> bool {
+    pub(crate) fn confirm(&mut self, question: &str) -> bool {
         self.ask(&format!("{question} [j/N] "))
             .is_some_and(|answer| {
                 matches!(
@@ -285,10 +280,26 @@ mod tests {
             ("", false),
         ] {
             let (mut out, mut reader) = terminal(input);
-            let mut console = Console::terminal(&mut reader, &mut out);
+            let mut console = Terminal::new(&mut reader, &mut out);
             assert_eq!(console.confirm("Korrekt?"), expected, "{input:?}");
             assert_eq!(String::from_utf8_lossy(&out), "Korrekt? [j/N] ");
         }
+    }
+
+    #[test]
+    fn a_question_reads_one_bounded_line_and_a_failure_is_a_line_with_exit_code_one() {
+        let (mut out, mut reader) = terminal("42\n");
+        let mut asking = Terminal::new(&mut reader, &mut out);
+        assert_eq!(asking.ask("Nummer? "), Some("42".to_string()));
+        assert_eq!(asking.ask("Nummer? "), None);
+        assert_eq!(asking.failed(&ToolError::msg("kaputt")), 1);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "Nummer? Nummer? Fehler: kaputt\n"
+        );
+        let long = format!("{}\n", "1".repeat(20_000));
+        let (mut out, mut reader) = terminal(&long);
+        assert_eq!(Terminal::new(&mut reader, &mut out).ask("?"), None);
     }
 
     #[test]
@@ -313,18 +324,27 @@ mod tests {
     #[test]
     fn the_dialog_console_shows_lines_with_the_next_question_and_drops_the_hints() -> TestResult {
         use crate::testutil::{Reply, Script};
-        let script = Script::new()
-            .then("ask_buttons", Reply::Button(1))
-            .then("ask_text", Reply::text("42"));
+        let script = Script::new().then("ask_buttons", Reply::Button(1));
         let mut talk = Talk::new();
         let mut console = Console::Dialogs(Dialogs::new(&script, &mut talk));
-        console.say("Neue Freigaben:");
+        console.say("Hinweis eins");
         console.hint("Goose danach neu starten.");
-        assert!(console.confirm("Korrekt?"));
-        assert_eq!(console.ask("Nummer?"), Some("42".to_string()));
+        let recap = Recap {
+            mail: String::new(),
+            calendars: String::new(),
+            changes: vec![GrantChange {
+                area: Area::Calendar,
+                title: "Privat".to_string(),
+                was: None,
+                now: Some(Level::Read),
+            }],
+        };
+        assert!(console.confirm_grants(&recap));
         let seen = script.seen();
-        assert_eq!(seen[0].text("text"), "Neue Freigaben:\n\nKorrekt?");
-        assert_eq!(seen[1].text("text"), "Nummer?");
+        assert_eq!(
+            seen[0].text("text"),
+            "Hinweis eins\n\nNeue Freigaben: 1 Kalender zum Lesen\nKalender: Privat (lesen)\n\nKorrekt?"
+        );
         assert!(script.mismatches().is_empty());
         Ok(())
     }

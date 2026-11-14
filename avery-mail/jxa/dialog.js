@@ -1,5 +1,5 @@
 var MAX_TITLE = 80, MAX_TEXT = 2000, MAX_NOTE = 300, MAX_LABEL = 40, MAX_ITEMS = 500, MAX_ITEM = 160;
-var MAX_ANSWER = 1000, MAX_SECONDS = 3600;
+var MAX_SECONDS = 3600;
 
 function run(argv) {
   var req = JSON.parse(argv[0]);
@@ -12,7 +12,6 @@ function run(argv) {
 
 function dispatch(req) {
   if (req.op === 'ping') { return {jxa: true}; }
-  if (req.op === 'ask_text') { return askText(req); }
   if (req.op === 'ask_buttons') { return askButtons(req); }
   if (req.op === 'choose_list') { return chooseList(req); }
   if (req.op === 'notify') { return notify(req); }
@@ -67,29 +66,6 @@ function icon(value) {
   return bad('icon');
 }
 
-function askText(req) {
-  var title = field(req.title, MAX_TITLE, 'title'), text = field(req.text, MAX_TEXT, 'text');
-  var initial = field(req['default'], MAX_ANSWER, 'default'), ok = label(req.ok, 'ok'), cancel = label(req.cancel, 'cancel');
-  var max = whole(req.max, 1, MAX_ANSWER, 'max'), seconds = whole(req.seconds, 1, MAX_SECONDS, 'seconds');
-  if (ok === cancel) { bad('ok'); }
-  var look = icon(req.icon);
-  var app = screen(true), answer;
-  try {
-    answer = app.displayDialog(text, {
-      withTitle: title, defaultAnswer: initial, buttons: [cancel, ok],
-      defaultButton: ok, cancelButton: cancel, withIcon: look, givingUpAfter: seconds
-    });
-  } catch (e) {
-    if (declined(e)) { return {result: 'cancel'}; }
-    throw broken(e);
-  }
-  if (answer.gaveUp) { return {result: 'timeout'}; }
-  if (answer.buttonReturned !== ok) { return {result: 'cancel'}; }
-  var typed = String(answer.textReturned);
-  if (Array.from(typed).length > max) { return {result: 'too_long'}; }
-  return {result: 'text', text: typed};
-}
-
 function askButtons(req) {
   var title = field(req.title, MAX_TITLE, 'title'), text = field(req.text, MAX_TEXT, 'text');
   if (!Array.isArray(req.buttons) || req.buttons.length < 1 || req.buttons.length > 3) { bad('buttons'); }
@@ -124,9 +100,7 @@ function chooseList(req) {
     items.push(field(req.items[i], MAX_ITEM, 'items').replace(/\s+/g, ' ').trim());
     if (items[i] === '' || items.indexOf(items[i]) !== i) { bad('items'); }
   }
-  if (typeof req.multiple !== 'boolean') { bad('multiple'); }
   var firsts = indexes(req.defaults, items.length, 'defaults');
-  if (!req.multiple && firsts.length > 1) { bad('defaults'); }
   var ok = label(req.ok, 'ok'), cancel = label(req.cancel, 'cancel');
   whole(req.seconds, 1, MAX_SECONDS, 'seconds');
   var preset = [];
@@ -135,7 +109,7 @@ function chooseList(req) {
   try {
     chosen = app.chooseFromList(items, {
       withTitle: title, withPrompt: text, defaultItems: preset, okButtonName: ok, cancelButtonName: cancel,
-      multipleSelectionsAllowed: req.multiple, emptySelectionAllowed: true
+      multipleSelectionsAllowed: true, emptySelectionAllowed: true
     });
   } catch (e) {
     if (declined(e)) { return {result: 'cancel'}; }

@@ -113,7 +113,7 @@ There is no menu bar app and nothing keeps running.
 3. **Summary.** What is set up, and the offer to run the read check (`avery mail selftest`) now and show its result.
 
 Every dialog can be cancelled, and cancelling means: stop, nothing more is saved. What was completed before stays and the
-last dialog says so. Every dialog also gives up after at most ten minutes without an answer (the same as cancelling).
+last dialog says so. Every dialog also gives up after at most five minutes without an answer (the same as cancelling).
 
 `avery mail onboard` shows the same dialogs whenever you want, also when everything is set up. `avery mail onboard
 --if-needed` is what the launcher runs before Goose starts: it stays silent and does nothing when accounts or calendars are

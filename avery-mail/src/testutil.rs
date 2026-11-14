@@ -258,12 +258,10 @@ pub(crate) fn dark() -> Screen<'static> {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Reply {
-    Text(String),
     Button(usize),
     List(Vec<usize>),
     Cancel,
     Timeout,
-    TooLong,
     Done,
     Data(String),
     Silent,
@@ -277,19 +275,8 @@ pub(crate) enum Reply {
 }
 
 impl Reply {
-    pub(crate) fn text(answer: &str) -> Reply {
-        Reply::Text(answer.to_string())
-    }
-
     fn finished(&self) -> Finished {
         let data = match self {
-            Reply::Text(answer) => json::dumps(
-                &Json::object(vec![
-                    ("result", Json::from("text")),
-                    ("text", Json::from(answer)),
-                ]),
-                true,
-            ),
             Reply::Button(index) => format!("{{\"result\": \"button\", \"index\": {index}}}"),
             Reply::List(selected) => format!(
                 "{{\"result\": \"list\", \"selected\": [{}]}}",
@@ -301,7 +288,6 @@ impl Reply {
             ),
             Reply::Cancel => "{\"result\": \"cancel\"}".to_string(),
             Reply::Timeout => "{\"result\": \"timeout\"}".to_string(),
-            Reply::TooLong => "{\"result\": \"too_long\"}".to_string(),
             Reply::Done => "{\"result\": \"ok\"}".to_string(),
             Reply::Data(text) => text.clone(),
             Reply::Silent => return Finished::NotStarted,
