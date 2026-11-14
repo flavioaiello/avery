@@ -10,7 +10,7 @@ tokens.
 
 Everything runs on your Mac. macOS keeps your credentials and Avery never sees them; the bridge also works offline.
 
-> Status: early (v0.6.0). After installing, run `avery mail selftest` and `avery mail selftest-write`. They check the
+> Status: early (v0.6.1). After installing, run `avery mail selftest` and `avery mail selftest-write`. They check the
 > integration with Mail.app and Calendar.app, which the automated tests cannot do (they use demo data and a mock of the
 > scripting interface).
 

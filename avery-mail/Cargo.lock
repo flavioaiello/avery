@@ -4,4 +4,4 @@ version = 4
 
 [[package]]
 name = "avery-mail"
-version = "0.6.0"
+version = "0.6.1"
