@@ -1755,7 +1755,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     const MOCK_APP: &str = r#"
-var LOG = {calls: [], text: null, opts: null, items: null, url: null};
+var LOG = {calls: [], text: null, opts: null, items: null};
 var MOCK = {};
 function MOCKAPP() {
   return {
@@ -1775,10 +1775,6 @@ function MOCKAPP() {
     },
     displayNotification: function (text, opts) {
       LOG.calls.push('displayNotification'); LOG.text = text; LOG.opts = opts;
-      if (MOCK.fail) { throw new Error(MOCK.fail); }
-    },
-    openLocation: function (url) {
-      LOG.calls.push('openLocation'); LOG.url = url;
       if (MOCK.fail) { throw new Error(MOCK.fail); }
     }
   };
