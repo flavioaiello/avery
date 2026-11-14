@@ -1,6 +1,6 @@
 [package]
 name = "avery-mail"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89"
 description = "MCP server (stdio) for private Gmail and Outlook.com mail and calendars, optionally Apple Mail and Calendar: reading, drafts, sending and calendar changes with approval."
