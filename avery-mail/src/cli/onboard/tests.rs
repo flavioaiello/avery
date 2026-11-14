@@ -1266,13 +1266,14 @@ fn an_empty_choice_of_accounts_ends_the_run_without_changes() -> TestResult {
     assert!(!Path::new(&station.ctx.settings.config_path).exists());
     assert_eq!(station.apple_calls(), 0);
     let seen = script.seen();
-    assert_eq!(seen[1].field("defaults"), Some(json::parse("[0, 1]")?));
+    assert_eq!(seen[1].field("defaults"), Some(json::parse("[2]")?));
     let labels = seen[1].field("items").ok_or("items")?;
     let labels = json::dumps(&labels, false);
     assert!(
         labels.contains("Gmail")
             && labels.contains("Outlook.com")
-            && labels.contains("Apple Mail und Kalender (optional)"),
+            && labels.contains("Apple Mail und Kalender (ohne Registrierung)")
+            && labels.contains("Gmail (eigene App nötig)"),
         "{labels}"
     );
     Ok(())

@@ -36,8 +36,8 @@ cask "avery" do
       avery pull          # downloads the model once (about 17 GB); Ctrl+C when it says Ready
 
     Then open Avery. While no account is linked, its first start guides you through the setup in macOS dialogs:
-    Gmail, Outlook.com (personal accounts; you register your own OAuth app once, see the README) and, optionally,
-    Apple Mail and Calendar. macOS may ask for permission to show notifications; only the optional Apple bridge
+    Apple Mail and Calendar (the quickest start: your accounts from Mail.app, no registration) and, optionally,
+    Gmail and Outlook.com directly (personal accounts; you register your own OAuth app once, see the README). macOS may ask for permission to show notifications; only the optional Apple bridge
     asks once for Automation (Mail and Calendar): allow what Avery should use. A failed setup is also shown as a notification; if no dialog and no notification appears,
     run "avery mail onboard" in a terminal to see the reason. Cancelling any dialog saves nothing more, and Avery still starts.
 

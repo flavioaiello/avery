@@ -3,16 +3,18 @@
 # avery
 
 A private AI agent for macOS: [Goose](https://github.com/block/goose) Desktop, a local model served by
-[Splash](https://github.com/incoai/splash), and a small mail and calendar bridge that reads your private Gmail or
-Outlook.com mail and calendar, writes drafts, sends mail and changes calendar events, but only after you click in a
-native macOS dialog. Apple Mail and Calendar can be switched on as an option.
+[Splash](https://github.com/incoai/splash), and a small mail and calendar bridge that reads your private mail and
+calendar, writes drafts, sends mail and changes calendar events, but only after you click in a native macOS dialog.
+The quickest start is **Apple Mail and Calendar**: Avery uses the accounts you already keep in Mail.app and
+Calendar.app, with no registration and no tokens. Personal Gmail and Outlook.com accounts can also be reached
+**directly** through their APIs, which needs an app registration of your own.
 
-Everything runs on your Mac. Gmail and Outlook.com (personal accounts only) are reached directly through their APIs:
-Avery keeps an OAuth token for each account in your Keychain and needs the internet (see
-[Gmail and Outlook.com](#gmail-and-outlookcom)). The optional Apple bridge needs no tokens: macOS keeps your credentials
-and Avery never sees them (see [Apple Mail and Calendar](#apple-mail-and-calendar-optional)).
+Everything runs on your Mac. The Apple bridge needs no tokens: macOS keeps your credentials and Avery never sees them
+(see [Apple Mail and Calendar](#apple-mail-and-calendar-optional)). A direct Gmail or Outlook.com account (personal
+accounts only) keeps an OAuth token in your Keychain and needs the internet (see
+[Gmail and Outlook.com](#gmail-and-outlookcom)).
 
-> Status: early (v0.4.0). After installing, run `avery mail selftest` and `avery mail selftest-write`.
+> Status: early (v0.5.0). After installing, run `avery mail selftest` and `avery mail selftest-write`.
 > They check the integration with your accounts, which the automated tests cannot do.
 
 ## What is in the box
@@ -27,8 +29,8 @@ and Avery never sees them (see [Apple Mail and Calendar](#apple-mail-and-calenda
 ## Requirements
 
 - Apple silicon Mac with macOS
-- A personal Gmail and/or Outlook.com account, and an app registration of your own for it (free, a few minutes, see
-  [below](#gmail-and-outlookcom)). Mail.app is needed only for the optional Apple bridge
+- Mail.app and Calendar.app with your private accounts (the quickest start), or a personal Gmail and/or Outlook.com
+  account with an app registration of your own (free, a few minutes, see [below](#gmail-and-outlookcom))
 - [Homebrew](https://brew.sh); it builds the mail server from source with Rust (1.89 or newer, installed as a build
   dependency)
 - Goose Desktop (cask `block-goose`) and Splash (`incoai/tap/splash`, installed as a dependency)
@@ -61,7 +63,8 @@ Then open **Avery** (Spotlight, or `avery up`). While no account is linked, the 
 through the setup (see [First start: the setup dialogs](#first-start-the-setup-dialogs)). The same steps from a terminal:
 
 ```sh
-avery mail link google    # or: microsoft. Connect a personal Gmail or Outlook.com account (see below)
+avery mail setup apple    # quickest: choose levels for the accounts and calendars you already have in Mail.app and Calendar.app
+avery mail link google    # or: microsoft. Connect a personal Gmail or Outlook.com account directly (needs your own app, see below)
 avery mail setup          # choose a level per account and calendar: off, read or write
 avery mail selftest       # check read access
 ```
@@ -163,7 +166,8 @@ Registering takes a few minutes and is free:
   accounts only*, add the platform *Mobile and desktop applications* with the redirect URI `http://localhost`, and give
   it the delegated permissions `Mail.Read`, `Calendars.Read`, `User.Read`, `offline_access` (for the write level also
   `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`). No secret is needed. `avery mail link microsoft` asks for the
-  application (client) ID.
+  application (client) ID. The Entra admin center needs a directory: an Azure account (free; the free account asks for a
+  card to verify your identity) or an existing tenant. A plain Outlook.com account alone has none. Google needs no card.
 
 ```sh
 avery mail link google          # or: microsoft. Asks for the client ID, the level, opens the browser, stores the token (the setup dialogs do the same)

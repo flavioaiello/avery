@@ -18,8 +18,7 @@ use crate::text::one_line_str;
 const WELCOME_TITLE: &str = "Willkommen bei Avery";
 const DONE_TITLE: &str = "Avery ist eingerichtet";
 const WELCOME_TEXT: &str = "Avery braucht Zugriff auf dein privates Mail- und Kalenderkonto. Die Einrichtung dauert ein paar Minuten und gilt dauerhaft. Deine Anmeldung bleibt im Schlüsselbund dieses Macs. Jeden Schritt kannst du abbrechen: dann wird nichts gespeichert.";
-const ACCOUNTS_TEXT: &str =
-    "Welche Konten soll Avery nutzen? Apple Mail und Kalender ist optional und standardmäßig aus.";
+const ACCOUNTS_TEXT: &str = "Welche Konten soll Avery nutzen? Apple Mail und Kalender geht ohne Registrierung und ist der schnellste Start. Gmail und Outlook.com direkt brauchen eine eigene App-Registrierung (siehe README).";
 const SELFTEST_TEXT: &str =
     "Soll Avery jetzt den Lesezugriff prüfen? Dabei wird nichts gesendet oder geändert.";
 const SELFTEST_NOTICE: &str = "Der Lesetest läuft ...";
@@ -252,10 +251,13 @@ impl<'a> Flow<'a> {
         let remote: Vec<Provider> = Provider::remote().collect();
         let mut labels: Vec<String> = remote
             .iter()
-            .map(|provider| provider.display().to_string())
+            .map(|provider| format!("{} (eigene App nötig)", provider.display()))
             .collect();
-        labels.push(format!("{} (optional)", Provider::Apple.display()));
-        let defaults: Vec<usize> = (0..remote.len()).collect();
+        labels.push(format!(
+            "{} (ohne Registrierung)",
+            Provider::Apple.display()
+        ));
+        let defaults: Vec<usize> = vec![remote.len()];
         let chosen = self.dialogs().choose_list(&List {
             text: ACCOUNTS_TEXT,
             items: &labels,
