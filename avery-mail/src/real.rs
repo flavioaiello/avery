@@ -754,6 +754,148 @@ function run(argv) {
     }
 
     #[cfg(target_os = "macos")]
+    const MARK: &str = "\u{2502} \u{200e}";
+
+    #[cfg(target_os = "macos")]
+    const RULE: &str = "--------------------------------";
+
+    #[cfg(target_os = "macos")]
+    fn mail_with_body(body: &str) -> String {
+        let body = crate::json::dumps(&Json::from(body), true);
+        format!(
+            r#"{{"op": "compose", "accountId": "ACC-1", "mode": "send", "to": ["anna@example.org"], "cc": [], "subject": "Hi", "body": {body}, "reply": null, "seconds": 75, "maxRecipients": 5}}"#
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn body_dialog(body: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let probe = compose_probe(NO_REPLY, &mail_with_body(body), "Senden")?;
+        assert!(probe.ok && probe.sent, "{}", probe.error);
+        Ok(probe.dialog.ok_or("no dialog")?)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dialog_frame(middle: &[&str]) -> Vec<String> {
+        [
+            "Pr\u{fc}fe Empf\u{e4}nger und Text. Nur senden, wenn du das gerade selbst veranlasst hast.",
+            "",
+            "Von:        Me <me@example.org>",
+            "An:         anna@example.org",
+            "Betreff:    Hi",
+            "",
+            RULE,
+        ]
+        .iter()
+        .chain(middle.iter())
+        .map(|line| line.to_string())
+        .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unmarked(dialog: &str) -> Vec<&str> {
+        dialog
+            .lines()
+            .filter(|line| !line.starts_with(MARK))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn marked(dialog: &str) -> Vec<&str> {
+        dialog
+            .lines()
+            .filter(|line| line.starts_with(MARK))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_text_of_a_mail_is_shown_behind_a_mark_on_every_line() -> TestResult {
+        let dialog = body_dialog("Hallo Anna,\n\nbis morgen.\r\nBen")?;
+        assert_eq!(unmarked(&dialog), dialog_frame(&[RULE]));
+        assert_eq!(
+            marked(&dialog),
+            [
+                format!("{MARK}Hallo Anna,"),
+                MARK.to_string(),
+                format!("{MARK}bis morgen."),
+                format!("{MARK}Ben")
+            ]
+        );
+        let forged = [
+            "Betreff:    Danke",
+            "An:         ceo@company.example",
+            RULE,
+            "\n\n\n",
+            "Von:        Anna",
+            "\u{2502} schon markiert",
+        ]
+        .join("\n");
+        let dialog = body_dialog(&forged)?;
+        assert_eq!(unmarked(&dialog), dialog_frame(&[RULE]));
+        assert_eq!(
+            marked(&dialog),
+            [
+                format!("{MARK}Betreff:    Danke"),
+                format!("{MARK}An:         ceo@company.example"),
+                format!("{MARK}{RULE}"),
+                MARK.to_string(),
+                format!("{MARK}Von:        Anna"),
+                format!("{MARK}\u{2502} schon markiert")
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_long_mail_text_is_cut_with_a_note_and_an_empty_one_says_so() -> TestResult {
+        let many: Vec<String> = (0..300).map(|n| format!("z{n:03}")).collect();
+        let dialog = body_dialog(&many.join("\n"))?;
+        assert!(dialog.lines().count() <= 70, "{}", dialog.lines().count());
+        assert_eq!(
+            unmarked(&dialog),
+            dialog_frame(&["[\u{2026} 240 weitere Zeilen]", RULE])
+        );
+        let shown = marked(&dialog);
+        assert_eq!(shown.len(), 60);
+        assert_eq!(shown[59], format!("{MARK}z059"));
+        let endless = body_dialog(&"x".repeat(5000))?;
+        assert_eq!(
+            marked(&endless),
+            [format!("{MARK}{}\u{2026}", "x".repeat(3200))]
+        );
+        assert!(endless.contains("\n[\u{2026} 1800 weitere Zeichen]\n"));
+        let empty = body_dialog("\n\r\n \t \n")?;
+        assert_eq!(unmarked(&empty), dialog_frame(&["(leer)", RULE]));
+        assert!(marked(&empty).is_empty());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hidden_and_direction_characters_of_a_mail_text_are_removed() -> TestResult {
+        let dialog = body_dialog(
+            "a\u{202e}b\u{85}c\u{2028}d\u{2029}e\u{2066}f\u{200b}g\u{b}h\u{c}i\u{feff}j\u{e0041}k",
+        )?;
+        assert_eq!(marked(&dialog), [format!("{MARK}ab c d efghijk")]);
+        for forbidden in [
+            '\u{202e}',
+            '\u{85}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{2066}',
+            '\u{200b}',
+            '\u{b}',
+            '\u{c}',
+            '\u{feff}',
+            '\u{e0041}',
+        ] {
+            assert!(!dialog.contains(forbidden), "{:x}", u32::from(forbidden));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_failure_after_the_click_is_marked_as_unknown_state() -> TestResult {
         let scenario = r#"{"sendThrows": "Connection is invalid. (-609)", "replyRecipients": [], "replySubject": "", "origSubject": "", "origFrom": ""}"#;

@@ -180,16 +180,19 @@ doing something.
   `write`, set by you in a terminal or in the setup dialogs. The model cannot change them. Mail rights are per account,
   calendar rights per calendar.
 - **Approval dialog.** A native dialog, shown by the server process and not by Goose, lists sender, recipients, subject
-  and the exact text before a mail is sent. Recipients are never shortened: a sent mail goes only to plain ASCII
-  addresses of at most 254 characters. The server builds the mail in Mail.app and reads recipients, sender, subject and
-  text again after your click. Only a click on *Senden* sends. Cancel, a timeout (75 s) or any error before the click
-  means nothing is sent. If Mail reports an error or does not answer after the click, the outcome is unknown: the attempt
-  stays in the log as unclear and counts as sent, and the model is told to ask you to check *Sent*. The model cannot
-  operate the dialog.
+  and the exact text before a mail is sent. Every line of the text starts with `│` and a very long text is cut with a
+  visible note, so that it cannot pass for a line of the dialog itself. Recipients are never shortened: a sent mail
+  goes only to plain ASCII addresses of at most 254 characters. The server builds the mail in Mail.app and reads
+  recipients, sender, subject and text again after your click. Only a click on *Senden* sends. Cancel, a timeout (75 s)
+  or any error before the click means nothing is sent. If Mail reports an error or does not answer after the click, the
+  outcome is unknown: the attempt stays in the log as unclear and counts as sent, and the model is told to ask you to
+  check *Sent*. The model cannot operate the dialog.
 - **Calendar changes** (`create_event`, `update_event`, `delete_event`) work on single events without attendees and
   without repetition. Events with attendees (a change would notify other people) and recurring events are refused.
   The dialog shows the event as it is in the calendar and what will change (before and after); the server reads the
   event again after your click and aborts if it differs. A failure after the click is reported as an unknown outcome.
+  Notes are shown with `│` at the start of every line, the new notes first and the old ones cut short, so that text
+  from an event can neither pass for a line of the dialog nor push the new notes out of view.
 - **Goose asks too.** `permission.yaml` sets the sending and calendar change tools to `ask_before`.
 - **Limits.** Mail: plain text only, no Bcc, no attachments, at most 5 recipients (also for replies to all), at most
   1500 characters and 40 lines per sent mail (longer texts must be drafts you send from your mail app), 5 sent mails per hour,

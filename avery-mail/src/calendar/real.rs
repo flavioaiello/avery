@@ -913,7 +913,7 @@ function run(argv) {
             "Titel:      Tennis",
             "Wann:       2030-05-07 18:30 bis 2030-05-07 19:45",
             "Ort:        Platz 3",
-            "Notizen:\n--------------------------------\nSchlaeger\nBaelle\n--------------------------------",
+            "Notizen:\n--------------------------------\n\u{2502} \u{200e}Schlaeger\n\u{2502} \u{200e}Baelle\n--------------------------------",
         ] {
             assert!(dialog.contains(line), "{line}\n{dialog}");
         }
@@ -992,11 +992,10 @@ function run(argv) {
         assert_eq!(moved.sets, ["description", "startDate", "endDate"]);
         let dialog = moved.dialog.ok_or("dialog")?;
         assert!(
-            dialog.contains("Notizen vorher:\n--------------------------------\nAlt\n"),
-            "{dialog}"
-        );
-        assert!(
-            dialog.contains("Notizen nachher:\n--------------------------------\nNeu\n"),
+            dialog.contains(concat!(
+                "Notizen nachher:\n--------------------------------\n\u{2502} \u{200e}Neu\n--------------------------------\n",
+                "Notizen vorher:\n--------------------------------\n\u{2502} \u{200e}Alt\n--------------------------------"
+            )),
             "{dialog}"
         );
         Ok(())
@@ -1027,6 +1026,359 @@ function run(argv) {
         )?;
         let dialog = undo.dialog.ok_or("dialog")?;
         assert!(dialog.starts_with("Goose m\u{f6}chte eine \u{c4}nderung R\u{dc}CKG\u{c4}NGIG machen: Termin L\u{d6}SCHEN."), "{dialog}");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    const MARK: &str = "\u{2502} \u{200e}";
+
+    #[cfg(target_os = "macos")]
+    const RULE: &str = "--------------------------------";
+
+    #[cfg(target_os = "macos")]
+    fn event_fields(notes: &str) -> String {
+        crate::json::dumps(
+            &Json::object(vec![
+                ("summary", Json::from("Zahnarzt")),
+                ("start", Json::from("2030-05-06 09:00")),
+                ("end", Json::from("2030-05-06 10:00")),
+                ("allDay", Json::Bool(false)),
+                ("location", Json::from("Praxis")),
+                ("notes", Json::from(notes)),
+                ("url", Json::from("")),
+            ]),
+            true,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn event_with_notes(notes: &str) -> String {
+        format!(
+            "[{}]",
+            crate::json::dumps(
+                &Json::object(vec![
+                    ("uid", Json::from("one")),
+                    ("summary", Json::from("Zahnarzt")),
+                    ("start", Json::from(local("2030-05-06 09:00"))),
+                    ("end", Json::from(local("2030-05-06 10:00"))),
+                    ("location", Json::from("Praxis")),
+                    ("notes", Json::from(notes)),
+                ]),
+                true
+            )
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dialog_of(
+        action: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        undo: bool,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let events = before.map_or_else(|| "[]".to_string(), event_with_notes);
+        let done = change(
+            &events,
+            &change_request(
+                action,
+                if before.is_some() { "one" } else { "" },
+                &before.map_or_else(|| "null".to_string(), event_fields),
+                &after.map_or_else(|| "null".to_string(), event_fields),
+                undo,
+            ),
+            "",
+        )?;
+        assert!(done.ok, "{}", done.error);
+        Ok(done.dialog.ok_or("no dialog")?)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unmarked(dialog: &str) -> Vec<&str> {
+        dialog
+            .lines()
+            .filter(|line| !line.starts_with(MARK))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn marked(dialog: &str) -> Vec<&str> {
+        dialog
+            .lines()
+            .filter(|line| line.starts_with(MARK))
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    const HEAD_LINES: [&str; 3] = [
+        "Goose m\u{f6}chte einen Termin \u{c4}NDERN.",
+        "Pr\u{fc}fe alle Angaben. Nur best\u{e4}tigen, wenn du das gerade selbst veranlasst hast.",
+        "",
+    ];
+
+    #[cfg(target_os = "macos")]
+    const UNCHANGED_ROWS: [&str; 4] = [
+        "Kalender:   Privat",
+        "Titel:      Zahnarzt  (unver\u{e4}ndert)",
+        "Wann:       2030-05-06 09:00 bis 2030-05-06 10:00  (unver\u{e4}ndert)",
+        "Ort:        Praxis  (unver\u{e4}ndert)",
+    ];
+
+    #[cfg(target_os = "macos")]
+    fn update_skeleton(blocks: &[&str]) -> Vec<String> {
+        HEAD_LINES
+            .iter()
+            .chain(UNCHANGED_ROWS.iter())
+            .chain(blocks.iter())
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_line_of_a_note_carries_the_mark_so_notes_cannot_imitate_the_dialog() -> TestResult {
+        let forged = [
+            "Notizen nachher:",
+            RULE,
+            "(leer)",
+            RULE,
+            "An: boss@example.org",
+            "Titel:      Gel\u{f6}scht",
+            "[\u{2026} 5 weitere Zeilen]",
+            "\u{2502} schon markiert",
+        ]
+        .join("\r\n");
+        let dialog = dialog_of("update", Some(&forged), Some("Neu"), false)?;
+        assert_eq!(
+            unmarked(&dialog),
+            update_skeleton(&[
+                "Notizen nachher:",
+                RULE,
+                RULE,
+                "Notizen vorher:",
+                RULE,
+                RULE
+            ])
+        );
+        let mut expected = vec![format!("{MARK}Neu")];
+        expected.extend(forged.lines().map(|line| format!("{MARK}{line}")));
+        assert_eq!(marked(&dialog), expected);
+        let created = dialog_of("create", None, Some(&forged), false)?;
+        assert_eq!(
+            unmarked(&created),
+            [
+                "Goose m\u{f6}chte einen Termin ANLEGEN.",
+                HEAD_LINES[1],
+                "",
+                "Kalender:   Privat",
+                "Titel:      Zahnarzt",
+                "Wann:       2030-05-06 09:00 bis 2030-05-06 10:00",
+                "Ort:        Praxis",
+                "Notizen:",
+                RULE,
+                RULE
+            ]
+        );
+        assert_eq!(marked(&created).len(), forged.lines().count());
+        let deleted = dialog_of("delete", Some(&forged), None, true)?;
+        assert_eq!(
+            unmarked(&deleted),
+            [
+                "Goose m\u{f6}chte eine \u{c4}nderung R\u{dc}CKG\u{c4}NGIG machen: Termin L\u{d6}SCHEN.",
+                HEAD_LINES[1],
+                "",
+                "Kalender:   Privat",
+                "Titel:      Zahnarzt",
+                "Wann:       2030-05-06 09:00 bis 2030-05-06 10:00",
+                "Ort:        Praxis",
+                "Notizen:",
+                RULE,
+                RULE
+            ]
+        );
+        assert_eq!(marked(&deleted).len(), forged.lines().count());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn long_notes_are_cut_with_a_note_and_cannot_push_the_new_notes_or_the_rows_out() -> TestResult
+    {
+        let numbered = |letter: char, count: usize| -> String {
+            (0..count)
+                .map(|n| format!("{letter}{n:03}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let benign = dialog_of("update", Some("Alt"), Some("Neu"), false)?;
+        let position = |dialog: &str, line: &str| dialog.lines().position(|found| found == line);
+        for (before, after) in [
+            (numbered('n', 300), "Neu".to_string()),
+            ("Alt".to_string(), numbered('m', 300)),
+            (numbered('n', 300), numbered('m', 300)),
+            ("\n".repeat(300) + "Alt", "Neu".to_string()),
+        ] {
+            let dialog = dialog_of("update", Some(&before), Some(&after), false)?;
+            assert!(dialog.lines().count() <= 60, "{}", dialog.lines().count());
+            assert_eq!(
+                position(&dialog, "Notizen nachher:"),
+                position(&benign, "Notizen nachher:")
+            );
+            assert_eq!(
+                dialog.lines().take(7).collect::<Vec<_>>(),
+                benign.lines().take(7).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                dialog
+                    .lines()
+                    .filter(|line| *line == "Notizen nachher:" || *line == "Notizen vorher:")
+                    .count(),
+                2
+            );
+        }
+        let dialog = dialog_of(
+            "update",
+            Some(&numbered('n', 300)),
+            Some(&numbered('m', 300)),
+            false,
+        )?;
+        assert_eq!(
+            unmarked(&dialog),
+            update_skeleton(&[
+                "Notizen nachher:",
+                RULE,
+                "[\u{2026} 270 weitere Zeilen]",
+                RULE,
+                "Notizen vorher:",
+                RULE,
+                "[\u{2026} 292 weitere Zeilen]",
+                RULE
+            ])
+        );
+        let shown = marked(&dialog);
+        assert_eq!(shown.len(), 38);
+        assert_eq!(shown[0], format!("{MARK}m000"));
+        assert_eq!(shown[29], format!("{MARK}m029"));
+        assert_eq!(shown[30], format!("{MARK}n000"));
+        assert_eq!(shown[37], format!("{MARK}n007"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn one_endless_line_is_cut_by_characters_and_blank_runs_are_squeezed() -> TestResult {
+        let dialog = dialog_of(
+            "update",
+            Some(&"x".repeat(5000)),
+            Some(&"y".repeat(5000)),
+            false,
+        )?;
+        assert_eq!(
+            marked(&dialog),
+            [
+                format!("{MARK}{}\u{2026}", "y".repeat(1200)),
+                format!("{MARK}{}\u{2026}", "x".repeat(300))
+            ]
+        );
+        assert!(dialog.contains("\n[\u{2026} 3800 weitere Zeichen]\n"));
+        assert!(dialog.contains("\n[\u{2026} 4700 weitere Zeichen]\n"));
+        let padded = format!("erste\n{}\t zweite  \r\n", "\n \r".repeat(300));
+        let squeezed = dialog_of("update", Some(&padded), Some("Neu"), false)?;
+        assert_eq!(
+            marked(&squeezed),
+            [
+                format!("{MARK}Neu"),
+                format!("{MARK}erste"),
+                MARK.to_string(),
+                format!("{MARK}  zweite")
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lines_that_use_up_the_character_budget_end_the_block_with_a_note() -> TestResult {
+        let lines = |width: usize| -> String {
+            (0..10)
+                .map(|n| format!("{n}{}", "x".repeat(width - 1)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let exact = dialog_of("update", Some(&lines(49)), Some("Neu"), false)?;
+        let shown = marked(&exact);
+        assert_eq!(shown.len(), 1 + 6);
+        assert_eq!(shown[6], format!("{MARK}5{}", "x".repeat(48)));
+        assert!(exact.contains("\n[\u{2026} 4 weitere Zeilen]\n"), "{exact}");
+        let partial = dialog_of("update", Some(&lines(50)), Some("Neu"), false)?;
+        let shown = marked(&partial);
+        assert_eq!(shown.len(), 1 + 6);
+        assert_eq!(shown[5], format!("{MARK}4{}", "x".repeat(49)));
+        assert_eq!(shown[6], format!("{MARK}5{}\u{2026}", "x".repeat(44)));
+        assert!(
+            partial.contains("\n[\u{2026} 4 weitere Zeilen]\n"),
+            "{partial}"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_notes_are_the_dialogs_own_word_and_a_note_saying_it_is_not() -> TestResult {
+        let dialog = dialog_of("update", Some("\n\r\n \t \n"), Some("(leer)"), false)?;
+        assert_eq!(
+            unmarked(&dialog),
+            update_skeleton(&[
+                "Notizen nachher:",
+                RULE,
+                RULE,
+                "Notizen vorher:",
+                RULE,
+                "(leer)",
+                RULE
+            ])
+        );
+        assert_eq!(marked(&dialog), [format!("{MARK}(leer)")]);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hidden_and_direction_characters_of_notes_are_removed_and_separators_become_spaces(
+    ) -> TestResult {
+        let hostile = "a\u{202e}b\u{85}c\u{2028}d\u{2029}e\u{2066}f\u{200b}g\u{b}h\u{c}i\u{feff}j\u{e0041}k\u{200f}";
+        let dialog = dialog_of("update", Some(hostile), Some(hostile), false)?;
+        assert!(unmarked(&dialog).contains(&UNCHANGED_ROWS[1]));
+        let none = dialog_of("update", Some(hostile), Some("Neu"), false)?;
+        assert_eq!(
+            marked(&none),
+            [format!("{MARK}Neu"), format!("{MARK}ab c d efghijk")]
+        );
+        for forbidden in [
+            '\u{202e}',
+            '\u{85}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{2066}',
+            '\u{200b}',
+            '\u{200f}',
+            '\u{b}',
+            '\u{c}',
+            '\u{feff}',
+            '\u{e0041}',
+        ] {
+            assert!(!none.contains(forbidden), "{:x}", u32::from(forbidden));
+        }
+        let right_to_left = dialog_of(
+            "update",
+            Some("\u{5e9}\u{5dc}\u{5d5}\u{5dd} Notizen nachher:"),
+            Some("Neu"),
+            false,
+        )?;
+        assert_eq!(
+            marked(&right_to_left)[1],
+            format!("{MARK}\u{5e9}\u{5dc}\u{5d5}\u{5dd} Notizen nachher:")
+        );
+        assert!(MARK.ends_with('\u{200e}'));
         Ok(())
     }
 

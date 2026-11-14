@@ -14,11 +14,35 @@ function whenText(f) {
   return f.start + ' bis ' + f.end;
 }
 
-function noteBlock(label, text, cap) {
-  var body = shown(text).replace(/\r\n?/g, '\n').trim();
-  var chars = Array.from(body);
-  if (chars.length > cap) { body = chars.slice(0, cap).join('') + '\n[\u2026 ' + (chars.length - cap) + ' weitere Zeichen]'; }
-  return [label, '--------------------------------', body === '' ? '(leer)' : body, '--------------------------------'];
+var NOTE_MARK = '\u2502 \u200e', NOTE_RULE = '--------------------------------';
+var AFTER_LIMIT = [30, 1200], BEFORE_LIMIT = [8, 300], BODY_LIMIT = [60, 3200];
+
+function noteRows(text) {
+  var lines = shown(text).replace(/\r\n?/g, '\n').replace(/\t/g, ' ').trim().split('\n'), rows = [], line, i;
+  for (i = 0; i < lines.length; i++) {
+    line = lines[i].replace(/\s+$/, '');
+    if (line !== '' || rows.length === 0 || rows[rows.length - 1] !== '') { rows.push(line); }
+  }
+  return rows;
+}
+
+function markedLines(text, limit) {
+  var rows = noteRows(text), out = [], left = limit[1], i = 0, rest = 0, chars;
+  if (rows[0] === '') { return ['(leer)']; }
+  while (i < rows.length && out.length < limit[0] && left > 0) {
+    chars = Array.from(rows[i++]);
+    if (chars.length > left) { rest = chars.length - left; chars = chars.slice(0, left); }
+    out.push(NOTE_MARK + chars.join('') + (rest > 0 ? '\u2026' : ''));
+    left -= chars.length + 1;
+    if (rest > 0) { break; }
+  }
+  if (i < rows.length) { out.push('[\u2026 ' + (rows.length - i) + ' weitere Zeilen]'); }
+  else if (rest > 0) { out.push('[\u2026 ' + rest + ' weitere Zeichen]'); }
+  return out;
+}
+
+function noteBlock(label, text, limit) {
+  return [label, NOTE_RULE].concat(markedLines(text, limit), [NOTE_RULE]);
 }
 
 function rowOf(label, text) { return (label + ':          ').slice(0, 12) + text; }
@@ -39,16 +63,17 @@ function dialogLines(req, before, after) {
   if (req.action === 'create') {
     lines.push(row('Titel', after.summary), row('Wann', whenText(after)));
     if (after.location !== '') { lines.push(row('Ort', after.location)); }
-    if (after.notes !== '') { lines = lines.concat(noteBlock('Notizen:', after.notes, 1200)); }
+    if (after.notes !== '') { lines = lines.concat(noteBlock('Notizen:', after.notes, AFTER_LIMIT)); }
   } else if (req.action === 'delete') {
     lines.push(row('Titel', before.summary), row('Wann', whenText(before)));
     if (before.location !== '') { lines.push(row('Ort', before.location)); }
-    if (before.notes !== '') { lines = lines.concat(noteBlock('Notizen:', before.notes, 600)); }
+    if (before.notes !== '') { lines = lines.concat(noteBlock('Notizen:', before.notes, BEFORE_LIMIT)); }
   } else {
     lines.push(changedRow('Titel', before.summary, after.summary), changedRow('Wann', whenText(before), whenText(after)));
     if (before.location !== '' || after.location !== '') { lines.push(changedRow('Ort', before.location, after.location)); }
     if (before.notes !== after.notes) {
-      lines = lines.concat(noteBlock('Notizen vorher:', before.notes, 600), noteBlock('Notizen nachher:', after.notes, 1200));
+      lines = lines.concat(noteBlock('Notizen nachher:', after.notes, AFTER_LIMIT),
+                           noteBlock('Notizen vorher:', before.notes, BEFORE_LIMIT));
     }
   }
   return lines;
@@ -68,7 +93,8 @@ function askApproval(p, seconds) {
   if (p.cc.length) { lines.push('Cc:         ' + flatList(p.cc)); }
   lines.push('Betreff:    ' + flat(p.subject, 300));
   if (p.reply) { lines.push('Antwort auf: ' + flat(p.reply.subject, 150) + ' (von ' + flat(p.reply.from, 100) + ')'); }
-  lines.push('', '--------------------------------', p.body, '--------------------------------');
+  lines.push('', NOTE_RULE);
+  lines = lines.concat(markedLines(p.body, BODY_LIMIT), [NOTE_RULE]);
   var decision = showDialog(p.title || 'Goose m\u00f6chte eine E-Mail senden', lines, label, seconds);
   return decision === 'approved' ? 'send' : decision;
 }
