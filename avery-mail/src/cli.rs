@@ -38,6 +38,7 @@ const CHANGES_SHOWN: usize = 20;
 const SUGGESTION_CUTOFF: f64 = 0.6;
 const MAX_COMMAND_CHARS: usize = 100;
 const SETUP_HINT: &str = "Freigeben: avery mail setup";
+const REVOKE_WITHOUT_APPS: &str = "Alles entziehen ohne Mail: avery mail revoke";
 
 fn sent_by(sender: &str, address: &str) -> bool {
     bracketed(sender)
@@ -335,7 +336,9 @@ fn setup(ctx: &Context, console: &mut Console) -> u8 {
             account.id.as_str()
         }),
         Err(error) => {
-            console.say(&format!("Fehler: Apple Mail ist nicht lesbar ({error})"));
+            console.say(&format!(
+                "Fehler: Apple Mail ist nicht lesbar ({error}). {REVOKE_WITHOUT_APPS}"
+            ));
             return 1;
         }
     };
@@ -346,7 +349,7 @@ fn setup(ctx: &Context, console: &mut Console) -> u8 {
         ),
         Err(error) => {
             console.say(&format!(
-                "Fehler: Apple Kalender ist nicht lesbar ({error})"
+                "Fehler: Apple Kalender ist nicht lesbar ({error}). {REVOKE_WITHOUT_APPS}"
             ));
             return 1;
         }
@@ -1505,7 +1508,8 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::CalendarInfo;
+    use crate::backend::Backend;
+    use crate::calendar::{CalendarBackend, CalendarInfo};
     use crate::error::ToolResult;
     use crate::fake::FakeOptions;
     use crate::journal;
@@ -1788,6 +1792,50 @@ mod tests {
             assert_eq!(code, 1, "{input:?}: {out}");
             assert!(out.contains(expected), "{input:?}: {out}");
             assert_eq!(saved(&ctx)?, j(&base())?, "{input:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn setup_names_the_way_out_when_mail_or_calendar_cannot_be_listed() -> TestResult {
+        let listing = crate::testutil::Listing {
+            accounts: vec![MailAccount {
+                id: "ACC-1".to_string(),
+                name: "iCloud".to_string(),
+                kind: "imap".to_string(),
+                addresses: vec!["me@icloud.example".to_string()],
+            }],
+            calendars: vec![CalendarInfo {
+                id: "CAL-1".to_string(),
+                name: "Privat".to_string(),
+                writable: true,
+            }],
+        };
+        for (mail_up, failed_listing) in [
+            (false, "Fehler: Apple Mail ist nicht lesbar ("),
+            (true, "Fehler: Apple Kalender ist nicht lesbar ("),
+        ] {
+            let dir = TempDir::new()?;
+            let (mail, calendar): (Box<dyn Backend>, Box<dyn CalendarBackend>) = if mail_up {
+                (Box::new(listing.clone()), Box::new(Untouchable::default()))
+            } else {
+                (Box::new(Untouchable::default()), Box::new(listing.clone()))
+            };
+            let settings = settings_at(&dir.path("config.json"));
+            fs::write(&settings.config_path, base())?;
+            let ctx = Context::new(settings, mail, calendar);
+            let (code, out) = run(&ctx, &["setup"], "1\n1\nj\n");
+            assert_eq!(code, 1, "{out}");
+            assert!(out.contains(failed_listing), "{out}");
+            assert!(
+                out.contains("). Alles entziehen ohne Mail: avery mail revoke"),
+                "{out}"
+            );
+            assert_eq!(saved(&ctx)?, j(&base())?);
+            let (code, out) = run(&ctx, &["revoke"], "");
+            assert_eq!(code, 0, "{out}");
+            let rights = ctx.settings.stored_rights().map_err(|e| e.message())?;
+            assert!(!rights.enabled());
         }
         Ok(())
     }

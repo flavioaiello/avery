@@ -885,6 +885,13 @@ fn a_failed_step_offers_to_cancel_or_to_go_on_and_is_not_repeated() -> TestResul
             "{}",
             failure.text("text")
         );
+        assert!(
+            failure
+                .text("text")
+                .contains("Alles entziehen ohne Mail: avery mail revoke"),
+            "{}",
+            failure.text("text")
+        );
         assert_eq!(failure.text("icon"), "caution");
         assert_eq!(
             failure.field("buttons"),
