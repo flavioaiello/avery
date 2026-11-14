@@ -1959,4 +1959,35 @@ function run(argv) {
         assert_eq!(ping.data, json::parse(r#"{"jxa": true}"#)?);
         Ok(())
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_setup_script_refuses_every_operation_of_the_approval_scripts() -> TestResult {
+        for op in [
+            "approve_send",
+            "approve_change",
+            "open_url",
+            "ask_text",
+            "approval_test",
+            "accounts",
+            "account_info",
+            "mailboxes",
+            "messages",
+            "read",
+            "compose",
+            "calendars",
+            "events",
+            "event",
+            "change",
+        ] {
+            let request = format!(
+                r#"{{"op": "{op}", "accountId": "ACC-1", "calendarId": "CAL-1", "title": "T", "text": "x", "url": "https://example.org/", "seconds": 5}}"#
+            );
+            let answer = probe("{}", &request)?;
+            assert!(!answer.ok, "{op}");
+            assert_eq!(answer.error, "unknown_op", "{op}");
+            assert!(answer.calls().is_empty(), "{op}: {:?}", answer.calls());
+        }
+        Ok(())
+    }
 }

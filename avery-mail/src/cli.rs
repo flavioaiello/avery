@@ -1850,6 +1850,64 @@ mod tests {
     }
 
     #[test]
+    fn setup_refuses_more_than_the_limit_of_listed_entries_for_mail_and_calendars() -> TestResult {
+        let accounts = |count: usize| -> Vec<MailAccount> {
+            (0..count)
+                .map(|n| MailAccount {
+                    id: format!("ACC-{n}"),
+                    name: format!("Konto {n}"),
+                    kind: "imap".to_string(),
+                    addresses: vec![format!("k{n}@example.org")],
+                })
+                .collect()
+        };
+        let calendars = |count: usize| -> Vec<CalendarInfo> {
+            (0..count)
+                .map(|n| CalendarInfo {
+                    id: format!("CAL-{n}"),
+                    name: format!("Kalender {n}"),
+                    writable: true,
+                })
+                .collect()
+        };
+        for (mail_count, calendar_count, refused) in [
+            (MAX_ENTRIES + 1, 1, true),
+            (1, MAX_ENTRIES + 1, true),
+            (MAX_ENTRIES + 1, MAX_ENTRIES + 1, true),
+            (MAX_ENTRIES, MAX_ENTRIES, false),
+        ] {
+            let dir = TempDir::new()?;
+            let listing = crate::testutil::Listing {
+                accounts: accounts(mail_count),
+                calendars: calendars(calendar_count),
+            };
+            let settings = settings_at(&dir.path("config.json"));
+            let ctx = Context::new(
+                settings,
+                Box::new(listing.clone()),
+                Box::new(listing.clone()),
+            );
+            let (code, out) = run(&ctx, &["setup"], &"\n".repeat(2 * MAX_ENTRIES + 2));
+            assert!(!std::path::Path::new(&ctx.settings.config_path).exists());
+            if refused {
+                assert_eq!(code, 1, "{mail_count}/{calendar_count}: {out}");
+                assert!(
+                    out.contains(&format!(
+                        "Fehler: Mail oder Kalender melden mehr als {MAX_ENTRIES} Eintraege."
+                    )),
+                    "{mail_count}/{calendar_count}: {out}"
+                );
+                assert!(!out.contains("Konto 0"), "nothing is offered: {out}");
+            } else {
+                assert_eq!(code, 0, "{mail_count}/{calendar_count}: {out}");
+                assert!(out.contains("Unveraendert."), "{out}");
+                assert!(!out.contains("melden mehr als"), "{out}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn setup_takes_no_argument() -> TestResult {
         let dir = TempDir::new()?;
         let ctx = real(&dir, None)?;

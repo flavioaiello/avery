@@ -284,9 +284,7 @@ impl Host for OsascriptHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(debug_assertions)]
     use crate::testutil::{TempDir, TestResult};
-    #[cfg(debug_assertions)]
     use std::fs;
     #[cfg(debug_assertions)]
     use std::os::unix::fs::PermissionsExt;
@@ -529,6 +527,132 @@ mod tests {
         }
         let missing = programs(&[("AVERY_LAUNCHCTL", "/nonexistent/launchctl")]);
         assert!(!missing.graphical());
+        Ok(())
+    }
+
+    fn alive(pid: &str) -> bool {
+        matches!(
+            shell(&format!("kill -0 {pid}"), 5000),
+            Finished::Done { code: Some(0), .. }
+        )
+    }
+
+    #[test]
+    fn a_child_that_is_stopped_for_the_deadline_or_the_output_limit_is_gone_afterwards(
+    ) -> TestResult {
+        for (command, limit, expected) in [
+            ("sleep 30", STDOUT_LIMIT, Finished::TimedOut),
+            ("yes abcdefghij", 1024, Finished::TooLarge),
+        ] {
+            let dir = TempDir::new()?;
+            let pid_file = dir.path("pid");
+            let script = format!("echo $$ > '{pid_file}'; exec {command}");
+            let finished = run_limited(
+                "/bin/sh",
+                &["-c", &script],
+                Duration::from_millis(1000),
+                limit,
+                1024,
+            );
+            assert_eq!(finished, expected, "{command}");
+            let pid = fs::read_to_string(&pid_file)?.trim().to_string();
+            assert!(
+                !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()),
+                "{pid:?}"
+            );
+            let mut lingering = true;
+            for _ in 0..40 {
+                lingering = alive(&pid);
+                if !lingering {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!lingering, "{command}: process {pid} is still running");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kinds(script: &str, names: &[&str]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let expressions: Vec<String> = names.iter().map(|name| format!("typeof {name}")).collect();
+        let reporter = format!(
+            "function run(argv) {{ return JSON.stringify([{}]); }}",
+            expressions.join(", ")
+        );
+        let output = Command::new(OSASCRIPT)
+            .args([
+                "-l",
+                "JavaScript",
+                "-e",
+                &format!("{script}\n{reporter}"),
+                "{}",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        let answer = crate::json::parse(String::from_utf8_lossy(&output.stdout).trim())?;
+        Ok(answer
+            .as_array()
+            .ok_or("array")?
+            .iter()
+            .filter_map(|kind| kind.as_str().map(str::to_string))
+            .collect())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_script_carries_only_the_libraries_it_uses() -> TestResult {
+        let names = [
+            "askApproval",
+            "changeDecision",
+            "dialogLines",
+            "askButtons",
+            "chooseList",
+            "notify",
+            "shown",
+            "hidden",
+            "flat",
+            "showDialog",
+        ];
+        let approvals_only: Vec<&str> = [
+            "function",
+            "function",
+            "function",
+            "undefined",
+            "undefined",
+            "undefined",
+            "function",
+            "function",
+            "function",
+            "function",
+        ]
+        .to_vec();
+        let setup_only: Vec<&str> = [
+            "undefined",
+            "undefined",
+            "undefined",
+            "function",
+            "function",
+            "function",
+            "function",
+            "function",
+            "function",
+            "function",
+        ]
+        .to_vec();
+        assert_eq!(
+            kinds(&dialog_script(), &names)?,
+            setup_only,
+            "setup dialogs"
+        );
+        assert_eq!(kinds(&mail_script(), &names)?, approvals_only, "mail");
+        assert_eq!(
+            kinds(&calendar_script(), &names)?,
+            approvals_only,
+            "calendar"
+        );
         Ok(())
     }
 

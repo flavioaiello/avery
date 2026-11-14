@@ -629,6 +629,35 @@ function run(argv) {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_mail_script_refuses_every_operation_of_the_setup_dialogs() -> TestResult {
+        for op in [
+            "ask_buttons",
+            "choose_list",
+            "notify",
+            "ask_text",
+            "open_url",
+            "approve_send",
+            "approve_change",
+            "calendars",
+            "events",
+            "change",
+        ] {
+            let request = format!(
+                r#"{{"op": "{op}", "accountId": "ACC-1", "title": "T", "text": "x", "buttons": ["OK"], "items": ["a"], "seconds": 5}}"#
+            );
+            let probe = compose_probe(NO_REPLY, &request, "Senden")?;
+            assert!(!probe.ok, "{op}");
+            assert_eq!(probe.error, "unknown_op", "{op}");
+            assert!(
+                probe.dialog.is_none() && !probe.sent && probe.deleted == 0,
+                "{op}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn a_reply_to_many_recipients_is_refused_before_any_dialog() -> TestResult {
         let many: Vec<String> = (0..40).map(|i| format!("\"p{i}@example.org\"")).collect();
         let scenario = format!(

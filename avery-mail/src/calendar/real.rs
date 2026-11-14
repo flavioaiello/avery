@@ -694,6 +694,35 @@ function run(argv) {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_calendar_script_refuses_every_operation_of_the_setup_dialogs() -> TestResult {
+        for op in [
+            "ask_buttons",
+            "choose_list",
+            "notify",
+            "ask_text",
+            "open_url",
+            "approve_send",
+            "approve_change",
+            "approval_test",
+            "accounts",
+            "compose",
+        ] {
+            let request = format!(
+                r#"{{"op": "{op}", "calendarId": "CAL-1", "title": "T", "text": "x", "buttons": ["OK"], "items": ["a"], "seconds": 5}}"#
+            );
+            let answer = probe("[]", &request)?;
+            let object = answer.as_object().ok_or("object")?;
+            assert_eq!(object.get("ok"), Some(&Json::Bool(false)), "{op}");
+            assert_eq!(text_of(object.get("error")), "unknown_op", "{op}");
+            let log = object.get("log").and_then(Json::as_object).ok_or("log")?;
+            assert_eq!(log.get("dialog"), Some(&Json::Null), "{op}");
+            assert_eq!(log.get("created"), Some(&Json::Int(0)), "{op}");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn the_script_reads_one_event_and_refuses_unknown_and_ambiguous_ids() -> TestResult {
         let events = format!(
             r#"[{{"uid": "one", "summary": "Eins", "start": "{}", "end": "{}", "notes": "Notiz",
