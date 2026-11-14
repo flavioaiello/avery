@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(
             backend.mailboxes(&account),
             Err(ToolError::msg(
-                "The account no longer exists in Mail. Ask the user to run `avery mail setup apple` again."
+                "The account no longer exists in Mail. Ask the user to run `avery mail setup` again."
             ))
         );
         assert!(
