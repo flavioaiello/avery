@@ -62,12 +62,45 @@ fn query(l: &Launcher, program: &str, args: &[&str]) -> Option<String> {
     )
 }
 
-fn profile_program(config: &str) -> Option<&str> {
-    config
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("cmd: \""))
+fn unquote(value: &str) -> String {
+    if let Some(inner) = value
+        .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'))
+    {
+        let mut text = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                text.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some(escaped @ ('\\' | '"')) => text.push(escaped),
+                Some(other) => {
+                    text.push('\\');
+                    text.push(other);
+                }
+                None => text.push('\\'),
+            }
+        }
+        text
+    } else if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        inner.replace("''", "'")
+    } else {
+        value.to_string()
+    }
+}
+
+fn profile_program(config: &str) -> Option<String> {
+    let value = config
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("cmd:"))?
+        .trim();
+    let program = unquote(value);
+    (!program.is_empty()).then_some(program)
 }
 
 const WHISPER_FILES: [(&str, &str); 4] = [
@@ -145,7 +178,7 @@ fn profile(l: &Launcher, report: &mut Report) {
     }
     let text = read_limited(&config).unwrap_or_default();
     match profile_program(&text) {
-        Some(program) if l.system.find(program).is_some() => {
+        Some(program) if l.system.find(&program).is_some() => {
             report.ok(&format!("Mail-Server im Goose-Profil ({program})"));
         }
         Some(program) => report.miss(&format!(
@@ -217,5 +250,47 @@ pub(crate) fn run(
         let missing = report.missing;
         report.plain(&format!("{missing} Punkt(e) offen."));
         Ok(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_program;
+
+    #[test]
+    fn the_program_is_read_in_every_style_yaml_writers_use() {
+        for (line, expected) in [
+            (
+                "    cmd: \"/opt/homebrew/bin/avery\"",
+                Some("/opt/homebrew/bin/avery"),
+            ),
+            (
+                "    cmd: /opt/homebrew/bin/avery",
+                Some("/opt/homebrew/bin/avery"),
+            ),
+            (
+                "    cmd: '/opt/homebrew/bin/avery'",
+                Some("/opt/homebrew/bin/avery"),
+            ),
+            (
+                "    cmd: '/opt/o''neil/bin/avery'",
+                Some("/opt/o'neil/bin/avery"),
+            ),
+            (
+                "    cmd: \"/opt/a \\\"b\\\"/avery\"",
+                Some("/opt/a \"b\"/avery"),
+            ),
+            ("    cmd: \"/x\\\\y\"", Some("/x\\y")),
+            ("    cmd:   /opt/x/avery  ", Some("/opt/x/avery")),
+            ("    cmd:", None),
+            ("    cmd: ''", None),
+            ("    cmd: \"\"", None),
+            ("    cmdline: /opt/x", None),
+            ("    args:", None),
+        ] {
+            assert_eq!(profile_program(line).as_deref(), expected, "{line}");
+        }
+        let config = "extensions:\n  mail:\n    cmd: /a/b\n    args:\n    - serve\n";
+        assert_eq!(profile_program(config).as_deref(), Some("/a/b"));
     }
 }

@@ -418,8 +418,11 @@ mod tests {
         Context::demo(settings, FakeOptions::default())
     }
 
-    fn week() -> &'static str {
-        r#"{"days": 14}"#
+    fn fourteen_days_from_tomorrow() -> Result<String, Box<dyn std::error::Error>> {
+        let tomorrow = crate::calendar::local_today()
+            .and_then(|today| today.add_days(1))
+            .ok_or("no local date")?;
+        Ok(format!(r#"{{"days": 14, "start": "{tomorrow}"}}"#))
     }
 
     #[test]
@@ -445,7 +448,7 @@ mod tests {
     #[test]
     fn events_are_listed_earliest_first_with_the_warning_and_without_other_calendars() -> TestResult
     {
-        let text = list_events(&demo(""), &args(week())?)?;
+        let text = list_events(&demo(""), &args(&fourteen_days_from_tomorrow()?)?)?;
         assert!(text.starts_with(UNTRUSTED));
         assert!(text.contains("Calendars: Demo Privat, Demo Familie, Demo Feiertage"));
         let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("- [")).collect();

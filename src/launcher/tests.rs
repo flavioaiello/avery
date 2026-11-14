@@ -984,6 +984,24 @@ fn doctor_checks_the_local_dictation_and_its_whisper_model() -> TestResult {
 }
 
 #[test]
+fn doctor_still_finds_the_mail_server_after_goose_rewrote_the_profile_without_quotes() -> TestResult
+{
+    let green = green()?;
+    let path = green.rig.goose_root().join("config/config.yaml");
+    let text = fs::read_to_string(&path)?;
+    let plain = text.replace(&format!("cmd: \"{EXE}\""), &format!("cmd: {EXE}"));
+    assert_ne!(plain, text);
+    green.rig.write(".avery/goose/config/config.yaml", &plain)?;
+    let (code, out) = doctor(&green);
+    assert!(
+        out.contains(&format!("  ok      Mail-Server im Goose-Profil ({EXE})")),
+        "{out}"
+    );
+    assert_eq!(code, 0, "{out}");
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_an_unreadable_mail_configuration() -> TestResult {
     let green = green()?;
     green
