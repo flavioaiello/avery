@@ -407,7 +407,7 @@ fn write_tool_list() -> Vec<Json> {
     vec![
         tool(
             "create_draft",
-            "Save a draft for the user to review in their mail app (Gmail and Outlook.com keep it in Drafts, Apple Mail opens it); NOTHING is sent. New mail: to, subject, body. Answer: reply_to_id (+ account and mailbox of the original) and body. Plain text, no Bcc, no attachments.",
+            "Save a draft for the user to review in Mail (it opens as a draft window); NOTHING is sent. New mail: to, subject, body. Answer: reply_to_id (+ account and mailbox of the original) and body. Plain text, no Bcc, no attachments.",
             compose_properties(),
             &["body"],
             false,

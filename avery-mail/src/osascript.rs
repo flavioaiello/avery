@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -109,24 +109,9 @@ pub(crate) fn run_limited(
     stdout_limit: usize,
     stderr_limit: usize,
 ) -> Finished {
-    run_fed(program, args, &[], timeout, stdout_limit, stderr_limit)
-}
-
-pub(crate) fn run_fed(
-    program: &str,
-    args: &[&str],
-    input: &[u8],
-    timeout: Duration,
-    stdout_limit: usize,
-    stderr_limit: usize,
-) -> Finished {
     let spawned = Command::new(program)
         .args(args)
-        .stdin(if input.is_empty() {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -137,12 +122,6 @@ pub(crate) fn run_fed(
         stop(&mut child);
         return Finished::NotStarted;
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        let bytes = input.to_vec();
-        thread::spawn(move || {
-            let _ = stdin.write_all(&bytes);
-        });
-    }
     let out = drain(stdout, stdout_limit);
     let err = drain(stderr, stderr_limit);
     let deadline = Instant::now() + timeout;
@@ -346,56 +325,6 @@ mod tests {
                 stderr: "oops".into()
             }
         );
-    }
-
-    #[test]
-    fn input_reaches_standard_input_and_is_optional() {
-        assert_eq!(
-            run_fed(
-                "/bin/cat",
-                &[],
-                b"hello",
-                Duration::from_secs(5),
-                1024,
-                1024
-            ),
-            Finished::Done {
-                code: Some(0),
-                stdout: "hello".into(),
-                stderr: String::new()
-            }
-        );
-        assert_eq!(
-            run_fed("/bin/cat", &[], b"", Duration::from_secs(5), 1024, 1024),
-            Finished::Done {
-                code: Some(0),
-                stdout: String::new(),
-                stderr: String::new()
-            }
-        );
-    }
-
-    #[test]
-    fn a_child_that_ignores_its_input_does_not_block_the_caller() {
-        let big = vec![b'x'; 4 * 1024 * 1024];
-        let started = Instant::now();
-        let finished = run_fed(
-            "/bin/sh",
-            &["-c", "printf done"],
-            &big,
-            Duration::from_secs(10),
-            1024,
-            1024,
-        );
-        assert_eq!(
-            finished,
-            Finished::Done {
-                code: Some(0),
-                stdout: "done".into(),
-                stderr: String::new()
-            }
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

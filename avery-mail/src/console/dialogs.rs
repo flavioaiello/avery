@@ -33,7 +33,7 @@ const MALFORMED: &str = "Der Dialog hat eine unerwartete Antwort geliefert.";
 const BAD_REQUEST: &str = "Der Dialog konnte nicht angezeigt werden (interner Fehler).";
 const READ_PROMPT: &str = "Welche davon soll Avery lesen?";
 const WRITE_PROMPT: &str = "Bei welchen darf Avery auch schreiben? Jede Änderung braucht danach deinen Klick in einem macOS-Dialog.";
-const ACCESS_TEXT: &str = "Avery startet jetzt Mail und Kalender und listet deine Konten und Kalender auf. macOS fragt dabei einmal um Erlaubnis (Automation): bitte erlauben. Avery braucht dafür keine Anmeldung.\n\nNur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
+const ACCESS_TEXT: &str = "Avery startet jetzt Mail und Kalender und listet deine Konten und Kalender auf. macOS fragt dabei einmal um Erlaubnis (Automation): bitte erlauben.\n\nNur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
 const CANCEL: &str = "Abbrechen";
 const NEXT: &str = "Weiter";
 
@@ -1730,7 +1730,7 @@ mod tests {
             .then("ask_buttons", Reply::Button(0))
             .then("choose_list", Reply::List(Vec::new()));
         let mut talk = Talk::new();
-        talk.set_title("Outlook.com verbinden");
+        talk.set_title("Mail einrichten");
         let mut dialogs = Dialogs::new(&script, &mut talk);
         dialogs.ask_buttons(&Buttons {
             text: "x",
@@ -1747,7 +1747,7 @@ mod tests {
             ok: "OK",
         })?;
         for seen in script.seen() {
-            assert_eq!(seen.text("title"), "Outlook.com verbinden");
+            assert_eq!(seen.text("title"), "Mail einrichten");
         }
         assert_eq!(Talk::new().title, DEFAULT_TITLE);
         Ok(())

@@ -139,7 +139,7 @@ impl Terminal<'_> {
 
     fn explain(&mut self) -> bool {
         self.say("Avery liest und aendert Mail und Kalender ueber Apple Mail und Kalender. Dazu startet Avery beide Programme;");
-        self.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
+        self.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung (bitte erlauben).");
         true
     }
 
@@ -308,7 +308,6 @@ mod tests {
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(text.contains("Automation-Berechtigung"), "{text}");
         assert!(text.contains("Apple Mail und Kalender"), "{text}");
-        assert!(text.contains("keine Anmeldung"), "{text}");
     }
 
     #[test]

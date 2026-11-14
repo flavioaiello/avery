@@ -13,7 +13,7 @@ use crate::text::one_line_str;
 const WELCOME_TITLE: &str = "Willkommen bei Avery";
 const DONE_TITLE: &str = "Avery ist eingerichtet";
 const SETUP_TITLE: &str = "Apple Mail und Kalender";
-const WELCOME_TEXT: &str = "Avery braucht Zugriff auf dein privates Mail- und Kalenderkonto in Apple Mail und Kalender. Die Einrichtung dauert ein paar Minuten und gilt dauerhaft. Eine Anmeldung ist nicht nötig. Jeden Schritt kannst du abbrechen: dann wird nichts gespeichert.";
+const WELCOME_TEXT: &str = "Avery braucht Zugriff auf dein privates Mail- und Kalenderkonto in Apple Mail und Kalender. Die Einrichtung dauert ein paar Minuten und gilt dauerhaft. Jeden Schritt kannst du abbrechen: dann wird nichts gespeichert.";
 const SELFTEST_TEXT: &str =
     "Soll Avery jetzt den Lesezugriff prüfen? Dabei wird nichts gesendet oder geändert.";
 const SELFTEST_NOTICE: &str = "Der Lesetest läuft ...";

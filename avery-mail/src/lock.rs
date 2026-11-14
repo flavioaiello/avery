@@ -121,7 +121,7 @@ mod tests {
     fn different_lock_files_never_exclude_each_other() -> TestResult {
         let dir = TempDir::new()?;
         let first = taken(&dir.path("config.lock"))?;
-        let second = taken(&dir.path("vault.lock"))?;
+        let second = taken(&dir.path("other.lock"))?;
         drop(first);
         drop(second);
         Ok(())
