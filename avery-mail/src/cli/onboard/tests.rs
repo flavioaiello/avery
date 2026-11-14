@@ -566,7 +566,7 @@ fn nothing_is_touched_until_the_explanation_is_confirmed() -> TestResult {
 
 #[test]
 fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestResult {
-    let station = demo_station()?;
+    let demo = demo_station()?;
     let script = scripted(&[
         welcome(),
         levels(&[0, 3], &[]),
@@ -577,7 +577,7 @@ fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestRes
             ("notify", Reply::Done),
         ],
     ]);
-    let (code, out) = onboard(&station, &script);
+    let (code, out) = onboard(&demo, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
     let seen = script.seen();
@@ -595,7 +595,7 @@ fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestRes
     );
     assert!(result.contains("Alle Pruefungen bestanden."), "{result}");
     assert_eq!(seen[7].text("icon"), "note");
-    let failing = station_with_failing_checks()?;
+    let failing = station(None, apple_orchard())?;
     let script = scripted(&[
         welcome(),
         levels(&[0, 1], &[]),
@@ -617,10 +617,6 @@ fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestRes
     assert!(seen[7].text("text").contains("FAIL"));
     assert_eq!(seen[7].text("icon"), "caution");
     Ok(())
-}
-
-fn station_with_failing_checks() -> Result<Station, Box<dyn Error>> {
-    station(None, apple_orchard())
 }
 
 fn trailing(index: usize) -> Vec<Step> {
@@ -666,17 +662,17 @@ fn cancelling_at_every_step_stops_cleanly_and_saves_nothing() -> TestResult {
 
 #[test]
 fn a_timeout_ends_the_run_and_keeps_only_what_was_saved_before() -> TestResult {
-    let station = station(None, apple_orchard())?;
+    let fresh = station(None, apple_orchard())?;
     let script = scripted(&[
         welcome(),
         vec![("ask_buttons", Reply::Timeout), ("notify", Reply::Done)],
     ]);
-    let (code, out) = onboard(&station, &script);
+    let (code, out) = onboard(&fresh, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
     assert!(out.contains("Keine Antwort im Dialog"), "{out}");
-    assert_eq!(station.apple_calls(), 0);
-    assert!(!Path::new(&station.ctx.settings.config_path).exists());
+    assert_eq!(fresh.apple_calls(), 0);
+    assert!(!Path::new(&fresh.ctx.settings.config_path).exists());
 
     let config = r#"{"version": 4, "mail": [{"id": "A1", "name": "iCloud", "level": "read"}],
         "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}"#;
@@ -687,7 +683,7 @@ fn a_timeout_ends_the_run_and_keeps_only_what_was_saved_before() -> TestResult {
             "Keine Antwort im Dialog, die Einrichtung wurde beendet. Das ist schon gespeichert und bleibt:",
         ),
     ] {
-        let station = station_with(config)?;
+        let station = station(Some(config), apple_orchard())?;
         let script = scripted(&[
             welcome(),
             vec![
@@ -712,10 +708,6 @@ fn a_timeout_ends_the_run_and_keeps_only_what_was_saved_before() -> TestResult {
         assert_eq!(station.config(), config);
     }
     Ok(())
-}
-
-fn station_with(config: &str) -> Result<Station, Box<dyn Error>> {
-    station(Some(config), apple_orchard())
 }
 
 #[test]
