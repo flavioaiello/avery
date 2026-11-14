@@ -14,23 +14,24 @@ pub(crate) const DIALOG_SCRIPT: &str = include_str!("../jxa/dialog.js");
 pub(crate) const MAIL_SCRIPT: &str = include_str!("../jxa/mail.js");
 pub(crate) const CALENDAR_SCRIPT: &str = include_str!("../jxa/calendar.js");
 
-fn assemble(body: &str) -> String {
+fn assemble(libraries: &[&str], body: &str) -> String {
     format!(
-        "var INVISIBLE_RANGES = {};\n{COMMON_SCRIPT}\n{DIALOGS_SCRIPT}\n{body}",
-        crate::text::hidden_ranges_js()
+        "var INVISIBLE_RANGES = {};\n{}\n{body}",
+        crate::text::hidden_ranges_js(),
+        libraries.join("\n")
     )
 }
 
 pub(crate) fn mail_script() -> String {
-    assemble(MAIL_SCRIPT)
+    assemble(&[COMMON_SCRIPT, DIALOGS_SCRIPT], MAIL_SCRIPT)
 }
 
 pub(crate) fn calendar_script() -> String {
-    assemble(CALENDAR_SCRIPT)
+    assemble(&[COMMON_SCRIPT, DIALOGS_SCRIPT], CALENDAR_SCRIPT)
 }
 
 pub(crate) fn dialog_script() -> String {
-    assemble(DIALOG_SCRIPT)
+    assemble(&[COMMON_SCRIPT], DIALOG_SCRIPT)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

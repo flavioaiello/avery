@@ -139,11 +139,12 @@ case. If you prefer the terminal, `AVERY_NO_ONBOARD=1` keeps the dialogs away an
 Avery reads and changes your mail and events through Mail.app and Calendar.app, with whatever accounts they have
 (iCloud, Gmail, Outlook.com, Exchange, IMAP, ...). Avery itself signs in to nothing: macOS holds the credentials.
 
-`avery mail setup` is the command that starts Mail and Calendar: it lists the Mail accounts and the calendars live, and
-you choose a level per item (0 = off). macOS asks once to let the app that runs Avery control them (Terminal for the
-command line, Goose for the agent). Your choices go into `config.json`. A command or tool that has nothing enabled never
-starts Mail or Calendar. An account or calendar that vanished from Mail or Calendar is noticed by `setup`, by `selftest`
-and by tool errors. Setting every item to 0, or `avery mail revoke`, switches everything off again.
+`avery mail setup` is the first command that starts Mail and Calendar: it lists the Mail accounts and the calendars live,
+and you choose a level per item (0 = off). macOS asks once to let the app that runs Avery control them (Terminal for the
+command line, Goose for the agent). Your choices go into `config.json`. Afterwards the tools and `selftest` start Mail or
+Calendar only for an account or calendar that is enabled; a command or tool with nothing enabled never starts them. An
+account or calendar that vanished from Mail or Calendar is noticed by `setup`, by `selftest` and by tool errors. Setting
+every item to 0, or `avery mail revoke`, switches everything off again.
 
 Calendar.app lists a recurring event only once, so Avery expands the common repeat rules (daily, weekly, monthly,
 yearly with the usual parts) itself; rules it cannot expand are shown once and flagged. Reading a Calendar.app calendar
