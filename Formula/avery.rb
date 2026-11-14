@@ -4,7 +4,7 @@ class Avery < Formula
   url "https://github.com/flavioaiello/avery.git",
       using:    :git,
       tag:      "v0.7.1",
-      revision: "19569e2e32c3b8fac427edbda40f18f357d2d473"
+      revision: "d7aae767076157ae164230c0aef2e1bccf1e97be"
   license "MIT"
   head "https://github.com/flavioaiello/avery.git", using: :git, branch: "main"
 
