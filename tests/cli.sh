@@ -685,7 +685,7 @@ EOF
     has "$OUT" "YAML gueltig: config.yaml" && lacks "$OUT" "UNGUELTIG"
     check "N6 doctor: gueltiges YAML wird bestaetigt" $? "$OUT"
     broken_path="$home_y/.avery/goose/config/config.yaml"
-    sed 's/description: Private Mail und Kalender (Gmail, Outlook.com; lesen/description: Private Mail und Kalender (Gmail, Outlook.com: lesen/' "$broken_path" > "$broken_path.new"
+    sed 's/description: Private Mail und Kalender (Apple Mail und Kalender; lesen/description: Private Mail und Kalender (Apple Mail und Kalender: lesen/' "$broken_path" > "$broken_path.new"
     ! cmp -s "$broken_path" "$broken_path.new"
     check "N7 (Testaufbau) der Fehler vom 12.11. laesst sich nachstellen" $?
     mv "$broken_path.new" "$broken_path"
@@ -862,7 +862,7 @@ before() {
 }
 
 run_O() {
-  local want home dismissed_home broken_home mailstub mailstub_log failing quiet missing calls apps source
+  local want home dismissed_home broken_home old_home mailstub mailstub_log failing quiet missing calls apps source
   local -a env_o
   ensure_mail_build
   setup_health
@@ -939,16 +939,16 @@ STUB
   # The real mail server, only in states without any question.
   home="$(mkd home)"
   mkdir -p "$home/.avery/mail"
-  printf '{"version": 3, "apple": {"calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}\n' > "$home/.avery/mail/config.json"
+  printf '{"version": 4, "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}\n' > "$home/.avery/mail/config.json"
   avery HOME="$home" AVERY_NO_ONBOARD= mail onboard --if-needed
   [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ -z "$(screen_calls)" ]
-  check "O12 onboard --if-needed schweigt, wenn schon etwas eingerichtet ist (Apple-Eintrag)" $? "rc=$RC $OUT$ERR"
+  check "O12 onboard --if-needed schweigt, wenn schon etwas eingerichtet ist (Kalender-Eintrag)" $? "rc=$RC $OUT$ERR"
   home="$(mkd home)"
   mkdir -p "$home/.avery/mail"
-  printf '{"version": 3, "accounts": [{"provider": "microsoft", "address": "bob@outlook.example"}]}\n' > "$home/.avery/mail/config.json"
+  printf '{"version": 4, "mail": [{"id": "A1", "name": "iCloud", "level": "read"}]}\n' > "$home/.avery/mail/config.json"
   avery HOME="$home" AVERY_NO_ONBOARD= mail onboard --if-needed
   [ "$RC" = 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] && [ -z "$(screen_calls)" ]
-  check "O13 onboard --if-needed schweigt, wenn ein Konto verbunden ist" $? "rc=$RC $OUT$ERR"
+  check "O13 onboard --if-needed schweigt, wenn ein Mail-Konto freigegeben ist" $? "rc=$RC $OUT$ERR"
   dismissed_home="$(mkd home)"
   mkdir -p "$dismissed_home/.avery/mail"
   : > "$dismissed_home/.avery/mail/onboard.dismissed"
@@ -981,11 +981,19 @@ STUB
     && [ "$(printf '%s\n' "$made" | wc -l | tr -d ' ')" = 2 ] && [ "$(printf '%s\n' "$made" | head -n 1)" = "launchctl managername" ] \
     && begins "$(printf '%s\n' "$made" | sed -n 2p)" 'osascript {"op": "notify"' && has "$made" "nicht lesbar" && lacks "$made" '"op": "ask_'
   check "O19b onboard --if-needed meldet eine unlesbare Konfiguration in einer grafischen Sitzung mit einer Benachrichtigung statt eines Dialogs" $? "rc=$RC $OUT calls=$made"
+  old_home="$(mkd home)"
+  mkdir -p "$old_home/.avery/mail"
+  printf '{"version": 3, "apple": {"mail": [{"id": "A1", "name": "iCloud", "level": "read"}]}}\n' > "$old_home/.avery/mail/config.json"
+  avery HOME="$old_home" AVERY_NO_ONBOARD= mail onboard --if-needed
+  [ "$RC" = 1 ] && begins "$OUT" "Fehler: " && has "$OUT" "unsupported format version" && has "$OUT" "avery mail setup" \
+    && [ "$(cat "$old_home/.avery/mail/config.json")" = '{"version": 3, "apple": {"mail": [{"id": "A1", "name": "iCloud", "level": "read"}]}}' ] \
+    && [ ! -e "$old_home/.avery/mail/config.lock" ] && [ "$(screen_calls)" = "launchctl managername" ]
+  check "O19c das Format 3 aus 0.5.0 wird abgelehnt, mit dem Weg zu 'avery mail setup' genannt, und nie umgeschrieben" $? "rc=$RC $OUT"
   avery mail help
   has "$OUT" "avery mail onboard [--if-needed]" && has "$OUT" "onboard and revoke refuse in demo mode"
   check "O20 die Hilfe des Mail-Programms nennt onboard" $? "$OUT"
   avery help
-  has "$OUT" "onboard, link, unlink" && has "$OUT" "AVERY_NO_ONBOARD=1" && has "$OUT" "avery mail onboard"
+  has "$OUT" "onboard, setup" && lacks "$OUT" "link" && has "$OUT" "AVERY_NO_ONBOARD=1" && has "$OUT" "avery mail onboard"
   check "O21 die Hilfe von avery nennt die Einrichtung in Dialogen und den Schalter" $? "$OUT"
 
   if have osacompile; then
@@ -1000,19 +1008,19 @@ STUB
   fi
   has "$(cat "$ROOT/Casks/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Casks/avery.rb")" "AVERY_NO_ONBOARD=1" \
     && has "$(cat "$ROOT/Casks/avery.rb")" "macOS may ask for permission to show notifications" && has "$(cat "$ROOT/Casks/avery.rb")" "no dialog and no notification appears" \
-    && has "$(cat "$ROOT/Casks/avery.rb")" "only the optional Apple bridge" && lacks "$(cat "$ROOT/Casks/avery.rb")" "Automation later" \
+    && has "$(cat "$ROOT/Casks/avery.rb")" "macOS asks once for" && has "$(cat "$ROOT/Casks/avery.rb")" "Automation (Mail and Calendar)" && lacks "$(cat "$ROOT/Casks/avery.rb")" "Automation later" \
     && lacks "$(cat "$ROOT/Casks/avery.rb")" "System Events" && has "$(cat "$ROOT/Casks/avery.rb")" "Nicht mehr fragen"
   check "O23 Cask: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$ROOT/Formula/avery.rb")" "avery mail onboard" && has "$(cat "$ROOT/Formula/avery.rb")" "AVERY_NO_ONBOARD=1" \
     && has "$(cat "$ROOT/Formula/avery.rb")" "macOS may ask for permission to show notifications" && has "$(cat "$ROOT/Formula/avery.rb")" "no dialog and no notification appears" \
-    && has "$(cat "$ROOT/Formula/avery.rb")" "only the optional Apple bridge" && lacks "$(cat "$ROOT/Formula/avery.rb")" "Automation later" \
+    && has "$(cat "$ROOT/Formula/avery.rb")" "macOS asks once for" && has "$(cat "$ROOT/Formula/avery.rb")" "Automation (Mail and Calendar)" && lacks "$(cat "$ROOT/Formula/avery.rb")" "Automation later" \
     && lacks "$(cat "$ROOT/Formula/avery.rb")" "System Events"
   check "O24 Formel: die Hinweise nennen die Dialoge, den Schalter, die moegliche Berechtigung und den Weg, wenn kein Dialog erscheint" $?
   has "$(cat "$SHARE/avery.env")" "AVERY_NO_ONBOARD"
   check "O25 die Vorlage avery.env nennt AVERY_NO_ONBOARD" $?
   has "$(cat "$ROOT/README.md")" "avery mail onboard --if-needed" && has "$(cat "$ROOT/README.md")" "onboard.dismissed" \
     && has "$(cat "$ROOT/README.md")" "macOS may ask for permission to show notifications" && has "$(cat "$ROOT/README.md")" "no dialog and no notification appears" \
-    && has "$(cat "$ROOT/README.md")" "Only the optional Apple bridge makes macOS ask once for Automation" && lacks "$(cat "$ROOT/README.md")" "Automation later" \
+    && has "$(cat "$ROOT/README.md")" "macOS asks once for Automation (Mail and Calendar)" && lacks "$(cat "$ROOT/README.md")" "Automation later" \
     && lacks "$(cat "$ROOT/README.md")" "System Events" && has "$(cat "$ROOT/README.md")" "AVERY_NO_ONBOARD=1"
   check "O26 README: die Dialoge, der Schalter, die Markierung und die moegliche Berechtigung sind beschrieben, ohne System Events" $?
 

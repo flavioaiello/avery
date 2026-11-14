@@ -10,7 +10,7 @@ cask "avery" do
       tag:      "dmg-v#{version}",
       revision: "451b5e30eca0563f74b05e23779ba0e3f57237f3"
   name "Avery"
-  desc "Launcher for the private AI agent Avery (Goose, local model, mail, calendar)"
+  desc "Launcher for the private AI agent Avery (Goose, local model, Apple Mail and Calendar)"
   homepage "https://github.com/flavioaiello/avery"
 
   depends_on formula: "flavioaiello/avery/avery"
@@ -35,16 +35,19 @@ cask "avery" do
       avery init
       avery pull          # downloads the model once (about 17 GB); Ctrl+C when it says Ready
 
-    Then open Avery. While no account is linked, its first start guides you through the setup in macOS dialogs:
-    Apple Mail and Calendar (the quickest start: your accounts from Mail.app, no registration) and, optionally,
-    Gmail and Outlook.com directly (personal accounts; you register your own OAuth app once, see the README). macOS may ask for permission to show notifications; only the optional Apple bridge
-    asks once for Automation (Mail and Calendar): allow what Avery should use. A failed setup is also shown as a notification; if no dialog and no notification appears,
+    Then open Avery. While nothing is set up, its first start guides you through the setup in macOS dialogs: Avery lists
+    the accounts and calendars of Apple Mail and Calendar and you choose what it may read or write.
+    macOS may ask for permission to show notifications; macOS asks once for Automation (Mail and Calendar): allow what
+    Avery should use. A failed setup is also shown as a notification; if no dialog and no notification appears,
     run "avery mail onboard" in a terminal to see the reason. Cancelling any dialog saves nothing more, and Avery still starts.
 
     The same from a terminal:
       avery mail onboard         # shows the dialogs again
-      avery mail link google     # or: microsoft
       avery mail setup           # per account and calendar: off, read or write
     No dialogs at start: choose "Nicht mehr fragen" in the first one, or set AVERY_NO_ONBOARD=1 (in ~/.avery/avery.env).
+
+    Upgrading from 0.5.0: version 0.6.0 reads only config format 4 and uses only Apple Mail and Calendar. Move
+    ~/.avery/mail/config.json away and run avery mail setup; see the README ("Update from 0.5.0") for the Keychain items
+    that 0.5.0 left behind.
   EOS
 end
