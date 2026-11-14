@@ -4,13 +4,13 @@ class Avery < Formula
   url "https://github.com/flavioaiello/avery.git",
       using:    :git,
       tag:      "v0.7.0",
-      revision: "21dc4a4eb12e9d04c658857289b0edfef3533d42"
+      revision: "19569e2e32c3b8fac427edbda40f18f357d2d473"
   license "MIT"
   head "https://github.com/flavioaiello/avery.git", using: :git, branch: "main"
 
+  depends_on "rust" => :build
   depends_on arch: :arm64
   depends_on "incoai/tap/splash"
-  depends_on "rust" => :build
   depends_on :macos
 
   def install
