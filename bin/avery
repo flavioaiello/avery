@@ -4,7 +4,7 @@
 #   bin/avery  bin/avery-mail  libexec/avery-make-app  share/avery/...
 set -euo pipefail
 
-AVERY_VERSION="0.5.0"
+AVERY_VERSION="0.6.0"
 
 resolve_path() {
   local target="$1" dir
