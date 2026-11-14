@@ -1,5 +1,9 @@
 use crate::json::Json;
-use crate::text::text_of;
+use crate::rights::MAX_NAME;
+use crate::text::{one_line_str, text_of};
+
+pub(crate) const MAX_KIND: usize = 30;
+const MAX_ADDRESS_TEXT: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MailAccount {
@@ -18,6 +22,28 @@ impl MailAccount {
             kind: text_of(object.get("type")),
             addresses: string_list(object.get("addresses")),
         })
+    }
+}
+
+pub(crate) fn kind_text(kind: &str) -> String {
+    let kind = one_line_str(kind, MAX_KIND);
+    if kind.is_empty() {
+        "?".to_string()
+    } else {
+        kind
+    }
+}
+
+pub(crate) fn addresses_text(addresses: &[String]) -> String {
+    let shown: Vec<String> = addresses
+        .iter()
+        .map(|address| one_line_str(address, MAX_NAME))
+        .filter(|address| !address.is_empty())
+        .collect();
+    if shown.is_empty() {
+        "-".to_string()
+    } else {
+        one_line_str(&shown.join(", "), MAX_ADDRESS_TEXT)
     }
 }
 
@@ -123,6 +149,54 @@ mod tests {
         assert!(account.is_named("demo gmail"));
         assert!(account.is_named("demo.privat@gmail.example"));
         assert!(!account.is_named("gmail"));
+    }
+
+    #[test]
+    fn the_type_is_one_short_visible_line_or_a_question_mark() {
+        assert_eq!(kind_text("imap"), "imap");
+        assert_eq!(kind_text(""), "?");
+        assert_eq!(kind_text("\u{200b}\u{202e}\n \t"), "?");
+        assert_eq!(
+            kind_text("imap\n- Fake [exchange]: evil@example.org"),
+            "imap - Fake [exchange]: evil@e [...]"
+        );
+        assert_eq!(
+            kind_text(&"x".repeat(31)),
+            format!("{} [...]", "x".repeat(30))
+        );
+        assert_eq!(kind_text(&"x".repeat(30)), "x".repeat(30));
+    }
+
+    #[test]
+    fn the_addresses_are_one_bounded_visible_line_or_a_dash() {
+        assert_eq!(addresses_text(&[]), "-");
+        assert_eq!(
+            addresses_text(&["\u{200b}".to_string(), " \n ".to_string()]),
+            "-"
+        );
+        assert_eq!(
+            addresses_text(&["a@example.org".to_string(), "b@example.org".to_string()]),
+            "a@example.org, b@example.org"
+        );
+        assert_eq!(
+            addresses_text(&[
+                "a@example.org\n- Fake [imap]: x".to_string(),
+                "\u{202e}b@example.org\u{2066}".to_string(),
+                "\u{85}c@example.org".to_string(),
+            ]),
+            "a@example.org - Fake [imap]: x, b@example.org, c@example.org"
+        );
+        let long = addresses_text(&["x".repeat(10_000)]);
+        assert_eq!(long, format!("{} [...]", "x".repeat(120)));
+        let many: Vec<String> = (0..5000).map(|n| format!("a{n}@example.org")).collect();
+        let text = addresses_text(&many);
+        assert!(
+            text.starts_with("a0@example.org, a1@example.org, "),
+            "{text}"
+        );
+        assert!(text.ends_with(" [...]"), "{text}");
+        assert!(text.chars().count() <= 200 + " [...]".len(), "{text}");
+        assert!(!text.contains('\n'));
     }
 
     #[test]

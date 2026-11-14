@@ -2,7 +2,7 @@ use std::io::{BufRead, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::account::MailAccount;
+use crate::account::{addresses_text, kind_text, MailAccount, MAX_KIND};
 use crate::backend::{ComposeRequest, MessageId, MessageQuery, Mode, ReplySpec};
 use crate::calendar::{
     local_today, perform, Action, Calendar, CalendarEntry, CalendarInfo, Change, ChangeResult,
@@ -48,19 +48,11 @@ fn sent_by(sender: &str, address: &str) -> bool {
 }
 
 fn describe(account: &MailAccount) -> String {
-    let kind = if account.kind.is_empty() {
-        "?".to_string()
-    } else {
-        one_line_str(&account.kind, 30)
-    };
-    let addresses = if account.addresses.is_empty() {
-        "-".to_string()
-    } else {
-        one_line_str(&account.addresses.join(", "), 200)
-    };
     format!(
-        "{}  [{kind}]  {addresses}",
-        one_line_str(&account.name, MAX_NAME)
+        "{}  [{}]  {}",
+        one_line_str(&account.name, MAX_NAME),
+        kind_text(&account.kind),
+        addresses_text(&account.addresses)
     )
 }
 
@@ -75,7 +67,7 @@ fn sanitized(account: MailAccount) -> MailAccount {
     MailAccount {
         name: name_or_id(one_line_str(&account.name, MAX_NAME), &account.id),
         id: account.id,
-        kind: one_line_str(&account.kind, 30),
+        kind: one_line_str(&account.kind, MAX_KIND),
         addresses: account
             .addresses
             .iter()
@@ -780,14 +772,7 @@ fn selftest_account(
 ) {
     let reachable = timed(|| {
         let info = ctx.backend.account_info(account)?;
-        Ok(format!(
-            "Typ={}",
-            if info.kind.is_empty() {
-                "?"
-            } else {
-                &info.kind
-            }
-        ))
+        Ok(format!("Typ={}", kind_text(&info.kind)))
     });
     if !step(console, failures, tag, "Konto erreichbar", reachable) {
         return;
