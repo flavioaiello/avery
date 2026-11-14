@@ -24,8 +24,7 @@ use crate::sendlog::{self, Outcome};
 use crate::server;
 use crate::text::{bracketed, one_line_str};
 use crate::texts::{
-    CALENDAR_WRITE_OFF, COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS,
-    MAX_SEND_LINES, NO_ACCOUNTS, NO_CALENDARS, VERSION, WRITE_OFF,
+    COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_RECIPIENTS, MAX_SEND_CHARS, MAX_SEND_LINES, VERSION,
 };
 use crate::write_tools;
 
@@ -902,8 +901,8 @@ fn cmd_selftest(ctx: &Context, console: &mut Console) -> u8 {
         }
     };
     if accounts.is_empty() && calendars.is_empty() {
-        console.say(NO_ACCOUNTS);
-        console.say(NO_CALENDARS);
+        console.say("Noch nichts freigegeben: weder Mail noch Kalender.");
+        console.say(SETUP_HINT);
         return 1;
     }
     let mut failures = 0usize;
@@ -1374,8 +1373,8 @@ fn cmd_selftest_write(ctx: &Context, terminal: &mut Terminal) -> u8 {
         }
     };
     if mail.accounts.is_empty() && calendars.calendars.is_empty() {
-        terminal.say(WRITE_OFF);
-        terminal.say(CALENDAR_WRITE_OFF);
+        terminal.say("Noch nichts zum Schreiben freigegeben: weder Mail noch Kalender (Stufe 2 = schreiben).");
+        terminal.say(SETUP_HINT);
         return 1;
     }
     let mut failures: Vec<String> = Vec::new();
@@ -2149,7 +2148,12 @@ mod tests {
         let dir = TempDir::new()?;
         let (code, out) = run(&real(&dir, None)?, &["selftest"], "");
         assert_eq!(code, 1);
-        assert!(out.contains("No mail account is enabled yet."));
+        assert!(
+            out.contains("Noch nichts freigegeben: weder Mail noch Kalender."),
+            "{out}"
+        );
+        assert!(out.contains("Freigeben: avery mail setup"), "{out}");
+        assert!(!out.contains("Ask the user"), "{out}");
         let broken = TempDir::new()?;
         let (code, out) = run(&real(&broken, Some("nope"))?, &["selftest"], "");
         assert_eq!(code, 1);
@@ -2294,7 +2298,12 @@ mod tests {
         let off = context(&dir, true, "", None, FakeOptions::default())?;
         let (code, out) = run(&off, &["selftest-write"], "");
         assert_eq!(code, 1);
-        assert!(out.contains("Writing mail is not enabled."));
+        assert!(
+            out.contains("Noch nichts zum Schreiben freigegeben"),
+            "{out}"
+        );
+        assert!(out.contains("Freigeben: avery mail setup"), "{out}");
+        assert!(!out.contains("Ask the user"), "{out}");
         Ok(())
     }
 
@@ -2733,10 +2742,9 @@ mod tests {
         let ctx = context(&dir, true, "", None, FakeOptions::default())?;
         let (code, out) = run(&ctx, &["selftest-write"], "");
         assert_eq!(code, 1);
-        assert!(
-            out.contains("Writing mail is not enabled.")
-                && out.contains("Changing calendars is not enabled.")
-        );
+        assert!(out.contains("weder Mail noch Kalender"), "{out}");
+        assert!(out.contains("Freigeben: avery mail setup"), "{out}");
+        assert!(!out.contains("Ask the user"), "{out}");
         Ok(())
     }
 

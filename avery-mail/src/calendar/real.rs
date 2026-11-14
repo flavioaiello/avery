@@ -61,6 +61,10 @@ pub(crate) fn map_error(text: &str, op: Option<&str>) -> String {
         return "The calendar no longer exists in Calendar. Ask the user to run `avery mail setup` again."
             .to_string();
     }
+    if has("calendar_id_unavailable") {
+        return "Calendar returned a calendar without a usable identifier, so calendars cannot be used on this Mac."
+            .to_string();
+    }
     if has("event_not_found") || (op == Some("event") && (has("can't get") || has("invalid index")))
     {
         return "Event not found. Use an id from list_events together with the same calendar."
@@ -369,6 +373,7 @@ mod tests {
                 "Automation",
             ),
             ("calendar_not_found", "no longer exists"),
+            ("calendar_id_unavailable", "without a usable identifier"),
             ("event_not_found", "Event not found"),
             ("ambiguous_event", "More than one event"),
             ("too_many_events:25000", "in this range"),
@@ -470,20 +475,25 @@ events.whose = function (query) {
   hits.forEach(function (e, i) { sel[i] = e; });
   return sel;
 };
-var CAL = {events: events, writable: function () { return WRITABLE; }, name: function () { return 'Privat'; },
-           calendarIdentifier: function () { return 'CAL-1'; }};
-var OTHER = {events: {push: function (e) { LOG.otherCreated++; }}, writable: function () { return true; },
-             name: function () { return 'Anderer'; }, calendarIdentifier: function () { return 'CAL-2'; }};
+var CAL = {id: 'CAL-1', events: events, writable: function () { return WRITABLE; },
+           name: function () { return 'Privat'; }};
+var OTHER = {id: 'CAL-2', events: {push: function (e) { LOG.otherCreated++; }}, writable: function () { return true; },
+             name: function () { return 'Anderer'; }};
 var ORDER = [CAL, OTHER];
-function lazy(i) {
-  return {get events() { return ORDER[i].events; }, writable: function () { return ORDER[i].writable(); },
-          name: function () { return ORDER[i].name(); },
-          calendarIdentifier: function () { return ORDER[i].calendarIdentifier(); }};
+var KEYFORM = 'byId';
+function MOCKDISPLAY(spec) {
+  return KEYFORM === 'byId' ? 'Application("Calendar").calendars.byId("' + spec.id + '")'
+                            : 'Application("Calendar").calendars[' + ORDER.indexOf(spec.calendar) + ']';
 }
-var calendars = function () { return ORDER.map(function (c, i) { return lazy(i); }); };
-calendars.calendarIdentifier = function () { return ORDER.map(function (c) { return c.calendarIdentifier(); }); };
-calendars[0] = lazy(0);
-calendars[1] = lazy(1);
+function lazy(c) {
+  return {id: c.id, calendar: c, get events() { return c.events; }, writable: function () { return c.writable(); },
+          name: function () { return c.name(); }};
+}
+var calendars = function () { return ORDER.map(lazy); };
+calendars.byId = function (id) {
+  return {id: id, calendar: null, get events() { return events; }, writable: function () { return false; },
+          name: function () { return ''; }};
+};
 var fakeCalendar = {
   calendars: calendars,
   Event: function (props) {
@@ -500,6 +510,7 @@ function run(argv) {
   var input = JSON.parse(argv[0]), out;
   DECISION = input.decision || 'approve';
   WRITABLE = input.writable !== false;
+  KEYFORM = input.keyForm || 'byId';
   SCENARIO = {};
   LIST = input.events.map(function (e) {
     e.start = new Date(e.start); e.end = new Date(e.end);
@@ -532,6 +543,7 @@ function run(argv) {
             "{}\n{MOCK_CALENDAR}",
             crate::osascript::calendar_script()
                 .replace("Application.currentApplication()", "MOCKAPP()")
+                .replace("Automation.getDisplayString(", "MOCKDISPLAY(")
         );
         let separator = if extra.is_empty() { "" } else { ", " };
         let payload = format!(r#"{{"events": {events}, "req": {req}{separator}{extra}}}"#);
@@ -689,6 +701,85 @@ function run(argv) {
             error_of(r#"{"op": "wipe", "calendarId": "CAL-1"}"#)?,
             "unknown_op"
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_script_lists_calendars_by_the_identifier_in_their_specifier() -> TestResult {
+        let answer = probe("[]", r#"{"op": "calendars"}"#)?;
+        let object = answer.as_object().ok_or("object")?;
+        assert_eq!(object.get("ok"), Some(&Json::Bool(true)), "{answer:?}");
+        let items = object.get("data").and_then(Json::as_array).ok_or("data")?;
+        let listed: Vec<(String, String, Option<&Json>)> = items
+            .iter()
+            .filter_map(Json::as_object)
+            .map(|item| {
+                (
+                    text_of(item.get("id")),
+                    text_of(item.get("name")),
+                    item.get("writable"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "CAL-1".to_string(),
+                    "Privat".to_string(),
+                    Some(&Json::Bool(true))
+                ),
+                (
+                    "CAL-2".to_string(),
+                    "Anderer".to_string(),
+                    Some(&Json::Bool(true))
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_calendar_without_a_usable_identifier_is_refused_everywhere() -> TestResult {
+        for request in [
+            r#"{"op": "calendars"}"#.to_string(),
+            events_request("2026-11-13 00:00", "2026-11-20 00:00", 100, 100),
+        ] {
+            let answer = probe_with("[]", &request, r#""keyForm": "index""#)?;
+            let object = answer.as_object().ok_or("object")?;
+            assert_eq!(object.get("ok"), Some(&Json::Bool(false)), "{request}");
+            assert_eq!(
+                text_of(object.get("error")),
+                "calendar_id_unavailable",
+                "{request}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unknown_calendar_is_never_resolved_through_by_id() -> TestResult {
+        let events = format!(
+            r#"[{{"uid": "a", "summary": "A", "start": "{}", "end": "{}"}}]"#,
+            local("2026-11-14 09:00"),
+            local("2026-11-14 10:00"),
+        );
+        for request in [
+            r#"{"op": "events", "calendarId": "NOPE", "from": "2026-11-13 00:00", "to": "2026-11-20 00:00", "maxScan": 100, "maxItems": 100}"#,
+            r#"{"op": "event", "calendarId": "NOPE", "uid": "a"}"#,
+        ] {
+            let answer = probe(&events, request)?;
+            let object = answer.as_object().ok_or("object")?;
+            assert_eq!(object.get("ok"), Some(&Json::Bool(false)), "{request}");
+            assert_eq!(
+                text_of(object.get("error")),
+                "calendar_not_found",
+                "{request}"
+            );
+        }
         Ok(())
     }
 

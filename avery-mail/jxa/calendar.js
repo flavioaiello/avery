@@ -18,20 +18,26 @@ function dispatch(req) {
   throw new Error('unknown_op');
 }
 
+function calendarKey(spec) {
+  var m = /\.byId\("([^"\\]+)"\)$/.exec(Automation.getDisplayString(spec));
+  if (!m) { throw new Error('calendar_id_unavailable'); }
+  return m[1];
+}
+
 function listCalendars() {
   var all = calendarApp().calendars(), out = [];
   for (var i = 0; i < all.length; i++) {
     var writable = false;
     try { writable = !!all[i].writable(); } catch (e) {}
-    out.push({id: String(all[i].calendarIdentifier()), name: String(all[i].name()), writable: writable});
+    out.push({id: calendarKey(all[i]), name: String(all[i].name()), writable: writable});
   }
   return out;
 }
 
 function calendarById(id) {
-  var app = calendarApp(), ids = app.calendars.calendarIdentifier();
-  for (var i = 0; i < ids.length; i++) {
-    if (String(ids[i]) === String(id)) { return app.calendars[i]; }
+  var all = calendarApp().calendars();
+  for (var i = 0; i < all.length; i++) {
+    if (calendarKey(all[i]) === String(id)) { return all[i]; }
   }
   throw new Error('calendar_not_found');
 }
