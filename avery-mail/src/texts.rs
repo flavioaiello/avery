@@ -1,4 +1,4 @@
-use crate::calendar::MAX_NOTES;
+use crate::calendar::{MAX_NOTES, MAX_NOTE_LINES};
 
 pub(crate) const APPROVAL_SECONDS: u64 = 75;
 pub(crate) const JXA_TIMEOUT: u64 = 90;
@@ -158,9 +158,10 @@ pub(crate) fn calendar_write_instructions() -> String {
             "the details before you call a change tool. If the user declines, do not retry unless they ask ",
             "you to. A limit of changes per hour applies, and the user can undo changes. Events with ",
             "attendees and recurring events cannot be changed: tell the user to do that in their calendar app. ",
-            "Notes are limited to {} characters."
+            "Notes are limited to {} characters and {} lines."
         ),
-        MAX_NOTES
+        MAX_NOTES,
+        MAX_NOTE_LINES
     )
 }
 

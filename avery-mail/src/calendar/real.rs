@@ -1323,6 +1323,31 @@ function run(argv) {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn notes_at_the_limits_of_the_tools_are_shown_completely() -> TestResult {
+        use crate::calendar::{MAX_NOTES, MAX_NOTE_LINES};
+        let notes = (0..MAX_NOTE_LINES)
+            .map(|n| {
+                if n + 1 == MAX_NOTE_LINES {
+                    "z".repeat(MAX_NOTES - (MAX_NOTE_LINES - 1) - 32 * (MAX_NOTE_LINES - 1))
+                } else {
+                    "y".repeat(32)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(notes.chars().count(), MAX_NOTES);
+        assert_eq!(notes.lines().count(), MAX_NOTE_LINES);
+        let created = dialog_of("create", None, Some(&notes), false)?;
+        assert_eq!(marked(&created).len(), MAX_NOTE_LINES);
+        assert!(!created.contains("weitere"), "{created}");
+        let updated = dialog_of("update", Some("Alt"), Some(&notes), false)?;
+        assert_eq!(marked(&updated).len(), MAX_NOTE_LINES + 1);
+        assert!(!updated.contains("weitere"), "{updated}");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn empty_notes_are_the_dialogs_own_word_and_a_note_saying_it_is_not() -> TestResult {
         let dialog = dialog_of("update", Some("\n\r\n \t \n"), Some("(leer)"), false)?;
         assert_eq!(

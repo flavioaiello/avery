@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use crate::calendar::{self, MAX_NOTES};
+use crate::calendar::{self, MAX_NOTES, MAX_NOTE_LINES};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{self, Json, Object};
@@ -297,7 +297,7 @@ fn event_properties() -> Vec<(&'static str, Json)> {
             "notes",
             property(
                 "string",
-                &format!("Notes, plain text up to {MAX_NOTES} characters. An empty text clears them."),
+                &format!("Notes, plain text up to {MAX_NOTES} characters and {MAX_NOTE_LINES} lines. An empty text clears them."),
             ),
         ),
     ]

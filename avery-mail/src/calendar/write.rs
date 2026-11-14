@@ -1,6 +1,6 @@
 use crate::calendar::{
     last_day, Approval, Calendar, Change, ChangeResult, Decision, EventFields, MAX_LOCATION,
-    MAX_NOTES, MAX_SUMMARY,
+    MAX_NOTES, MAX_NOTE_LINES, MAX_SUMMARY,
 };
 use crate::changelog::{self, ChangeEntry, Outcome};
 use crate::civil::{Date, DateTime};
@@ -181,6 +181,19 @@ fn text_argument(
     Ok(Some(text))
 }
 
+fn notes_argument(args: &Object) -> ToolResult<Option<String>> {
+    let notes = text_argument(args, "notes", MAX_NOTES, false)?;
+    if let Some(text) = &notes {
+        let lines = text.lines().count();
+        if lines > MAX_NOTE_LINES {
+            return Err(ToolError::msg(format!(
+                "Parameter 'notes' has {lines} lines (max {MAX_NOTE_LINES}), more than the approval dialog shows."
+            )));
+        }
+    }
+    Ok(notes)
+}
+
 fn present<'a>(args: &'a Object, key: &str) -> Option<&'a Json> {
     args.get(key).filter(|value| **value != Json::Null)
 }
@@ -280,7 +293,7 @@ fn new_fields(args: &Object) -> ToolResult<EventFields> {
         end,
         all_day,
         location: text_argument(args, "location", MAX_LOCATION, true)?.unwrap_or_default(),
-        notes: text_argument(args, "notes", MAX_NOTES, false)?.unwrap_or_default(),
+        notes: notes_argument(args)?.unwrap_or_default(),
         url: String::new(),
     })
 }
@@ -296,7 +309,7 @@ fn updated_fields(before: &EventFields, args: &Object) -> ToolResult<EventFields
     if let Some(location) = text_argument(args, "location", MAX_LOCATION, true)? {
         after.location = location;
     }
-    if let Some(notes) = text_argument(args, "notes", MAX_NOTES, false)? {
+    if let Some(notes) = notes_argument(args)? {
         after.notes = notes;
     }
     let start_value = present(args, "start");
@@ -709,12 +722,17 @@ mod tests {
             r#"{{"summary": "A", "start": "2030-05-06 09:00", "notes": "{}"}}"#,
             "n".repeat(1001)
         );
+        let many_lines = format!(
+            r#"{{"summary": "A", "start": "2030-05-06 09:00", "notes": "{}"}}"#,
+            "n\\n".repeat(MAX_NOTE_LINES + 1)
+        );
         for (input, needle) in [
             (r#"{"start": "2030-05-06 09:00"}"#.to_string(), "Parameter 'summary' is required"),
             (r#"{"summary": "  ", "start": "2030-05-06 09:00"}"#.to_string(), "Parameter 'summary' is required"),
             (r#"{"summary": "A"}"#.to_string(), "Parameter 'start' is required"),
             (long_summary, "Parameter 'summary' is too long (max 200 characters)"),
             (long_notes, "Parameter 'notes' is too long (max 1000 characters)"),
+            (many_lines, "Parameter 'notes' has 31 lines (max 30)"),
             (r#"{"summary": 5, "start": "2030-05-06 09:00"}"#.to_string(), "Parameter 'summary' must be text"),
             (r#"{"summary": "A", "start": "2030-05-06 09:00", "notes": ["x"]}"#.to_string(), "Parameter 'notes' must be text"),
             (r#"{"summary": "A", "start": "2030-05-06"}"#.to_string(), "Parameter 'start' must look like 2026-11-20 09:30"),
@@ -762,6 +780,31 @@ mod tests {
         assert_eq!(detail.event.summary, "Eins Zwei");
         assert_eq!(detail.event.location, "Ort Zwei");
         assert_eq!(detail.notes, "a\nbc");
+        Ok(())
+    }
+
+    #[test]
+    fn notes_have_at_most_the_lines_the_approval_dialog_shows() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = privat(&dir, "yes");
+        let update = |lines: usize| -> Result<ToolResult<String>, String> {
+            let object = args(&format!(
+                r#"{{"id": "demo-dentist", "calendar": "Demo Privat", "notes": "{}"}}"#,
+                vec!["n"; lines].join("\\n")
+            ))?;
+            Ok(update_event(&ctx, &object))
+        };
+        let refused = update(MAX_NOTE_LINES + 1)?;
+        assert!(
+            matches!(&refused, Err(ToolError::Msg(m)) if m.contains("has 31 lines (max 30)")),
+            "{refused:?}"
+        );
+        assert!(!std::path::Path::new(&ctx.settings.changes_path()).exists());
+        update(MAX_NOTE_LINES)??;
+        assert_eq!(
+            found(&ctx, "demo-dentist")?.notes,
+            vec!["n"; MAX_NOTE_LINES].join("\n")
+        );
         Ok(())
     }
 

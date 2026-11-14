@@ -196,7 +196,7 @@ doing something.
 - **Goose asks too.** `permission.yaml` sets the sending and calendar change tools to `ask_before`.
 - **Limits.** Mail: plain text only, no Bcc, no attachments, at most 5 recipients (also for replies to all), at most
   1500 characters and 40 lines per sent mail (longer texts must be drafts you send from your mail app), 5 sent mails per hour,
-  30 drafts per hour. Calendar: title and place up to 200 characters, notes up to 1000, 10 changes per hour. For both:
+  30 drafts per hour. Calendar: title and place up to 200 characters, notes up to 1000 characters and 30 lines (the dialog shows all of them), 10 changes per hour. For both:
   6 attempts per 10 minutes and a 20 second cool-down after you decline. Every attempt is logged before anything
   happens (`avery mail sendlog`, `avery mail changes`). If a log cannot be written or read, contains a line the server
   does not understand, or is too large to check the last hour, nothing is sent or changed until you look at it and move

@@ -22,6 +22,7 @@ pub(crate) const MAX_SELECTED_EVENTS: i64 = 500;
 pub(crate) const MAX_SUMMARY: usize = 200;
 pub(crate) const MAX_LOCATION: usize = 200;
 pub(crate) const MAX_NOTES: usize = 1000;
+pub(crate) const MAX_NOTE_LINES: usize = 30;
 pub(crate) const MAX_KEPT_SUMMARY: usize = 500;
 pub(crate) const MAX_KEPT_LOCATION: usize = 500;
 pub(crate) const MAX_KEPT_NOTES: usize = 4000;
