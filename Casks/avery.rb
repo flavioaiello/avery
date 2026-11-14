@@ -1,5 +1,5 @@
 cask "avery" do
-  version "0.4.0"
+  version "0.5.0"
   sha256 :no_check # the git revision below pins the disk image
 
   # The disk image sits alone in the commit of the tag dmg-v<version> (see tools/publish-dmg.sh).
@@ -8,9 +8,9 @@ cask "avery" do
   url "ssh://git@github.com/flavioaiello/avery.git",
       using:    :git,
       tag:      "dmg-v#{version}",
-      revision: "16f3579a9ae2d14fd9e955732ab328c071bd7452"
+      revision: "451b5e30eca0563f74b05e23779ba0e3f57237f3"
   name "Avery"
-  desc "Launcher for the private AI agent Avery (Goose, local model, Gmail and Outlook.com)"
+  desc "Launcher for the private AI agent Avery (Goose, local model, mail, calendar)"
   homepage "https://github.com/flavioaiello/avery"
 
   depends_on formula: "flavioaiello/avery/avery"
