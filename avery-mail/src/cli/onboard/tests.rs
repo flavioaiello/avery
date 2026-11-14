@@ -4,7 +4,7 @@ use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
@@ -19,49 +19,15 @@ use crate::calendar::{
 use crate::cli::dispatch;
 use crate::console::PRIVATE_ONLY;
 use crate::error::{ToolError, ToolResult};
-use crate::http::scripted::{Scripted, Shared};
-use crate::http::Method;
-use crate::json::{self, Json};
-use crate::provider::fakes::{google_transport, Visit, Visitor, GOOGLE_TOKENS};
-use crate::provider::{Calendars, Linker, Mail};
+use crate::fake::FakeOptions;
+use crate::json;
 use crate::rights::Level;
-use crate::testutil::{dark, gm, settings_at, Listing, Reply, Script, TempDir, TestResult};
-use crate::vault::memory::{Memory, Shared as SharedVault};
-
-const SECRET: &str = "GOCSPX-hunter2_secret";
-const CLIENT: &str = "123-abc.apps.example";
-const MS_CLIENT: &str = "0a1b2c3d-1111-2222-3333-444455556666";
-const MS_TOKENS: &str = r#"{"access_token": "EwB-access", "refresh_token": "M.R3-refresh", "expires_in": 3600, "token_type": "Bearer", "scope": "Mail.Read Calendars.Read User.Read offline_access"}"#;
-const MS_WRITE_TOKENS: &str = r#"{"access_token": "EwB-access", "refresh_token": "M.R3-refresh", "expires_in": 3600, "token_type": "Bearer", "scope": "Mail.Read Calendars.Read User.Read offline_access Mail.ReadWrite Mail.Send Calendars.ReadWrite"}"#;
-const TOKEN: &str =
-    r#"{"access_token": "ya29.test-token", "expires_in": 3599, "token_type": "Bearer"}"#;
-const CALENDAR_LIST: &str = r#"{"kind": "calendar#calendarList", "items": [
-    {"id": "{alice}", "summary": "{alice}", "accessRole": "owner"},
-    {"id": "familie@group.example", "summary": "Familie", "accessRole": "writer"},
-    {"id": "feiertage@group.example", "summary": "Feiertage", "accessRole": "reader"}]}"#;
-const OUTLOOK_CALENDARS: &str =
-    r#"{"value": [{"id": "AQMkCAL", "name": "Calendar", "canEdit": true}]}"#;
+use crate::testutil::{dark, settings_at, Listing, Reply, Script, TempDir, TestResult};
 
 type Step = (&'static str, Reply);
 
 fn chars(text: &str) -> usize {
     text.chars().count()
-}
-
-fn alice() -> String {
-    gm("alice@{gmail}")
-}
-
-fn google_tokens(write: bool) -> String {
-    let extra = if write {
-        " https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events"
-    } else {
-        ""
-    };
-    GOOGLE_TOKENS.replace(
-        "calendar.readonly\"",
-        &format!("calendar.readonly{extra}\""),
-    )
 }
 
 #[derive(Clone)]
@@ -146,13 +112,9 @@ impl Backend for Orchard {
 }
 
 impl CalendarBackend for Orchard {
-    fn calendars(
-        &self,
-        provider: crate::provider::Provider,
-        address: &str,
-    ) -> ToolResult<Vec<CalendarInfo>> {
+    fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
         self.touch();
-        self.listing.calendars(provider, address)
+        self.listing.calendars()
     }
 
     fn events(&self, calendar: &Calendar, window: Window) -> ToolResult<Vec<RawEvent>> {
@@ -179,79 +141,36 @@ impl CalendarBackend for Orchard {
 struct Station {
     _dir: TempDir,
     ctx: Context,
-    transport: Arc<Scripted>,
-    vault: Arc<Memory>,
     apple: Arc<AtomicUsize>,
-    browser: Arc<Mutex<Vec<String>>>,
 }
 
-fn station(
-    config: Option<&str>,
-    transport: Scripted,
-    visit: Visit,
-    orchard: Orchard,
-) -> Result<Station, Box<dyn Error>> {
+fn prepared(config: Option<&str>) -> Result<(TempDir, crate::config::Settings), Box<dyn Error>> {
     let dir = TempDir::new()?;
     let settings = settings_at(&dir.path("mail/config.json"));
     if let Some(text) = config {
         fs::create_dir_all(dir.path("mail"))?;
         fs::write(&settings.config_path, text)?;
     }
-    let transport = Arc::new(transport);
-    let vault = Arc::new(Memory::new());
-    let browser = Arc::new(Mutex::new(Vec::new()));
+    Ok((dir, settings))
+}
+
+fn station(config: Option<&str>, orchard: Orchard) -> Result<Station, Box<dyn Error>> {
+    let (dir, settings) = prepared(config)?;
     let apple = Arc::clone(&orchard.touched);
-    let deadline = if matches!(visit, Visit::Nothing) {
-        Duration::from_millis(900)
-    } else {
-        Duration::from_secs(8)
-    };
-    let linker = Linker::new(
-        Box::new(Shared(Arc::clone(&transport))),
-        Box::new(SharedVault(Arc::clone(&vault))),
-        Box::new(Visitor {
-            visit,
-            seen: Arc::clone(&browser),
-        }),
-    )
-    .within(deadline);
-    let mail = Mail::new(
-        Box::new(orchard.clone()),
-        Box::new(Shared(Arc::clone(&transport))),
-        Box::new(SharedVault(Arc::clone(&vault))),
-        Box::new(DARK_HOST),
-    );
-    let calendars = Calendars::new(
-        Box::new(orchard),
-        Box::new(Shared(Arc::clone(&transport))),
-        Box::new(SharedVault(Arc::clone(&vault))),
-        Box::new(DARK_HOST),
-    );
     Ok(Station {
         _dir: dir,
-        ctx: Context::new(settings, Box::new(mail), Box::new(calendars), linker),
-        transport,
-        vault,
+        ctx: Context::new(settings, Box::new(orchard.clone()), Box::new(orchard)),
         apple,
-        browser,
     })
 }
 
-struct DarkHost;
-
-const DARK_HOST: DarkHost = DarkHost;
-
-impl crate::osascript::Host for DarkHost {
-    fn ensure_running(&self, _app: crate::osascript::App) {}
-
-    fn run(
-        &self,
-        _app: crate::osascript::App,
-        _payload: &str,
-        _timeout: Duration,
-    ) -> crate::osascript::Finished {
-        crate::osascript::Finished::NotStarted
-    }
+fn demo_station() -> Result<Station, Box<dyn Error>> {
+    let (dir, settings) = prepared(None)?;
+    Ok(Station {
+        _dir: dir,
+        ctx: Context::demo(settings, FakeOptions::default()),
+        apple: Arc::new(AtomicUsize::new(0)),
+    })
 }
 
 impl Station {
@@ -270,69 +189,32 @@ impl Station {
         self.ctx.settings.onboard_marker_path()
     }
 
-    fn tokens(&self) -> usize {
-        self.vault.count()
-    }
-
     fn apple_calls(&self) -> usize {
         self.apple.load(Ordering::SeqCst)
     }
-
-    fn browser_visits(&self) -> usize {
-        self.browser.lock().map(|seen| seen.len()).unwrap_or(0)
-    }
 }
 
-fn gmail_station(
-    config: Option<&str>,
-    visit: Visit,
-    write: bool,
-    orchard: Orchard,
-) -> Result<Station, Box<dyn Error>> {
-    let transport = google_transport(&google_tokens(write))
-        .json(Method::Post, "/token", 200, TOKEN)
-        .json(
-            Method::Get,
-            "/users/me/calendarList",
-            200,
-            &CALENDAR_LIST.replace("{alice}", &alice()),
-        );
-    station(config, transport, visit, orchard)
-}
-
-fn both_station(
-    config: Option<&str>,
-    visit: Visit,
-    write: bool,
-    orchard: Orchard,
-) -> Result<Station, Box<dyn Error>> {
-    let transport = google_transport(&google_tokens(write))
-        .json(
-            Method::Post,
-            "oauth2/v2.0/token",
-            200,
-            if write { MS_WRITE_TOKENS } else { MS_TOKENS },
-        )
-        .json(
-            Method::Get,
-            "/me?$select=mail",
-            200,
-            r#"{"mail": "bob@outlook.example", "userPrincipalName": "bob@outlook.example"}"#,
-        )
-        .json(Method::Get, "/me/calendars", 200, OUTLOOK_CALENDARS)
-        .json(
-            Method::Post,
-            "oauth2.googleapis.com/token",
-            200,
-            &google_tokens(write),
-        )
-        .json(
-            Method::Get,
-            "/users/me/calendarList",
-            200,
-            &CALENDAR_LIST.replace("{alice}", &alice()),
-        );
-    station(config, transport, visit, orchard)
+fn apple_orchard() -> Orchard {
+    Orchard::new(
+        vec![MailAccount {
+            id: "ACC-1".to_string(),
+            name: "iCloud".to_string(),
+            kind: "imap".to_string(),
+            addresses: vec!["me@icloud.example".to_string()],
+        }],
+        vec![
+            CalendarInfo {
+                id: "CAL-1".to_string(),
+                name: "Privat".to_string(),
+                writable: true,
+            },
+            CalendarInfo {
+                id: "CAL-2".to_string(),
+                name: "Feiertage".to_string(),
+                writable: false,
+            },
+        ],
+    )
 }
 
 fn run_with(station: &Station, script: &Script, gui: fn() -> bool, args: &[&str]) -> (u8, String) {
@@ -368,34 +250,11 @@ fn welcome() -> Vec<Step> {
     vec![("ask_buttons", Reply::Button(2))]
 }
 
-fn accounts(chosen: &[usize]) -> Vec<Step> {
-    vec![("choose_list", Reply::List(chosen.to_vec()))]
-}
-
-fn link_google(write: bool) -> Vec<Step> {
+fn levels(read: &[usize], write: &[usize]) -> Vec<Step> {
     vec![
-        ("ask_buttons", Reply::Button(2)),
-        ("ask_text", Reply::text(CLIENT)),
-        ("ask_text", Reply::text(SECRET)),
-        ("ask_buttons", Reply::Button(if write { 2 } else { 1 })),
-        ("notify", Reply::Done),
-        ("ask_buttons", Reply::Button(0)),
-    ]
-}
-
-fn link_microsoft(write: bool) -> Vec<Step> {
-    vec![
-        ("ask_buttons", Reply::Button(2)),
-        ("ask_text", Reply::text(MS_CLIENT)),
-        ("ask_buttons", Reply::Button(if write { 2 } else { 1 })),
-        ("notify", Reply::Done),
-        ("ask_buttons", Reply::Button(0)),
-    ]
-}
-
-fn read_calendars(read: &[usize]) -> Vec<Step> {
-    vec![
+        ("ask_buttons", Reply::Button(1)),
         ("choose_list", Reply::List(read.to_vec())),
+        ("choose_list", Reply::List(write.to_vec())),
         ("ask_buttons", Reply::Button(1)),
     ]
 }
@@ -404,14 +263,8 @@ fn summary_later() -> Vec<Step> {
     vec![("ask_buttons", Reply::Cancel), ("notify", Reply::Done)]
 }
 
-fn gmail_only() -> Vec<Vec<Step>> {
-    vec![
-        welcome(),
-        accounts(&[0]),
-        link_google(false),
-        read_calendars(&[0, 1]),
-        summary_later(),
-    ]
+fn happy() -> Vec<Vec<Step>> {
+    vec![welcome(), levels(&[0, 1, 2], &[1]), summary_later()]
 }
 
 fn assert_clean(script: &Script) {
@@ -420,8 +273,6 @@ fn assert_clean(script: &Script) {
     for seen in script.seen() {
         assert!(seen.payload.len() < 64 * 1024, "{}", seen.payload.len());
         assert!(seen.wait <= Duration::from_secs(700), "{:?}", seen.wait);
-        assert!(!seen.payload.contains(SECRET), "{}", seen.payload);
-        assert!(!seen.payload.contains("hunter2"), "{}", seen.payload);
     }
 }
 
@@ -450,7 +301,7 @@ fn the_arguments_of_the_command_are_none_or_the_one_flag() {
 #[test]
 fn a_dismissal_is_a_private_regular_file_beside_the_config_and_only_a_regular_file_counts(
 ) -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+    let station = station(None, Orchard::empty())?;
     let settings = &station.ctx.settings;
     assert_eq!(
         settings.onboard_marker_path(),
@@ -482,45 +333,28 @@ fn a_dismissal_is_a_private_regular_file_beside_the_config_and_only_a_regular_fi
 #[test]
 fn nothing_is_asked_when_the_setup_is_complete_dismissed_switched_off_demo_or_headless(
 ) -> TestResult {
-    let cases: [(&str, Option<&str>, bool, bool, bool); 7] = [
+    let cases: [(&str, Option<&str>, bool); 6] = [
         (
-            "an account is linked",
-            Some(
-                r#"{"version": 3, "accounts": [{"provider": "microsoft", "address": "bob@outlook.example"}]}"#,
-            ),
-            false,
-            false,
+            "a mail account is enabled",
+            Some(r#"{"version": 4, "mail": [{"id": "A1", "name": "iCloud", "level": "read"}]}"#),
             true,
         ),
         (
-            "an Apple entry exists",
+            "a calendar is enabled",
             Some(
-                r#"{"version": 3, "apple": {"calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}"#,
+                r#"{"version": 4, "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}"#,
             ),
-            false,
-            false,
             true,
         ),
-        ("the dialogs were dismissed", None, true, false, true),
-        ("the variable is set", None, false, false, true),
-        ("demo mode", None, false, false, true),
-        ("there is no graphical session", None, false, false, false),
-        (
-            "a config without grants but with an account",
-            Some(
-                r#"{"version": 3, "accounts": [{"provider": "google", "address": "x@gmail.example"}]}"#,
-            ),
-            false,
-            false,
-            true,
-        ),
+        ("the dialogs were dismissed", None, true),
+        ("the variable is set", None, true),
+        ("demo mode", None, true),
+        ("there is no graphical session", None, false),
     ];
-    for (name, config, dismissed_before, _unused, gui) in cases {
-        let mut station = gmail_station(config, Visit::Nothing, false, Orchard::empty())?;
-        if dismissed_before {
-            dismiss(&station.ctx.settings)?;
-        }
+    for (name, config, gui) in cases {
+        let mut station = station(config, Orchard::empty())?;
         match name {
+            "the dialogs were dismissed" => dismiss(&station.ctx.settings)?,
             "the variable is set" => station.ctx.settings.no_onboard = true,
             "demo mode" => station.ctx.settings.fake = true,
             _ => {}
@@ -537,8 +371,8 @@ fn nothing_is_asked_when_the_setup_is_complete_dismissed_switched_off_demo_or_he
 
 #[test]
 fn the_flag_starts_the_dialogs_only_for_an_empty_setup_in_a_graphical_session() -> TestResult {
-    for config in [None, Some(r#"{"version": 3}"#)] {
-        let station = gmail_station(config, Visit::Nothing, false, Orchard::empty())?;
+    for config in [None, Some(r#"{"version": 4}"#)] {
+        let station = station(config, Orchard::empty())?;
         let script = Script::new().then("ask_buttons", Reply::Cancel);
         let (code, out) = run_with(&station, &script, || true, &["onboard", "--if-needed"]);
         assert_eq!(code, 0, "{out}");
@@ -553,10 +387,11 @@ fn an_unreadable_config_is_reported_and_never_gets_a_dialog() -> TestResult {
     for config in [
         "not json",
         "{\"version\": 2}",
+        "{\"version\": 3, \"apple\": {\"mail\": [{\"id\": \"A\", \"level\": \"read\"}]}}",
         "[]",
-        "{\"version\": 3, \"accounts\": 5}",
+        "{\"version\": 4, \"mail\": 5}",
     ] {
-        let station = gmail_station(Some(config), Visit::Nothing, false, Orchard::empty())?;
+        let station = station(Some(config), Orchard::empty())?;
         let script = Script::new().then("notify", Reply::Done);
         let (code, out) = run_with(&station, &script, || true, &["onboard", "--if-needed"]);
         assert_eq!(code, 1, "{config}: {out}");
@@ -581,7 +416,7 @@ fn an_unreadable_config_is_reported_and_never_gets_a_dialog() -> TestResult {
 
 #[test]
 fn unknown_arguments_are_a_usage_error_before_anything_happens() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+    let station = station(None, Orchard::empty())?;
     for args in [
         vec!["onboard", "--now"],
         vec!["onboard", "--if-needed", "x"],
@@ -601,7 +436,7 @@ fn unknown_arguments_are_a_usage_error_before_anything_happens() -> TestResult {
 
 #[test]
 fn onboarding_refuses_in_demo_mode_before_any_dialog_and_touches_nothing() -> TestResult {
-    let mut station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
+    let mut station = station(None, Orchard::empty())?;
     station.ctx.settings.fake = true;
     let script = Script::new();
     let (code, out) = onboard(&station, &script);
@@ -614,14 +449,13 @@ fn onboarding_refuses_in_demo_mode_before_any_dialog_and_touches_nothing() -> Te
     assert!(!Path::new(&station.ctx.settings.config_path).exists());
     assert!(!Path::new(&station.marker()).exists());
     assert!(!Path::new(&station.ctx.settings.lock_path()).exists());
-    assert_eq!(station.tokens(), 0);
     assert_eq!(station.apple_calls(), 0);
     Ok(())
 }
 
 #[test]
 fn a_dismissal_does_not_stop_the_plain_command() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+    let station = station(None, Orchard::empty())?;
     dismiss(&station.ctx.settings)?;
     let script = Script::new().then("ask_buttons", Reply::Cancel);
     let (code, out) = onboard(&station, &script);
@@ -631,21 +465,17 @@ fn a_dismissal_does_not_stop_the_plain_command() -> TestResult {
 }
 
 #[test]
-fn the_overview_names_every_account_calendar_and_the_apple_part_within_bounds() -> TestResult {
-    let config = gm(r#"{"version": 3, "accounts": [
-        {"provider": "google", "address": "alice@{gmail}", "mail": "write",
-         "calendars": [{"id": "alice@{gmail}", "name": "Privat", "level": "write"}]},
-        {"provider": "microsoft", "address": "bob@outlook.example"}],
-        "apple": {"mail": [{"id": "A1", "name": "iCloud", "level": "read"}],
-                  "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}"#);
-    let station = gmail_station(Some(&config), Visit::Nothing, false, Orchard::empty())?;
-    let text = overview(&station.rights()?);
+fn the_overview_counts_the_enabled_accounts_and_calendars() -> TestResult {
+    let config = r#"{"version": 4,
+        "mail": [{"id": "A1", "name": "iCloud", "level": "read"}, {"id": "A2", "name": "Privat", "level": "write"}],
+        "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}"#;
+    let station = station(Some(config), Orchard::empty())?;
     assert_eq!(
-        text,
-        gm("Gmail: alice@{gmail}\n    Mail: schreiben\n    Kalender: Privat (schreiben)\nOutlook.com: bob@outlook.example\n    Mail: aus\n    Kalender: keine\nApple Mail und Kalender: 1 Konten, 1 Kalender")
+        overview(&station.rights()?),
+        "Apple Mail und Kalender: 2 Konten, 1 Kalender"
     );
-    assert!(holds_something(&station.rights()?));
-    assert!(!holds_something(&Rights::empty()));
+    assert!(station.rights()?.enabled());
+    assert!(!Rights::empty().enabled());
     Ok(())
 }
 
@@ -653,51 +483,17 @@ fn the_overview_names_every_account_calendar_and_the_apple_part_within_bounds() 
 fn a_stop_becomes_the_matching_ending() {
     assert_eq!(ending_of(Stop::Cancelled), Ending::Cancelled);
     assert_eq!(ending_of(Stop::TimedOut), Ending::TimedOut);
-    assert_eq!(ending_of(Stop::Away), Ending::Away);
     assert_eq!(
         ending_of(Stop::Failed("x".to_string())),
         Ending::Failed("x".to_string())
     );
 }
 
-fn apple_orchard() -> Orchard {
-    Orchard::new(
-        vec![MailAccount {
-            id: "ACC-1".to_string(),
-            name: "iCloud".to_string(),
-            kind: "imap".to_string(),
-            addresses: vec!["me@icloud.example".to_string()],
-        }],
-        vec![
-            CalendarInfo {
-                id: "CAL-1".to_string(),
-                name: "Privat".to_string(),
-                writable: true,
-            },
-            CalendarInfo {
-                id: "CAL-2".to_string(),
-                name: "Feiertage".to_string(),
-                writable: false,
-            },
-        ],
-    )
-}
-
-fn leaked(station: &Station, out: &str) -> Vec<&'static str> {
-    let mut found = Vec::new();
-    if station.config().contains(SECRET) {
-        found.push("config");
-    }
-    if out.contains(SECRET) {
-        found.push("output");
-    }
-    found
-}
-
 #[test]
-fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> TestResult {
-    let station = gmail_station(None, Visit::Good("4/0code"), false, Orchard::empty())?;
-    let script = scripted(&gmail_only());
+fn a_setup_starts_with_the_explanation_and_saves_the_chosen_levels() -> TestResult {
+    let station = station(None, apple_orchard())?;
+    let script = scripted(&happy());
+    assert_eq!(station.apple_calls(), 0);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
@@ -705,13 +501,8 @@ fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> Test
         script.ops(),
         [
             "ask_buttons",
+            "ask_buttons",
             "choose_list",
-            "ask_buttons",
-            "ask_text",
-            "ask_text",
-            "ask_buttons",
-            "notify",
-            "ask_buttons",
             "choose_list",
             "ask_buttons",
             "ask_buttons",
@@ -721,47 +512,32 @@ fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> Test
     assert!(out.contains("Einrichtung abgeschlossen."), "{out}");
     assert!(out.contains(RESTART_GOOSE), "{out}");
     let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert_eq!(
-        rights.mail_level(&gm("google:alice@{gmail}")),
-        Some(Level::Read)
-    );
-    assert_eq!(
-        rights.calendar_level(&gm("google:alice@{gmail}:alice@{gmail}")),
-        Some(Level::Read)
-    );
-    assert_eq!(
-        rights.calendar_level(&gm("google:alice@{gmail}:familie@group.example")),
-        Some(Level::Read)
-    );
-    assert_eq!(
-        rights.calendar_level(&gm("google:alice@{gmail}:feiertage@group.example")),
-        None
-    );
-    assert!(rights.apple.mail.is_empty() && rights.apple.calendars.is_empty());
-    assert_eq!(station.tokens(), 1);
-    assert!(station.vault.get(&gm("google:alice@{gmail}")).is_some());
-    assert!(leaked(&station, &out).is_empty());
-    assert_eq!(station.apple_calls(), 0);
-    assert_eq!(station.browser_visits(), 1);
+    assert_eq!(rights.mail.len(), 1);
+    assert_eq!(rights.mail_level("ACC-1"), Some(Level::Read));
+    assert_eq!(rights.calendar_level("CAL-1"), Some(Level::Write));
+    assert_eq!(rights.calendar_level("CAL-2"), Some(Level::Read));
+    assert!(station.apple_calls() >= 2);
     assert!(!Path::new(&station.marker()).exists());
     let seen = script.seen();
-    assert_eq!(seen[3].field("hidden"), Some(Json::Bool(false)));
-    assert_eq!(seen[4].field("hidden"), Some(Json::Bool(true)));
-    assert_eq!(seen[1].text("title"), "Willkommen bei Avery");
-    assert_eq!(seen[2].text("title"), "Gmail verbinden");
-    assert_eq!(seen[8].text("title"), "Gmail: Kalender");
+    assert_eq!(seen[0].text("title"), "Willkommen bei Avery");
+    assert_eq!(seen[1].text("title"), "Apple Mail und Kalender");
+    assert!(seen[1].text("text").contains("Automation"));
+    assert!(seen[1].text("text").contains(PRIVATE_ONLY));
+    assert!(seen[1]
+        .text("text")
+        .starts_with("Avery startet jetzt Mail und Kalender"));
     assert!(
-        seen[9].text("text").contains("Neue Freigaben:"),
+        seen[4].text("text").contains("Neue Freigaben:"),
         "{}",
-        seen[9].text("text")
+        seen[4].text("text")
     );
-    assert!(seen[10].text("text").contains("Das ist eingerichtet:"));
-    assert!(seen[10].text("text").contains(RESTART_GOOSE));
-    assert!(seen[10].text("text").contains(&alice()));
-    assert!(seen[11].text("text").contains("Einrichtung abgeschlossen"));
-    assert!(seen[11].text("text").contains("Goose danach neu starten"));
-    assert!(script.seen().iter().all(|seen| seen.op() != "open_url"));
+    assert!(seen[5].text("text").contains("Das ist eingerichtet:"));
+    assert!(seen[5]
+        .text("text")
+        .contains("Apple Mail und Kalender: 1 Konten, 2 Kalender"));
+    assert!(seen[5].text("text").contains(RESTART_GOOSE));
+    assert!(seen[6].text("text").contains("Einrichtung abgeschlossen"));
+    assert!(seen[6].text("text").contains("Goose danach neu starten"));
     let again = scripted(&[]);
     let (code, out) = run_with(&station, &again, || true, &["onboard", "--if-needed"]);
     assert_eq!((code, out.as_str()), (0, ""));
@@ -770,157 +546,10 @@ fn a_gmail_only_setup_links_the_account_and_saves_the_chosen_calendars() -> Test
 }
 
 #[test]
-fn the_write_level_adds_a_second_list_and_the_scopes_decide_what_is_granted() -> TestResult {
-    let station = gmail_station(None, Visit::Good("c"), true, Orchard::empty())?;
+fn nothing_is_touched_until_the_explanation_is_confirmed() -> TestResult {
+    let station = station(None, apple_orchard())?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        link_google(true),
-        vec![
-            ("choose_list", Reply::List(vec![0, 1, 2])),
-            ("choose_list", Reply::List(vec![1])),
-            ("ask_buttons", Reply::Button(1)),
-        ],
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let rights = station.rights()?;
-    assert_eq!(
-        rights.mail_level(&gm("google:alice@{gmail}")),
-        Some(Level::Write)
-    );
-    assert_eq!(
-        rights.calendar_level(&gm("google:alice@{gmail}:alice@{gmail}")),
-        Some(Level::Read)
-    );
-    assert_eq!(
-        rights.calendar_level(&gm("google:alice@{gmail}:familie@group.example")),
-        Some(Level::Write)
-    );
-    assert_eq!(
-        rights.calendar_level(&gm("google:alice@{gmail}:feiertage@group.example")),
-        Some(Level::Read)
-    );
-    let write_list = &script.seen()[9];
-    assert_eq!(write_list.op(), "choose_list");
-    let items = write_list.field("items").ok_or("items")?;
-    assert_eq!(items.as_array().map(Vec::len), Some(2));
-    assert!(leaked(&station, &out).is_empty());
-    Ok(())
-}
-
-#[test]
-fn an_outlook_only_setup_asks_no_secret() -> TestResult {
-    let station = both_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[1]),
-        link_microsoft(false),
-        read_calendars(&[0]),
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert_eq!(
-        rights.mail_level("microsoft:bob@outlook.example"),
-        Some(Level::Read)
-    );
-    assert_eq!(
-        rights.calendar_level("microsoft:bob@outlook.example:AQMkCAL"),
-        Some(Level::Read)
-    );
-    assert_eq!(
-        script.ops().iter().filter(|op| *op == "ask_text").count(),
-        1
-    );
-    assert_eq!(station.tokens(), 1);
-    assert_eq!(station.apple_calls(), 0);
-    let seen = script.seen();
-    assert_eq!(seen[2].text("title"), "Outlook.com verbinden");
-    assert!(seen[2].text("text").contains("App-Registrierung"));
-    Ok(())
-}
-
-#[test]
-fn gmail_and_outlook_are_linked_one_after_the_other() -> TestResult {
-    let station = both_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0, 1]),
-        link_google(false),
-        read_calendars(&[0]),
-        link_microsoft(false),
-        read_calendars(&[0]),
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 2);
-    assert_eq!(station.tokens(), 2);
-    assert_eq!(rights.calendars_at(Level::Read).len(), 2);
-    let overview = script
-        .seen()
-        .iter()
-        .map(|seen| seen.text("text"))
-        .find(|text| text.starts_with("Das ist eingerichtet:"))
-        .ok_or("overview")?;
-    assert!(overview.contains("Gmail: ") && overview.contains("Outlook.com: bob@outlook.example"));
-    assert_eq!(station.apple_calls(), 0);
-    assert!(leaked(&station, &out).is_empty());
-    Ok(())
-}
-
-#[test]
-fn an_apple_only_setup_starts_with_the_explanation_and_saves_the_apple_section() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, apple_orchard())?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[2]),
-        vec![
-            ("ask_buttons", Reply::Button(1)),
-            ("choose_list", Reply::List(vec![0, 1, 2])),
-            ("choose_list", Reply::List(vec![1])),
-            ("ask_buttons", Reply::Button(1)),
-        ],
-        summary_later(),
-    ]);
-    assert_eq!(station.apple_calls(), 0);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let rights = station.rights()?;
-    assert!(rights.accounts.is_empty());
-    assert_eq!(rights.apple.mail.len(), 1);
-    assert_eq!(rights.mail_level("ACC-1"), Some(Level::Read));
-    assert_eq!(rights.calendar_level("CAL-1"), Some(Level::Write));
-    assert_eq!(rights.calendar_level("CAL-2"), Some(Level::Read));
-    assert!(station.apple_calls() >= 2);
-    assert_eq!(station.tokens(), 0);
-    assert_eq!(station.browser_visits(), 0);
-    let seen = script.seen();
-    assert!(seen[2].text("text").contains("Automation"));
-    assert!(seen[2].text("text").contains(PRIVATE_ONLY));
-    assert_eq!(seen[2].text("title"), "Apple Mail und Kalender");
-    assert!(seen[2]
-        .text("text")
-        .starts_with("Avery startet jetzt Mail und Kalender"));
-    Ok(())
-}
-
-#[test]
-fn apple_is_not_touched_until_the_explanation_is_confirmed_and_never_when_not_chosen() -> TestResult
-{
-    let station = gmail_station(None, Visit::Nothing, false, apple_orchard())?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[2]),
         vec![("ask_buttons", Reply::Cancel), ("notify", Reply::Done)],
     ]);
     let (code, out) = onboard(&station, &script);
@@ -928,65 +557,19 @@ fn apple_is_not_touched_until_the_explanation_is_confirmed_and_never_when_not_ch
     assert_clean(&script);
     assert_eq!(station.apple_calls(), 0);
     assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    let chosen = gmail_station(None, Visit::Good("c"), false, apple_orchard())?;
-    let script = scripted(&gmail_only());
-    let (code, out) = onboard(&chosen, &script);
+    let later = scripted(&[vec![("ask_buttons", Reply::Cancel)]]);
+    let (code, out) = onboard(&station, &later);
     assert_eq!(code, 0, "{out}");
-    assert_eq!(chosen.apple_calls(), 0);
+    assert_eq!(station.apple_calls(), 0);
     Ok(())
 }
 
 #[test]
 fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestResult {
-    let transport = google_transport(&google_tokens(false))
-        .json(
-            Method::Post,
-            "oauth2.googleapis.com/token",
-            200,
-            &google_tokens(false),
-        )
-        .json(
-            Method::Get,
-            "/users/me/calendarList",
-            200,
-            &CALENDAR_LIST.replace("{alice}", &alice()),
-        )
-        .json(
-            Method::Get,
-            "/profile",
-            200,
-            &gm(r#"{"emailAddress": "alice@{gmail}"}"#),
-        )
-        .json(
-            Method::Get,
-            "/labels/INBOX",
-            200,
-            r#"{"id": "INBOX", "messagesUnread": 2}"#,
-        )
-        .json(
-            Method::Get,
-            "/labels",
-            200,
-            r#"{"labels": [{"id": "INBOX", "name": "INBOX", "type": "system"}]}"#,
-        )
-        .json(
-            Method::Get,
-            "/messages?maxResults",
-            200,
-            r#"{"resultSizeEstimate": 0}"#,
-        )
-        .json(
-            Method::Get,
-            "/events",
-            200,
-            r#"{"kind": "calendar#events", "items": []}"#,
-        );
-    let station = station(None, transport, Visit::Good("c"), Orchard::empty())?;
+    let station = demo_station()?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        link_google(false),
-        read_calendars(&[0, 1]),
+        levels(&[0, 3], &[]),
         vec![
             ("ask_buttons", Reply::Button(1)),
             ("notify", Reply::Done),
@@ -998,9 +581,9 @@ fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestRes
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
     let seen = script.seen();
-    assert_eq!(seen[11].op(), "notify");
-    assert!(seen[11].text("text").contains("Lesetest"));
-    let result = seen[12].text("text");
+    assert_eq!(seen[6].op(), "notify");
+    assert!(seen[6].text("text").contains("Lesetest"));
+    let result = seen[7].text("text");
     assert!(result.starts_with("Lesetest bestanden.\n\n"), "{result}");
     assert!(
         result.contains("PASS  Konto 1  Konto erreichbar"),
@@ -1011,14 +594,11 @@ fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestRes
         "{result}"
     );
     assert!(result.contains("Alle Pruefungen bestanden."), "{result}");
-    assert_eq!(seen[12].text("icon"), "note");
-    assert_eq!(station.apple_calls(), 0);
-    let failing = gmail_station(None, Visit::Good("c"), false, apple_orchard())?;
+    assert_eq!(seen[7].text("icon"), "note");
+    let failing = station_with_failing_checks()?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        link_google(false),
-        read_calendars(&[0]),
+        levels(&[0, 1], &[]),
         vec![
             ("ask_buttons", Reply::Button(1)),
             ("notify", Reply::Done),
@@ -1030,119 +610,112 @@ fn the_offer_to_check_runs_the_same_read_check_and_shows_the_result() -> TestRes
     assert_eq!(code, 0, "{out}");
     let seen = script.seen();
     assert!(
-        seen[12]
-            .text("text")
-            .starts_with("Lesetest fehlgeschlagen."),
+        seen[7].text("text").starts_with("Lesetest fehlgeschlagen."),
         "{}",
-        seen[12].text("text")
+        seen[7].text("text")
     );
-    assert!(seen[12].text("text").contains("FAIL"));
-    assert_eq!(seen[12].text("icon"), "caution");
+    assert!(seen[7].text("text").contains("FAIL"));
+    assert_eq!(seen[7].text("icon"), "caution");
     Ok(())
+}
+
+fn station_with_failing_checks() -> Result<Station, Box<dyn Error>> {
+    station(None, apple_orchard())
 }
 
 fn trailing(index: usize) -> Vec<Step> {
     match index {
         0 => Vec::new(),
-        1..=5 => vec![("notify", Reply::Done)],
-        _ => vec![("ask_buttons", Reply::Button(0))],
+        _ => vec![("notify", Reply::Done)],
     }
 }
 
 #[test]
-fn cancelling_at_every_step_stops_cleanly_and_keeps_only_what_was_completed() -> TestResult {
-    let happy = gmail_only().concat();
-    for index in [0usize, 1, 2, 3, 4, 5, 7, 8, 9] {
-        let (op, _) = happy[index];
-        let way_out = if index == 7 {
-            Reply::Timeout
-        } else {
-            Reply::Cancel
-        };
-        let mut steps: Vec<Step> = happy[..index].to_vec();
-        steps.push((op, way_out));
-        steps.extend(trailing(index));
+fn cancelling_at_every_step_stops_cleanly_and_saves_nothing() -> TestResult {
+    let steps = happy().concat();
+    for index in 0..5usize {
+        let (op, _) = steps[index];
+        let mut tried: Vec<Step> = steps[..index].to_vec();
+        tried.push((op, Reply::Cancel));
+        tried.extend(trailing(index));
         let mut script = Script::new();
-        for (op, reply) in steps {
+        for (op, reply) in tried {
             script = script.then(op, reply);
         }
-        let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
+        let station = station(None, apple_orchard())?;
         let (code, out) = onboard(&station, &script);
         assert_eq!(code, 0, "step {index}: {out}");
         assert_clean(&script);
-        assert_eq!(station.apple_calls(), 0, "step {index}");
         assert!(!Path::new(&station.marker()).exists(), "step {index}");
-        if index < 7 {
-            assert!(
-                !Path::new(&station.ctx.settings.config_path).exists(),
-                "step {index}"
-            );
-            assert_eq!(station.tokens(), 0, "step {index}");
-            assert_eq!(station.browser_visits(), 0, "step {index}");
+        assert!(
+            !Path::new(&station.ctx.settings.config_path).exists(),
+            "step {index}"
+        );
+        let expected = if index == 0 {
+            "spaeter verschoben"
         } else {
-            let rights = station.rights()?;
-            assert_eq!(rights.accounts.len(), 1, "step {index}");
-            assert_eq!(
-                rights.mail_level(&gm("google:alice@{gmail}")),
-                Some(Level::Read)
-            );
-            assert!(rights.calendars_at(Level::Read).is_empty(), "step {index}");
-            assert_eq!(station.tokens(), 1, "step {index}");
-            let kept = script
-                .seen()
-                .last()
-                .map(|seen| seen.text("text"))
-                .unwrap_or_default();
-            assert!(
-                kept.contains("Das ist schon gespeichert und bleibt:"),
-                "step {index}: {kept}"
-            );
-            assert!(kept.contains(&alice()), "step {index}: {kept}");
-            assert!(kept.contains(RESTART_GOOSE), "step {index}: {kept}");
-        }
-        let expected = match index {
-            0 => "spaeter verschoben",
-            7 => "Keine Antwort im Dialog",
-            _ => "Abgebrochen.",
+            "Abgebrochen."
         };
         assert!(out.contains(expected), "step {index}: {out}");
-        assert!(leaked(&station, &out).is_empty());
+        if index == 0 {
+            assert_eq!(station.apple_calls(), 0);
+        }
     }
     Ok(())
 }
 
 #[test]
-fn cancelling_the_second_account_keeps_the_first_one_complete() -> TestResult {
-    let station = both_station(None, Visit::Good("c"), false, Orchard::empty())?;
+fn a_timeout_ends_the_run_and_keeps_only_what_was_saved_before() -> TestResult {
+    let station = station(None, apple_orchard())?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0, 1]),
-        link_google(false),
-        read_calendars(&[0, 1]),
-        vec![
-            ("ask_buttons", Reply::Cancel),
-            ("ask_buttons", Reply::Button(0)),
-        ],
+        vec![("ask_buttons", Reply::Timeout), ("notify", Reply::Done)],
     ]);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert_eq!(rights.calendars_at(Level::Read).len(), 2);
-    assert_eq!(station.tokens(), 1);
-    let kept = script
-        .seen()
-        .last()
-        .map(|seen| seen.text("text"))
-        .unwrap_or_default();
-    assert!(
-        kept.contains("Abgebrochen. Das ist schon gespeichert und bleibt:"),
-        "{kept}"
-    );
-    assert!(kept.contains("Kalender: "), "{kept}");
-    assert!(kept.contains(RESTART_GOOSE), "{kept}");
+    assert!(out.contains("Keine Antwort im Dialog"), "{out}");
+    assert_eq!(station.apple_calls(), 0);
+    assert!(!Path::new(&station.ctx.settings.config_path).exists());
+
+    let config = r#"{"version": 4, "mail": [{"id": "A1", "name": "iCloud", "level": "read"}],
+        "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}"#;
+    for (way_out, lead) in [
+        (Reply::Cancel, "Abgebrochen. Das ist schon gespeichert und bleibt:"),
+        (
+            Reply::Timeout,
+            "Keine Antwort im Dialog, die Einrichtung wurde beendet. Das ist schon gespeichert und bleibt:",
+        ),
+    ] {
+        let station = station_with(config)?;
+        let script = scripted(&[
+            welcome(),
+            vec![
+                ("ask_buttons", way_out),
+                ("ask_buttons", Reply::Button(0)),
+            ],
+        ]);
+        let (code, out) = onboard(&station, &script);
+        assert_eq!(code, 0, "{out}");
+        assert_clean(&script);
+        let kept = script
+            .seen()
+            .last()
+            .map(|seen| seen.text("text"))
+            .unwrap_or_default();
+        assert!(kept.contains(lead), "{kept}");
+        assert!(
+            kept.contains("Apple Mail und Kalender: 1 Konten, 1 Kalender"),
+            "{kept}"
+        );
+        assert!(kept.contains(RESTART_GOOSE), "{kept}");
+        assert_eq!(station.config(), config);
+    }
     Ok(())
+}
+
+fn station_with(config: &str) -> Result<Station, Box<dyn Error>> {
+    station(Some(config), apple_orchard())
 }
 
 #[test]
@@ -1154,7 +727,7 @@ fn the_finished_notice_and_the_hint_of_the_terminal_say_the_same_about_goose() {
 
 #[test]
 fn the_welcome_can_postpone_or_dismiss_for_good() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+    let station = station(None, Orchard::empty())?;
     let script = Script::new().then("ask_buttons", Reply::Cancel);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
@@ -1188,7 +761,7 @@ fn the_welcome_can_postpone_or_dismiss_for_good() -> TestResult {
 
 #[test]
 fn a_dismissal_that_cannot_be_saved_is_reported() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+    let station = station(None, Orchard::empty())?;
     fs::create_dir_all(station.marker())?;
     for args in [vec!["onboard"], vec!["onboard", "--if-needed"]] {
         let script = Script::new()
@@ -1215,7 +788,7 @@ fn a_dismissal_that_cannot_be_saved_is_reported() -> TestResult {
 #[test]
 fn a_notification_that_cannot_be_shown_does_not_change_how_a_failure_ends() -> TestResult {
     for reply in [Reply::Silent, Reply::Hung, Reply::Flood, Reply::Cancel] {
-        let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+        let station = station(None, Orchard::empty())?;
         let script = Script::new()
             .then("ask_buttons", Reply::Silent)
             .then("notify", reply.clone());
@@ -1231,7 +804,7 @@ fn a_notification_that_cannot_be_shown_does_not_change_how_a_failure_ends() -> T
 #[test]
 fn a_config_that_turns_unreadable_before_the_summary_ends_the_run_with_a_notification() -> TestResult
 {
-    let station = gmail_station(Some("not json"), Visit::Nothing, false, Orchard::empty())?;
+    let station = station(Some("not json"), Orchard::empty())?;
     let script = Script::new().then("notify", Reply::Done);
     let mut flow = Flow::new(&station.ctx, &script);
     let Next::End(ending) = flow.summary() else {
@@ -1256,40 +829,98 @@ fn a_config_that_turns_unreadable_before_the_summary_ends_the_run_with_a_notific
 }
 
 #[test]
-fn an_empty_choice_of_accounts_ends_the_run_without_changes() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, apple_orchard())?;
-    let script = scripted(&[welcome(), accounts(&[]), vec![("notify", Reply::Done)]]);
+fn an_empty_choice_ends_the_run_without_changes() -> TestResult {
+    let station = station(None, apple_orchard())?;
+    let script = scripted(&[
+        welcome(),
+        vec![
+            ("ask_buttons", Reply::Button(1)),
+            ("choose_list", Reply::List(Vec::new())),
+        ],
+        vec![("notify", Reply::Done)],
+    ]);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
-    assert!(out.contains("Nichts ausgewaehlt"), "{out}");
+    assert!(out.contains("Es ist noch kein Konto freigegeben."), "{out}");
     assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    assert_eq!(station.apple_calls(), 0);
     let seen = script.seen();
-    assert_eq!(seen[1].field("defaults"), Some(json::parse("[2]")?));
-    let labels = seen[1].field("items").ok_or("items")?;
-    let labels = json::dumps(&labels, false);
+    assert_eq!(seen[2].field("defaults"), Some(json::parse("[]")?));
+    let items = seen[2].field("items").ok_or("items")?;
+    let items = json::dumps(&items, false);
     assert!(
-        labels.contains("Gmail")
-            && labels.contains("Outlook.com")
-            && labels.contains("Apple Mail und Kalender (ohne Registrierung)")
-            && labels.contains("Gmail (eigene App nötig)"),
-        "{labels}"
+        items.contains("iCloud")
+            && items.contains("Privat")
+            && items.contains("Feiertage [schreibgeschuetzt]"),
+        "{items}"
     );
+    assert_eq!(seen[3].op(), "notify");
+    assert!(seen[3].text("text").contains("avery mail onboard"));
     Ok(())
 }
 
 #[test]
-fn the_guide_opens_the_pages_and_ends_the_run_for_now() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+fn a_failed_step_offers_to_cancel_or_to_go_on_and_is_not_repeated() -> TestResult {
+    for (reply, ending, notice) in [
+        (
+            Reply::Button(0),
+            "Abgebrochen.",
+            "Abgebrochen. Es wurde nichts gespeichert.",
+        ),
+        (
+            Reply::Button(1),
+            "Es ist noch kein Konto freigegeben.",
+            "Nichts ausgewählt.",
+        ),
+    ] {
+        let station = station(None, Orchard::broken())?;
+        let script = scripted(&[
+            welcome(),
+            vec![
+                ("ask_buttons", Reply::Button(1)),
+                ("ask_buttons", reply),
+                ("notify", Reply::Done),
+            ],
+        ]);
+        let (code, out) = onboard(&station, &script);
+        assert_eq!(code, 0, "{out}");
+        assert_clean(&script);
+        let seen = script.seen();
+        let failure = &seen[2];
+        assert_eq!(failure.text("title"), "Apple Mail und Kalender");
+        assert!(
+            failure.text("text").contains("Apple Mail ist nicht lesbar"),
+            "{}",
+            failure.text("text")
+        );
+        assert_eq!(failure.text("icon"), "caution");
+        assert_eq!(
+            failure.field("buttons"),
+            Some(json::parse("[\"Abbrechen\", \"Weiter\"]")?)
+        );
+        assert!(out.contains(ending), "{out}");
+        assert!(
+            seen[3].text("text").starts_with(notice),
+            "{}",
+            seen[3].text("text")
+        );
+        assert_eq!(station.apple_calls(), 1);
+        assert!(!Path::new(&station.ctx.settings.config_path).exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn declining_the_recap_saves_nothing_and_offers_to_cancel_or_to_go_on() -> TestResult {
+    let station = station(None, apple_orchard())?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
         vec![
             ("ask_buttons", Reply::Button(1)),
-            ("choose_list", Reply::List(vec![0, 3])),
-            ("open_url", Reply::Done),
-            ("open_url", Reply::Done),
+            ("choose_list", Reply::List(vec![0, 1])),
+            ("choose_list", Reply::List(Vec::new())),
+            ("ask_buttons", Reply::Button(0)),
+            ("ask_buttons", Reply::Button(0)),
             ("notify", Reply::Done),
         ],
     ]);
@@ -1297,253 +928,13 @@ fn the_guide_opens_the_pages_and_ends_the_run_for_now() -> TestResult {
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
     let seen = script.seen();
-    assert_eq!(seen[4].text("url"), crate::provider::Page::Readme.url());
-    assert_eq!(
-        seen[5].text("url"),
-        crate::provider::Page::CalendarApi.url()
-    );
-    assert!(out.contains("Die Anleitung wurde geoeffnet"), "{out}");
-    assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    assert!(!Path::new(&station.marker()).exists());
-    assert_eq!(station.tokens(), 0);
-    Ok(())
-}
-
-fn failing_flow(failure_reply: Reply, following: Vec<Vec<Step>>) -> Script {
-    let mut steps = vec![
-        welcome(),
-        accounts(&[0]),
-        link_google(false)[..5].to_vec(),
-        vec![("ask_buttons", failure_reply)],
-    ];
-    steps.extend(following);
-    scripted(&steps)
-}
-
-#[test]
-fn a_refused_sign_in_shows_the_message_and_leaves_nothing_behind() -> TestResult {
-    let station = gmail_station(
-        None,
-        Visit::Denied("access_denied"),
-        false,
-        Orchard::empty(),
-    )?;
-    let script = failing_flow(Reply::Button(1), vec![vec![("notify", Reply::Done)]]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let failure = &script.seen()[7];
-    assert_eq!(failure.op(), "ask_buttons");
-    assert_eq!(failure.text("title"), "Gmail verbinden: fehlgeschlagen");
+    assert!(seen[4].text("text").starts_with("Neue Freigaben:"));
     assert!(
-        failure
-            .text("text")
-            .contains("The sign-in was refused (access_denied)"),
+        seen[5].text("text").contains("Abgebrochen."),
         "{}",
-        failure.text("text")
+        seen[5].text("text")
     );
-    assert_eq!(failure.text("icon"), "caution");
-    assert!(out.contains("Es ist noch kein Konto verbunden."), "{out}");
     assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    assert_eq!(station.tokens(), 0);
-    Ok(())
-}
-
-#[test]
-fn a_browser_that_never_answers_ends_in_a_failure_dialog_and_the_cancel_keeps_nothing() -> TestResult
-{
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
-    let script = failing_flow(Reply::Cancel, vec![vec![("notify", Reply::Done)]]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    assert!(script.seen()[7]
-        .text("text")
-        .contains("No sign-in arrived in time"));
-    assert!(out.contains("Abgebrochen."), "{out}");
-    assert_eq!(station.tokens(), 0);
-    assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    Ok(())
-}
-
-#[test]
-fn a_failed_account_does_not_stop_the_next_one() -> TestResult {
-    let station = both_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    let wrong_id = vec![
-        ("ask_buttons", Reply::Button(2)),
-        ("ask_text", Reply::text("bad id!")),
-        ("ask_text", Reply::text(SECRET)),
-    ];
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0, 1]),
-        wrong_id,
-        vec![("ask_buttons", Reply::Button(1))],
-        link_microsoft(false),
-        read_calendars(&[0]),
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let failure = &script.seen()[5];
-    assert!(
-        failure.text("text").contains("The client id looks wrong"),
-        "{}",
-        failure.text("text")
-    );
-    assert_eq!(station.browser_visits(), 1);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert_eq!(rights.accounts[0].address(), "bob@outlook.example");
-    assert_eq!(station.tokens(), 1);
-    assert!(leaked(&station, &out).is_empty());
-    Ok(())
-}
-
-#[test]
-fn an_account_that_is_not_a_personal_gmail_account_is_refused_and_not_stored() -> TestResult {
-    let transport = Scripted::new()
-        .json(
-            Method::Post,
-            "oauth2.googleapis.com/token",
-            200,
-            &google_tokens(false),
-        )
-        .json(
-            Method::Get,
-            "openidconnect.googleapis.com",
-            200,
-            r#"{"sub": "1", "email": "alice@work.example", "email_verified": true}"#,
-        );
-    let station = station(None, transport, Visit::Good("c"), Orchard::empty())?;
-    let script = failing_flow(Reply::Cancel, vec![vec![("notify", Reply::Done)]]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    assert!(
-        script.seen()[7]
-            .text("text")
-            .contains("Avery verbindet nur persoenliche Gmail-Konten"),
-        "{}",
-        script.seen()[7].text("text")
-    );
-    assert_eq!(station.tokens(), 0);
-    assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    Ok(())
-}
-
-#[test]
-fn a_busy_config_lock_removes_the_fresh_sign_in_again() -> TestResult {
-    let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    fs::create_dir_all(dirname(&station.ctx.settings.config_path))?;
-    let _held = crate::lock::acquire(&station.ctx.settings.lock_path(), Duration::ZERO)
-        .map_err(|error| format!("{error:?}"))?;
-    let script = failing_flow(Reply::Cancel, vec![vec![("notify", Reply::Done)]]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let failure = script.seen()[7].text("text");
-    assert!(
-        failure.contains("Ein anderer Avery-Befehl aendert gerade die Konfiguration"),
-        "{failure}"
-    );
-    assert!(failure.contains("wieder entfernt"), "{failure}");
-    assert_eq!(station.tokens(), 0);
-    assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    Ok(())
-}
-
-#[test]
-fn an_address_that_apple_already_serves_is_refused_and_its_sign_in_removed() -> TestResult {
-    let config = gm(
-        r#"{"version": 3, "apple": {"mail": [{"id": "A1", "name": "Privat", "addresses": ["alice@{gmail}"], "level": "read"}]}}"#,
-    );
-    let station = gmail_station(Some(&config), Visit::Good("c"), false, Orchard::empty())?;
-    let script = failing_flow(Reply::Cancel, vec![vec![("ask_buttons", Reply::Button(0))]]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let failure = script.seen()[7].text("text");
-    assert!(
-        failure.contains("ist schon ueber Apple Mail und Kalender eingebunden"),
-        "{failure}"
-    );
-    assert_eq!(station.tokens(), 0);
-    assert_eq!(station.config(), config);
-    Ok(())
-}
-
-#[test]
-fn a_revoke_from_another_terminal_while_the_calendars_wait_is_not_undone() -> TestResult {
-    let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    let path = station.ctx.settings.config_path.clone();
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0]),
-        link_google(false),
-        read_calendars(&[0, 1]),
-        vec![("ask_buttons", Reply::Button(1))],
-        summary_later(),
-    ])
-    .after(10, move || {
-        let other = Context::demo(settings_at(&path), crate::fake::FakeOptions::default());
-        let _ = dispatch(
-            &["revoke".to_string()],
-            &other,
-            &dark(),
-            &mut Cursor::new(Vec::new()),
-            &mut Vec::new(),
-        );
-    });
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    let rights = station.rights()?;
-    assert_eq!(rights.mail_level(&gm("google:alice@{gmail}")), None);
-    assert!(rights.calendars_at(Level::Read).is_empty());
-    let failure = script
-        .seen()
-        .iter()
-        .map(|seen| seen.text("text"))
-        .find(|text| text.contains("inzwischen geaendert"))
-        .ok_or("no failure dialog")?;
-    assert!(failure.contains("Nichts gespeichert"), "{failure}");
-    assert_eq!(station.tokens(), 1);
-    Ok(())
-}
-
-#[test]
-fn an_account_added_by_another_terminal_meanwhile_survives_the_calendar_step() -> TestResult {
-    let station = both_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    let path = station.ctx.settings.config_path.clone();
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0]),
-        link_google(false),
-        read_calendars(&[0, 1]),
-        summary_later(),
-    ])
-    .after(10, move || {
-        let other = settings_at(&path);
-        let _ = other.update_rights(|rights| {
-            rights.add_account(
-                crate::rights::RemoteAccount::new(
-                    crate::provider::Provider::Microsoft,
-                    "bob@outlook.example",
-                )
-                .ok_or(crate::rights::Refusal::Changed)?,
-            )
-        });
-    });
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 2);
-    assert!(rights
-        .account(crate::provider::Provider::Microsoft, "bob@outlook.example")
-        .is_some());
-    assert_eq!(rights.calendars_at(Level::Read).len(), 2);
     Ok(())
 }
 
@@ -1576,7 +967,7 @@ fn dialogs_that_cannot_be_shown_end_the_run_with_the_reason_and_change_nothing()
             "unerwartete Antwort",
         ),
     ] {
-        let station = gmail_station(None, Visit::Good("c"), false, apple_orchard())?;
+        let station = station(None, apple_orchard())?;
         let script = Script::new()
             .then("ask_buttons", reply)
             .then("notify", Reply::Done);
@@ -1593,7 +984,6 @@ fn dialogs_that_cannot_be_shown_end_the_run_with_the_reason_and_change_nothing()
         assert!(chars(&seen[1].text("text")) <= 240);
         assert!(!Path::new(&station.ctx.settings.config_path).exists());
         assert!(!Path::new(&station.marker()).exists());
-        assert_eq!(station.tokens(), 0);
         assert_eq!(station.apple_calls(), 0);
     }
     Ok(())
@@ -1601,11 +991,10 @@ fn dialogs_that_cannot_be_shown_end_the_run_with_the_reason_and_change_nothing()
 
 #[test]
 fn a_dialog_that_breaks_in_the_middle_leaves_a_consistent_state() -> TestResult {
-    let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
+    let station = station(None, apple_orchard())?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        link_google(false),
+        vec![("ask_buttons", Reply::Button(1))],
         vec![("choose_list", Reply::Silent)],
         vec![("ask_buttons", Reply::Silent)],
         vec![("notify", Reply::Done)],
@@ -1613,122 +1002,53 @@ fn a_dialog_that_breaks_in_the_middle_leaves_a_consistent_state() -> TestResult 
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 1, "{out}");
     assert_clean(&script);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert_eq!(station.tokens(), 1);
-    assert!(rights.calendars_at(Level::Read).is_empty());
+    assert!(!Path::new(&station.ctx.settings.config_path).exists());
+    assert!(!Path::new(&station.marker()).exists());
     Ok(())
 }
 
 #[test]
-fn hostile_answers_never_reach_the_config_the_output_or_the_next_dialog() -> TestResult {
-    let hostile_id = format!("{CLIENT}\u{202e}\u{200b}\u{0}\n\"; touch pwned; echo \"");
-    let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
+fn a_revoke_from_another_terminal_while_the_recap_waits_is_not_undone() -> TestResult {
+    let config = r#"{"version": 4, "mail": [{"id": "ACC-1", "name": "iCloud", "level": "read"}]}"#;
+    let station = station(Some(config), apple_orchard())?;
+    let path = station.ctx.settings.config_path.clone();
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        vec![
-            ("ask_buttons", Reply::Button(2)),
-            ("ask_text", Reply::text(&hostile_id)),
-            ("ask_text", Reply::text(&format!("{SECRET}\u{200b}"))),
-        ],
-        vec![("ask_buttons", Reply::Cancel), ("notify", Reply::Done)],
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let failure = script.seen()[5].text("text");
-    assert!(failure.contains("The client id looks wrong"), "{failure}");
-    assert!(!failure.contains("touch"), "{failure}");
-    assert!(!out.contains("touch"), "{out}");
-    assert_eq!(station.tokens(), 0);
-    assert!(!Path::new(&station.ctx.settings.config_path).exists());
-    assert_eq!(station.browser_visits(), 0);
-
-    for reply in [
-        Reply::text(&"9".repeat(100_000)),
-        Reply::TooLong,
-        Reply::Data("{\"result\": \"text\", \"text\": null}".to_string()),
-        Reply::Cancel,
-        Reply::Timeout,
-    ] {
-        let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
-        let script = scripted(&[
-            welcome(),
-            accounts(&[0]),
-            vec![
-                ("ask_buttons", Reply::Button(2)),
-                ("ask_text", reply.clone()),
-            ],
-        ]);
-        let script = match reply {
-            Reply::Cancel | Reply::Timeout => script.then("notify", Reply::Done),
-            _ => script
-                .then("ask_buttons", Reply::Cancel)
-                .then("notify", Reply::Done),
-        };
-        let (code, out) = onboard(&station, &script);
-        assert_eq!(code, 0, "{reply:?}: {out}");
-        assert_clean(&script);
-        assert_eq!(station.tokens(), 0, "{reply:?}");
-        assert!(
-            !Path::new(&station.ctx.settings.config_path).exists(),
-            "{reply:?}"
+        levels(&[0, 1], &[]),
+        vec![("ask_buttons", Reply::Button(1))],
+    ])
+    .after(5, move || {
+        let other = Context::demo(settings_at(&path), FakeOptions::default());
+        let _ = dispatch(
+            &["revoke".to_string()],
+            &other,
+            &dark(),
+            &mut Cursor::new(Vec::new()),
+            &mut Vec::new(),
         );
-    }
-    Ok(())
-}
-
-#[test]
-fn a_secret_only_ever_travels_on_the_standard_output_of_the_dialog() -> TestResult {
-    let station = gmail_station(None, Visit::Good("c"), false, Orchard::empty())?;
-    let script = scripted(&gmail_only());
+    });
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
-    let all: String = script
+    let rights = station.rights()?;
+    assert!(!rights.enabled());
+    let failure = script
         .seen()
         .iter()
-        .map(|seen| seen.payload.clone())
-        .collect();
-    assert!(!all.contains(SECRET));
-    assert!(!all.contains("GOCSPX"));
-    assert!(leaked(&station, &out).is_empty());
-    let exchange = station
-        .transport
-        .seen()
-        .into_iter()
-        .find(|request| request.url.contains("oauth2.googleapis.com/token"))
-        .ok_or("token request")?;
-    assert!(exchange
-        .body
-        .as_deref()
-        .unwrap_or_default()
-        .contains("client_secret="));
-    assert!(!exchange.url.contains(SECRET));
-    let stored = station
-        .vault
-        .get(&gm("google:alice@{gmail}"))
-        .ok_or("token")?;
-    assert!(stored.contains(SECRET));
-    for line in fs::read_dir(dirname(&station.ctx.settings.config_path))? {
-        let path = line?.path();
-        if path.is_file() {
-            assert!(!fs::read_to_string(&path)?.contains(SECRET), "{path:?}");
-        }
-    }
+        .map(|seen| seen.text("text"))
+        .find(|text| text.contains("inzwischen geaendert"))
+        .ok_or("no failure dialog")?;
+    assert!(failure.contains("Nichts gespeichert"), "{failure}");
     Ok(())
 }
 
 #[test]
 fn no_other_command_ever_shows_a_dialog_or_calls_the_screen() -> TestResult {
-    let station = gmail_station(
-        Some(&gm(
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@{gmail}", "mail": "write",
-                "calendars": [{"id": "alice@{gmail}", "name": "alice@{gmail}", "level": "read"}]}]}"#,
-        )),
-        Visit::Nothing,
-        false,
-        Orchard::empty(),
+    let station = station(
+        Some(
+            r#"{"version": 4, "mail": [{"id": "ACC-1", "name": "iCloud", "level": "write"}],
+                "calendars": [{"id": "CAL-1", "name": "Privat", "level": "read"}]}"#,
+        ),
+        apple_orchard(),
     )?;
     let script = Script::new();
     for (args, input) in [
@@ -1736,10 +1056,6 @@ fn no_other_command_ever_shows_a_dialog_or_calls_the_screen() -> TestResult {
         (vec!["calendars"], ""),
         (vec!["status"], ""),
         (vec!["setup"], "1\n0\nj\n"),
-        (vec!["setup", "apple"], ""),
-        (vec!["link", "google"], "id\nsecret\n1\n"),
-        (vec!["link", "microsoft"], "id\n1\n"),
-        (vec!["unlink", "alice@gmail.example"], "n\n"),
         (vec!["revoke"], ""),
         (vec!["selftest"], ""),
         (vec!["selftest-write"], "n\nn\nn\nn\nn\n"),
@@ -1769,13 +1085,13 @@ fn no_other_command_ever_shows_a_dialog_or_calls_the_screen() -> TestResult {
 
 #[test]
 fn the_server_has_no_way_to_onboard_or_to_open_a_dialog() -> TestResult {
-    let station = gmail_station(None, Visit::Nothing, false, Orchard::empty())?;
+    let station = station(None, Orchard::empty())?;
     let script = Script::new();
     let screen = Screen {
         host: &script,
         gui: &|| true,
     };
-    let calls = ["onboard", "link", "setup", "ask_text", "choose_list", "notify", "open_url", "ask_buttons", "dismiss", "link_account"]
+    let calls = ["onboard", "setup", "ask_text", "choose_list", "notify", "ask_buttons", "dismiss"]
         .iter()
         .enumerate()
         .map(|(number, name)| {
@@ -1799,11 +1115,11 @@ fn the_server_has_no_way_to_onboard_or_to_open_a_dialog() -> TestResult {
     assert_eq!(code, 0);
     let text = String::from_utf8_lossy(&out).into_owned();
     let listed = text.lines().nth(1).unwrap_or_default();
-    for name in ["onboard", "link", "setup", "dismiss", "dialog", "ask_"] {
+    for name in ["onboard", "setup", "dismiss", "dialog", "ask_"] {
         assert!(!listed.contains(name), "{name}: {listed}");
     }
     let answers: Vec<&str> = text.lines().skip(2).collect();
-    assert_eq!(answers.len(), 10, "{text}");
+    assert_eq!(answers.len(), 7, "{text}");
     for answer in answers {
         assert!(
             answer.contains("\"isError\": true") || answer.contains("\"error\""),
@@ -1811,7 +1127,6 @@ fn the_server_has_no_way_to_onboard_or_to_open_a_dialog() -> TestResult {
         );
     }
     assert!(script.seen().is_empty());
-    assert_eq!(station.tokens(), 0);
     assert!(!Path::new(&station.ctx.settings.config_path).exists());
     assert!(!Path::new(&station.marker()).exists());
     Ok(())
@@ -1826,79 +1141,41 @@ fn the_command_is_listed_in_the_help_and_among_the_suggestions() {
     assert_eq!(crate::cli::closest_command("onboarding"), Some("onboard"));
 }
 
-fn gmail_station_with_list(status: u16, list: &str) -> Result<Station, Box<dyn Error>> {
-    let transport = google_transport(&google_tokens(false))
-        .json(
-            Method::Post,
-            "oauth2.googleapis.com/token",
-            200,
-            &google_tokens(false),
-        )
-        .json(Method::Get, "/users/me/calendarList", status, list);
-    station(None, transport, Visit::Good("c"), Orchard::empty())
-}
-
-fn gmail_station_listing(write: bool, list: &str) -> Result<Station, Box<dyn Error>> {
-    let transport = google_transport(&google_tokens(write))
-        .json(
-            Method::Post,
-            "oauth2.googleapis.com/token",
-            200,
-            &google_tokens(write),
-        )
-        .json(Method::Get, "/users/me/calendarList", 200, list);
-    station(None, transport, Visit::Good("c"), Orchard::empty())
-}
-
-fn long_calendars(count: usize, length: usize) -> (String, Vec<String>) {
-    let names: Vec<String> = (0..count)
-        .map(|number| format!("{number:02} {}", "k".repeat(length - 3)))
-        .collect();
-    let items: Vec<String> = names
-        .iter()
-        .enumerate()
-        .map(|(number, name)| {
-            format!(
-                r#"{{"id": "cal{number}@group.example", "summary": "{name}", "accessRole": "owner"}}"#
-            )
-        })
-        .collect();
-    (
-        format!(
-            r#"{{"kind": "calendar#calendarList", "items": [{}]}}"#,
-            items.join(", ")
-        ),
-        names,
+fn long_calendars(count: usize, length: usize) -> Orchard {
+    Orchard::new(
+        Vec::new(),
+        (0..count)
+            .map(|number| CalendarInfo {
+                id: format!("CAL-{number}"),
+                name: format!("{number:02} {}", "k".repeat(length - 3)),
+                writable: true,
+            })
+            .collect(),
     )
 }
 
 #[test]
 fn twelve_calendars_with_long_names_are_all_in_the_final_dialog_with_the_writes_first() -> TestResult
 {
-    let (list, names) = long_calendars(12, 60);
-    let station = gmail_station_listing(true, &list)?;
+    let station = station(None, long_calendars(12, 60))?;
+    let names: Vec<String> = (0..12)
+        .map(|number| format!("{number:02} {}", "k".repeat(57)))
+        .collect();
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        link_google(true),
-        vec![
-            ("choose_list", Reply::List((0..12).collect())),
-            ("choose_list", Reply::List(vec![9, 10, 11])),
-            ("ask_buttons", Reply::Button(1)),
-        ],
+        levels(&(0..12).collect::<Vec<_>>(), &[9, 10, 11]),
         summary_later(),
     ]);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
-    let recap = script.seen()[10].text("text");
-    let shown = |name: &String| format!("{name} ({})", alice());
+    let recap = script.seen()[4].text("text");
     let mut lines = vec!["Neue Freigaben: 3 Kalender zum Schreiben, 9 zum Lesen".to_string()];
     for name in &names[9..] {
-        lines.push(format!("Kalender: {} (schreiben)", shown(name)));
+        lines.push(format!("Kalender: {name} (schreiben)"));
     }
     for name in &names[..9] {
-        lines.push(format!("Kalender: {} (lesen)", shown(name)));
+        lines.push(format!("Kalender: {name} (lesen)"));
     }
     lines.push(String::new());
     lines.push("Korrekt?".to_string());
@@ -1911,7 +1188,7 @@ fn twelve_calendars_with_long_names_are_all_in_the_final_dialog_with_the_writes_
 }
 
 #[test]
-fn the_apple_step_after_eight_existing_grants_lists_only_what_changes() -> TestResult {
+fn after_eight_existing_grants_the_recap_lists_only_what_changes() -> TestResult {
     let old: Vec<String> = (1..=8).map(|number| format!("Alt {number}")).collect();
     let entries: Vec<String> = old
         .iter()
@@ -1920,10 +1197,7 @@ fn the_apple_step_after_eight_existing_grants_lists_only_what_changes() -> TestR
             format!(r#"{{"id": "OLD-{index}", "name": "{name}", "level": "read"}}"#)
         })
         .collect();
-    let config = format!(
-        r#"{{"version": 3, "apple": {{"calendars": [{}]}}}}"#,
-        entries.join(", ")
-    );
+    let config = format!(r#"{{"version": 4, "calendars": [{}]}}"#, entries.join(", "));
     let mut calendars: Vec<CalendarInfo> = old
         .iter()
         .enumerate()
@@ -1938,27 +1212,16 @@ fn the_apple_step_after_eight_existing_grants_lists_only_what_changes() -> TestR
         name: "Privat".to_string(),
         writable: true,
     });
-    let station = gmail_station(
-        Some(&config),
-        Visit::Nothing,
-        false,
-        Orchard::new(Vec::new(), calendars),
-    )?;
+    let station = station(Some(&config), Orchard::new(Vec::new(), calendars))?;
     let script = scripted(&[
         welcome(),
-        accounts(&[2]),
-        vec![
-            ("ask_buttons", Reply::Button(1)),
-            ("choose_list", Reply::List((0..9).collect())),
-            ("choose_list", Reply::List(vec![8])),
-            ("ask_buttons", Reply::Button(1)),
-        ],
+        levels(&(0..9).collect::<Vec<_>>(), &[8]),
         summary_later(),
     ]);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
-    let recap = script.seen()[5].text("text");
+    let recap = script.seen()[4].text("text");
     assert_eq!(
         recap,
         "Neue Freigaben: 1 Kalender zum Schreiben\nKalender: Privat (schreiben)\n\nKorrekt?"
@@ -1967,7 +1230,7 @@ fn the_apple_step_after_eight_existing_grants_lists_only_what_changes() -> TestR
         assert!(!recap.contains(name.as_str()), "{recap}");
     }
     let rights = station.rights()?;
-    assert_eq!(rights.apple.calendars.len(), 9);
+    assert_eq!(rights.calendars.len(), 9);
     assert_eq!(rights.calendar_level("NEW-1"), Some(Level::Write));
     for index in 0..8 {
         assert_eq!(
@@ -1980,9 +1243,9 @@ fn the_apple_step_after_eight_existing_grants_lists_only_what_changes() -> TestR
 
 #[test]
 fn a_calendar_that_vanished_is_a_removed_line_and_not_a_note() -> TestResult {
-    let config = r#"{"version": 3, "apple": {"calendars": [
+    let config = r#"{"version": 4, "calendars": [
         {"id": "KEEP", "name": "Bleibt", "level": "read"},
-        {"id": "GONE", "name": "Weg", "level": "read"}]}}"#;
+        {"id": "GONE", "name": "Weg", "level": "read"}]}"#;
     let calendars = vec![
         CalendarInfo {
             id: "KEEP".to_string(),
@@ -1995,15 +1258,9 @@ fn a_calendar_that_vanished_is_a_removed_line_and_not_a_note() -> TestResult {
             writable: true,
         },
     ];
-    let station = gmail_station(
-        Some(config),
-        Visit::Nothing,
-        false,
-        Orchard::new(Vec::new(), calendars),
-    )?;
+    let station = station(Some(config), Orchard::new(Vec::new(), calendars))?;
     let script = scripted(&[
         welcome(),
-        accounts(&[2]),
         vec![
             ("ask_buttons", Reply::Button(1)),
             ("choose_list", Reply::List(vec![0, 1])),
@@ -2017,70 +1274,23 @@ fn a_calendar_that_vanished_is_a_removed_line_and_not_a_note() -> TestResult {
     assert_clean(&script);
     let seen = script.seen();
     assert_eq!(
-        seen[5].text("text"),
+        seen[4].text("text"),
         "Neue Freigaben: 1 Kalender zum Lesen, 1 entzogen\nKalender: Neu (lesen)\nKalender: Weg (aus) [bisher: lesen]\n\nKorrekt?"
     );
     assert!(seen
         .iter()
         .all(|dialog| !dialog.text("text").contains("Nicht mehr vorhanden")));
     let rights = station.rights()?;
-    assert_eq!(rights.apple.calendars.len(), 2);
+    assert_eq!(rights.calendars.len(), 2);
     assert_eq!(rights.calendar_level("GONE"), None);
     Ok(())
 }
 
 #[test]
-fn a_recap_that_would_be_cut_is_refused_before_any_yes_and_nothing_is_saved() -> TestResult {
-    let (list, _) = long_calendars(24, 100);
-    let station = gmail_station_listing(false, &list)?;
+fn a_recap_that_would_be_cut_is_refused_before_any_yes_and_names_the_command() -> TestResult {
+    let station = station(None, long_calendars(40, 60))?;
     let script = scripted(&[
         welcome(),
-        accounts(&[0]),
-        link_google(false),
-        vec![("choose_list", Reply::List((0..24).collect()))],
-        vec![("ask_buttons", Reply::Cancel)],
-        vec![("ask_buttons", Reply::Button(0))],
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let seen = script.seen();
-    for dialog in &seen {
-        assert!(!dialog.text("text").contains("Korrekt?"), "{}", dialog.op());
-    }
-    let failure = seen[9].text("text");
-    assert!(
-        failure.contains(
-            "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: avery mail setup"
-        ),
-        "{failure}"
-    );
-    assert!(!failure.contains("setup apple"), "{failure}");
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert!(rights.calendars_at(Level::Read).is_empty());
-    assert_eq!(station.tokens(), 1);
-    Ok(())
-}
-
-#[test]
-fn an_apple_recap_that_would_be_cut_is_refused_and_names_the_apple_command() -> TestResult {
-    let calendars: Vec<CalendarInfo> = (0..40)
-        .map(|number| CalendarInfo {
-            id: format!("CAL-{number}"),
-            name: format!("Kalender {number:02} {}", "a".repeat(40)),
-            writable: true,
-        })
-        .collect();
-    let station = gmail_station(
-        None,
-        Visit::Nothing,
-        false,
-        Orchard::new(Vec::new(), calendars),
-    )?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[2]),
         vec![
             ("ask_buttons", Reply::Button(1)),
             ("choose_list", Reply::List((0..40).collect())),
@@ -2095,10 +1305,10 @@ fn an_apple_recap_that_would_be_cut_is_refused_and_names_the_apple_command() -> 
     for dialog in &seen {
         assert!(!dialog.text("text").contains("Korrekt?"), "{}", dialog.op());
     }
-    let failure = seen[5].text("text");
+    let failure = seen[4].text("text");
     assert!(
         failure.contains(
-            "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: avery mail setup apple"
+            "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: avery mail setup"
         ),
         "{failure}"
     );
@@ -2108,164 +1318,52 @@ fn an_apple_recap_that_would_be_cut_is_refused_and_names_the_apple_command() -> 
 }
 
 #[test]
-fn an_unreadable_calendar_list_is_reported_and_the_account_stays_linked() -> TestResult {
-    let station = gmail_station_with_list(403, r#"{"error": {"message": "API not enabled"}}"#)?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0]),
-        link_google(false),
-        vec![("ask_buttons", Reply::Button(0))],
-        summary_later(),
-    ]);
+fn hostile_names_are_cleaned_and_bounded_before_they_are_shown() -> TestResult {
+    let nasty = "Fa\u{202e}mi\u{200b}lie\n(privat)";
+    let long = format!("Fa\u{202e}mi\u{200b}lie\n{}", "x".repeat(500));
+    let station = station(
+        None,
+        Orchard::new(
+            vec![MailAccount {
+                id: "ACC-1".to_string(),
+                name: nasty.to_string(),
+                kind: "imap".to_string(),
+                addresses: vec![nasty.to_string()],
+            }],
+            vec![
+                CalendarInfo {
+                    id: "CAL-1".to_string(),
+                    name: nasty.to_string(),
+                    writable: true,
+                },
+                CalendarInfo {
+                    id: "CAL-2".to_string(),
+                    name: long,
+                    writable: true,
+                },
+            ],
+        ),
+    )?;
+    let script = scripted(&[welcome(), levels(&[0, 1], &[]), summary_later()]);
     let (code, out) = onboard(&station, &script);
     assert_eq!(code, 0, "{out}");
     assert_clean(&script);
-    let notice = script.seen()[8].text("text");
-    assert!(notice.contains("nicht lesbar"), "{notice}");
-    assert!(
-        notice.contains("deren Freigaben bleiben unveraendert"),
-        "{notice}"
-    );
+    let items = script.seen()[2].field("items").ok_or("items")?;
+    let items = items.as_array().ok_or("items")?;
+    assert_eq!(items.len(), 3);
+    for item in items {
+        let item = item.as_str().ok_or("item")?;
+        assert!(
+            !item.contains('\u{202e}') && !item.contains('\u{200b}') && !item.contains('\n'),
+            "{item}"
+        );
+        assert!(item.chars().count() <= 180, "{}", item.chars().count());
+        assert!(item.contains("Familie"), "{item}");
+    }
     let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert!(rights.calendars_at(Level::Read).is_empty());
-    assert_eq!(station.tokens(), 1);
-    Ok(())
-}
-
-#[test]
-fn an_account_without_calendars_gets_a_notice_instead_of_an_empty_list() -> TestResult {
-    let station =
-        gmail_station_with_list(200, r#"{"kind": "calendar#calendarList", "items": []}"#)?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0]),
-        link_google(false),
-        vec![("ask_buttons", Reply::Button(0))],
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    assert!(script.seen()[8]
-        .text("text")
-        .contains("Dieses Konto hat keine Kalender."));
-    assert!(
-        script
-            .ops()
-            .iter()
-            .filter(|op| *op == "choose_list")
-            .count()
-            == 1
-    );
-    Ok(())
-}
-
-#[test]
-fn hostile_calendar_names_are_cleaned_and_bounded_before_they_are_shown() -> TestResult {
-    let nasty = format!("Fa\u{202e}mi\u{200b}lie\n{}", "x".repeat(500));
-    let list = format!(
-        r#"{{"kind": "calendar#calendarList", "items": [{{"id": "familie@group.example", "summary": {}, "accessRole": "owner"}}]}}"#,
-        json::dumps(&Json::from(nasty.as_str()), true)
-    );
-    let station = gmail_station_with_list(200, &list)?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0]),
-        link_google(false),
-        read_calendars(&[0]),
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let items = script.seen()[8].field("items").ok_or("items")?;
-    let item = items
-        .as_array()
-        .and_then(|list| list.first())
-        .and_then(Json::as_str)
-        .ok_or("item")?;
-    assert!(
-        !item.contains('\u{202e}') && !item.contains('\u{200b}') && !item.contains('\n'),
-        "{item}"
-    );
-    assert!(item.chars().count() <= 180, "{}", item.chars().count());
-    assert!(item.starts_with("1. Familie"), "{item}");
-    let rights = station.rights()?;
-    assert_eq!(rights.calendars_at(Level::Read).len(), 1);
-    Ok(())
-}
-
-#[test]
-fn a_new_account_at_the_limit_is_refused_after_the_sign_in_and_its_token_removed() -> TestResult {
-    let accounts_json: Vec<String> = (0..16)
-        .map(|number| {
-            format!(r#"{{"provider": "microsoft", "address": "user{number}@outlook.example"}}"#)
-        })
-        .collect();
-    let config = format!(
-        r#"{{"version": 3, "accounts": [{}]}}"#,
-        accounts_json.join(", ")
-    );
-    let transport = google_transport(&google_tokens(false));
-    let station = station(Some(&config), transport, Visit::Good("c"), Orchard::empty())?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0]),
-        link_google(false)[..5].to_vec(),
-        vec![
-            ("ask_buttons", Reply::Cancel),
-            ("ask_buttons", Reply::Button(0)),
-        ],
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let seen = script.seen();
-    assert!(
-        seen[2]
-            .text("text")
-            .starts_with("Hinweis: Es sind schon 16 Konten verbunden."),
-        "{}",
-        seen[2].text("text")
-    );
-    assert!(
-        seen[7]
-            .text("text")
-            .contains("Es sind schon 16 Konten verbunden."),
-        "{}",
-        seen[7].text("text")
-    );
-    assert_eq!(station.tokens(), 0);
-    assert_eq!(station.config(), config);
-    Ok(())
-}
-
-#[test]
-fn an_apple_step_that_fails_is_not_repeated_and_leaves_the_rest_alone() -> TestResult {
-    let station = gmail_station(None, Visit::Good("c"), false, Orchard::broken())?;
-    let script = scripted(&[
-        welcome(),
-        accounts(&[0, 2]),
-        link_google(false),
-        read_calendars(&[0]),
-        vec![
-            ("ask_buttons", Reply::Button(1)),
-            ("ask_buttons", Reply::Button(1)),
-        ],
-        summary_later(),
-    ]);
-    let (code, out) = onboard(&station, &script);
-    assert_eq!(code, 0, "{out}");
-    assert_clean(&script);
-    let failure = script.seen()[11].text("text");
-    assert!(failure.contains("Apple Mail ist nicht lesbar"), "{failure}");
-    assert!(script.seen()[12]
-        .text("text")
-        .starts_with("Das ist eingerichtet:"));
-    assert_eq!(station.apple_calls(), 1);
-    let rights = station.rights()?;
-    assert_eq!(rights.accounts.len(), 1);
-    assert!(rights.apple.mail.is_empty() && rights.apple.calendars.is_empty());
+    assert_eq!(rights.mail.len(), 1);
+    assert_eq!(rights.calendars.len(), 1);
+    assert_eq!(rights.calendars[0].0.name, "Familie (privat)");
+    assert!(!station.config().contains('\u{202e}'));
     Ok(())
 }

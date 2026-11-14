@@ -1,16 +1,15 @@
 use crate::backend::Backend;
-use crate::calendar::{CalendarBackend, FakeCalendar};
+use crate::calendar::{CalendarBackend, FakeCalendar, RealCalendar};
 use crate::config::Settings;
 use crate::fake::FakeBackend;
 #[cfg(test)]
 use crate::fake::FakeOptions;
-use crate::provider::{Calendars, Linker, Mail};
+use crate::real::RealBackend;
 
 pub(crate) struct Context {
     pub(crate) settings: Settings,
     pub(crate) backend: Box<dyn Backend>,
     pub(crate) calendar: Box<dyn CalendarBackend>,
-    pub(crate) linker: Linker,
 }
 
 impl Context {
@@ -18,13 +17,11 @@ impl Context {
         settings: Settings,
         backend: Box<dyn Backend>,
         calendar: Box<dyn CalendarBackend>,
-        linker: Linker,
     ) -> Context {
         Context {
             settings,
             backend,
             calendar,
-            linker,
         }
     }
 
@@ -34,7 +31,6 @@ impl Context {
             settings,
             Box::new(FakeBackend::new(options.clone())),
             Box::new(FakeCalendar::new(options)),
-            Linker::inert(),
         )
     }
 
@@ -45,15 +41,12 @@ impl Context {
                 settings,
                 Box::new(FakeBackend::from_env()),
                 Box::new(FakeCalendar::from_env()),
-                Linker::inert(),
             );
         }
-        let vault_lock = settings.vault_lock_path();
         Context::new(
             settings,
-            Box::new(Mail::system(&vault_lock)),
-            Box::new(Calendars::system(&vault_lock)),
-            Linker::system(&vault_lock),
+            Box::new(RealBackend::system()),
+            Box::new(RealCalendar::system()),
         )
     }
 }

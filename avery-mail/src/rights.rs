@@ -1,16 +1,12 @@
 use crate::account::{string_list, MailAccount};
 use crate::calendar::CalendarEntry;
 use crate::json::{Json, Object};
-use crate::provider::{account_id, calendar_id, Provider};
-use crate::text::{one_line_str, plain_address};
+use crate::text::one_line_str;
 use crate::texts::{DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, MAX_LIMIT_PER_HOUR};
 
-pub(crate) const CONFIG_VERSION: i64 = 3;
-pub(crate) const MAX_ACCOUNTS: usize = 16;
-pub(crate) const MAX_CALENDARS: usize = 100;
-pub(crate) const MAX_APPLE: usize = 200;
+pub(crate) const CONFIG_VERSION: i64 = 4;
+pub(crate) const MAX_ENTRIES: usize = 200;
 pub(crate) const MAX_NAME: usize = 120;
-const APPLE: &str = Provider::Apple.as_str();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Level {
@@ -35,102 +31,13 @@ impl Level {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    Changed,
-    Full,
-    Taken { address: String, provider: Provider },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CalendarGrant {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) level: Level,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RemoteAccount {
-    provider: Provider,
-    address: String,
-    id: String,
-    pub(crate) mail: Option<Level>,
-    pub(crate) calendars: Vec<CalendarGrant>,
-}
-
-impl RemoteAccount {
-    pub(crate) fn new(provider: Provider, address: &str) -> Option<RemoteAccount> {
-        let id = account_id(provider, address)?;
-        (address == address.to_lowercase()).then(|| RemoteAccount {
-            provider,
-            address: address.to_string(),
-            id,
-            mail: None,
-            calendars: Vec::new(),
-        })
-    }
-
-    pub(crate) fn provider(&self) -> Provider {
-        self.provider
-    }
-
-    pub(crate) fn address(&self) -> &str {
-        &self.address
-    }
-
-    pub(crate) fn mail_account(&self) -> MailAccount {
-        MailAccount {
-            id: self.id.clone(),
-            name: self.address.clone(),
-            kind: self.provider.kind().to_string(),
-            addresses: vec![self.address.clone()],
-        }
-    }
-
-    pub(crate) fn calendar_id(&self, provider_id: &str) -> Option<String> {
-        calendar_id(self.provider, &self.address, provider_id)
-    }
-
-    pub(crate) fn lower(&mut self, write_mail: bool, write_calendar: bool) {
-        if !write_mail {
-            self.mail = self.mail.map(|level| level.min(Level::Read));
-        }
-        if !write_calendar {
-            for grant in &mut self.calendars {
-                grant.level = grant.level.min(Level::Read);
-            }
-        }
-    }
-
-    fn calendar_entries(&self) -> impl Iterator<Item = (CalendarEntry, Level)> + '_ {
-        self.calendars.iter().filter_map(|grant| {
-            Some((
-                CalendarEntry {
-                    id: self.calendar_id(&grant.id)?,
-                    name: grant.name.clone(),
-                },
-                grant.level,
-            ))
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Apple {
-    pub(crate) mail: Vec<(MailAccount, Level)>,
-    pub(crate) calendars: Vec<(CalendarEntry, Level)>,
-}
-
-impl Apple {
-    pub(crate) fn enabled(&self) -> bool {
-        !self.mail.is_empty() || !self.calendars.is_empty()
-    }
-}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Changed;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Rights {
-    pub(crate) accounts: Vec<RemoteAccount>,
-    pub(crate) apple: Apple,
+    pub(crate) mail: Vec<(MailAccount, Level)>,
+    pub(crate) calendars: Vec<(CalendarEntry, Level)>,
     pub(crate) sends_per_hour: i64,
     pub(crate) changes_per_hour: i64,
 }
@@ -186,17 +93,12 @@ fn limit_of(config: &Object, key: &str, default: i64) -> Result<i64, String> {
     }
 }
 
-fn list_of<'a>(
-    section: &'a Object,
-    key: &str,
-    place: &str,
-    most: usize,
-) -> Result<&'a [Json], String> {
-    match section.get(key) {
+fn list_of<'a>(config: &'a Object, key: &str) -> Result<&'a [Json], String> {
+    match config.get(key) {
         None => Ok(&[]),
-        Some(Json::Arr(items)) if items.len() <= most => Ok(items.as_slice()),
-        Some(Json::Arr(_)) => Err(format!("{place}{key} has more than {most} entries")),
-        Some(_) => Err(format!("{place}{key} must be a list")),
+        Some(Json::Arr(items)) if items.len() <= MAX_ENTRIES => Ok(items.as_slice()),
+        Some(Json::Arr(_)) => Err(format!("{key} has more than {MAX_ENTRIES} entries")),
+        Some(_) => Err(format!("{key} must be a list")),
     }
 }
 
@@ -212,102 +114,13 @@ fn parse_name(entry: &Object, id: &str, place: &str) -> Result<String, String> {
     Ok(name_or_id(optional_text(entry, "name", place)?, id))
 }
 
-fn parse_remote_calendars(
-    account: &RemoteAccount,
-    entry: &Object,
-    place: &str,
-) -> Result<Vec<CalendarGrant>, String> {
-    let mut found: Vec<CalendarGrant> = Vec::new();
-    let prefix = format!("{place}.");
-    for (index, item) in list_of(entry, "calendars", &prefix, MAX_CALENDARS)?
-        .iter()
-        .enumerate()
-    {
-        let place = format!("{place}.calendars[{index}]");
-        let calendar = object_of(item, &place)?;
-        only_keys(calendar, &["id", "name", "level"], &place)?;
-        let id = id_of(calendar, &place)?;
-        if account.calendar_id(&id).is_none() {
-            return Err(format!("{place}.id is not a valid calendar id"));
-        }
-        if found.iter().any(|known| known.id == id) {
-            return Err(format!("{place}.id appears twice"));
-        }
-        found.push(CalendarGrant {
-            name: parse_name(calendar, &id, &place)?,
-            id,
-            level: Level::parse(calendar.get("level"), &format!("{place}.level"))?,
-        });
-    }
-    Ok(found)
-}
-
-fn parse_accounts(config: &Object) -> Result<Vec<RemoteAccount>, String> {
-    let mut found: Vec<RemoteAccount> = Vec::new();
-    for (index, item) in list_of(config, "accounts", "", MAX_ACCOUNTS)?
-        .iter()
-        .enumerate()
-    {
-        let place = format!("accounts[{index}]");
-        let entry = object_of(item, &place)?;
-        only_keys(entry, &["provider", "address", "mail", "calendars"], &place)?;
-        let provider = entry
-            .get("provider")
-            .and_then(Json::as_str)
-            .and_then(Provider::parse_remote)
-            .ok_or_else(|| {
-                let choices: Vec<String> = Provider::remote()
-                    .map(|provider| format!("\"{}\"", provider.as_str()))
-                    .collect();
-                format!("{place}.provider must be {}", choices.join(" or "))
-            })?;
-        let address = entry
-            .get("address")
-            .and_then(Json::as_str)
-            .filter(|address| plain_address(address))
-            .ok_or_else(|| format!("{place}.address must be a plain lower-case mail address"))?;
-        let mut account = RemoteAccount::new(provider, address)
-            .ok_or_else(|| format!("{place}.address must be a plain lower-case mail address"))?;
-        if let Some(known) = found.iter().find(|known| known.address == account.address) {
-            return Err(if known.provider == account.provider {
-                format!("{place} appears twice")
-            } else {
-                format!(
-                    "{place}.address is already linked under {}: an address can be linked only once",
-                    known.provider.as_str()
-                )
-            });
-        }
-        if let Some(level) = entry.get("mail") {
-            account.mail = Some(Level::parse(Some(level), &format!("{place}.mail"))?);
-        }
-        account.calendars = parse_remote_calendars(&account, entry, &place)?;
-        found.push(account);
-    }
-    Ok(found)
-}
-
-fn apple_id(entry: &Object, place: &str) -> Result<String, String> {
-    let id = id_of(entry, place)?;
-    if !Provider::is_apple_id(&id) {
-        return Err(format!(
-            "{place}.id must not look like a {} id",
-            Provider::remote_names(" or ")
-        ));
-    }
-    Ok(id)
-}
-
-fn parse_apple_mail(section: &Object) -> Result<Vec<(MailAccount, Level)>, String> {
+fn parse_mail(config: &Object) -> Result<Vec<(MailAccount, Level)>, String> {
     let mut found: Vec<(MailAccount, Level)> = Vec::new();
-    for (index, item) in list_of(section, "mail", &format!("{APPLE}."), MAX_APPLE)?
-        .iter()
-        .enumerate()
-    {
-        let place = format!("{APPLE}.mail[{index}]");
+    for (index, item) in list_of(config, "mail")?.iter().enumerate() {
+        let place = format!("mail[{index}]");
         let entry = object_of(item, &place)?;
         only_keys(entry, &["id", "name", "type", "addresses", "level"], &place)?;
-        let id = apple_id(entry, &place)?;
+        let id = id_of(entry, &place)?;
         if found.iter().any(|(known, _)| known.id == id) {
             return Err(format!("{place}.id appears twice"));
         }
@@ -333,16 +146,13 @@ fn parse_apple_mail(section: &Object) -> Result<Vec<(MailAccount, Level)>, Strin
     Ok(found)
 }
 
-fn parse_apple_calendars(section: &Object) -> Result<Vec<(CalendarEntry, Level)>, String> {
+fn parse_calendars(config: &Object) -> Result<Vec<(CalendarEntry, Level)>, String> {
     let mut found: Vec<(CalendarEntry, Level)> = Vec::new();
-    for (index, item) in list_of(section, "calendars", &format!("{APPLE}."), MAX_APPLE)?
-        .iter()
-        .enumerate()
-    {
-        let place = format!("{APPLE}.calendars[{index}]");
+    for (index, item) in list_of(config, "calendars")?.iter().enumerate() {
+        let place = format!("calendars[{index}]");
         let entry = object_of(item, &place)?;
         only_keys(entry, &["id", "name", "level"], &place)?;
-        let id = apple_id(entry, &place)?;
+        let id = id_of(entry, &place)?;
         if found.iter().any(|(known, _)| known.id == id) {
             return Err(format!("{place}.id appears twice"));
         }
@@ -357,63 +167,9 @@ fn parse_apple_calendars(section: &Object) -> Result<Vec<(CalendarEntry, Level)>
     Ok(found)
 }
 
-fn parse_apple(section: &Object) -> Result<Apple, String> {
-    only_keys(section, &["mail", "calendars"], APPLE)?;
-    Ok(Apple {
-        mail: parse_apple_mail(section)?,
-        calendars: parse_apple_calendars(section)?,
-    })
-}
-
-fn linked_directly(accounts: &[RemoteAccount], address: &str) -> Option<usize> {
-    let wanted = address.to_lowercase();
-    accounts
-        .iter()
-        .position(|account| account.address == wanted)
-}
-
-fn check_shared_addresses(accounts: &[RemoteAccount], apple: &Apple) -> Result<(), String> {
-    for (index, (account, _)) in apple.mail.iter().enumerate() {
-        for (position, address) in account.addresses.iter().enumerate() {
-            if let Some(number) = linked_directly(accounts, address) {
-                return Err(format!(
-                    "{APPLE}.mail[{index}].addresses[{position}] is already linked directly as accounts[{number}]: an address can be used only once"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn account_json(account: &RemoteAccount) -> Json {
-    let mut entry = Object::new();
-    entry.insert("provider", account.provider.as_str());
-    entry.insert("address", account.address.as_str());
-    if let Some(level) = account.mail {
-        entry.insert("mail", level.as_str());
-    }
-    if !account.calendars.is_empty() {
-        let calendars: Vec<Json> = account
-            .calendars
-            .iter()
-            .map(|grant| {
-                let mut calendar = Object::new();
-                calendar.insert("id", grant.id.as_str());
-                calendar.insert("name", grant.name.as_str());
-                calendar.insert("level", grant.level.as_str());
-                Json::Obj(calendar)
-            })
-            .collect();
-        entry.insert("calendars", Json::Arr(calendars));
-    }
-    Json::Obj(entry)
-}
-
-fn apple_json(apple: &Apple) -> Json {
-    let mut section = Object::new();
-    if !apple.mail.is_empty() {
-        let accounts: Vec<Json> = apple
-            .mail
+fn mail_json(entries: &[(MailAccount, Level)]) -> Json {
+    Json::Arr(
+        entries
             .iter()
             .map(|(account, level)| {
                 let mut entry = Object::new();
@@ -424,12 +180,13 @@ fn apple_json(apple: &Apple) -> Json {
                 entry.insert("level", level.as_str());
                 Json::Obj(entry)
             })
-            .collect();
-        section.insert("mail", Json::Arr(accounts));
-    }
-    if !apple.calendars.is_empty() {
-        let calendars: Vec<Json> = apple
-            .calendars
+            .collect(),
+    )
+}
+
+fn calendars_json(entries: &[(CalendarEntry, Level)]) -> Json {
+    Json::Arr(
+        entries
             .iter()
             .map(|(calendar, level)| {
                 let mut entry = Object::new();
@@ -438,18 +195,16 @@ fn apple_json(apple: &Apple) -> Json {
                 entry.insert("level", level.as_str());
                 Json::Obj(entry)
             })
-            .collect();
-        section.insert("calendars", Json::Arr(calendars));
-    }
-    Json::Obj(section)
+            .collect(),
+    )
 }
 
 impl Rights {
     #[cfg(test)]
     pub(crate) fn empty() -> Rights {
         Rights {
-            accounts: Vec::new(),
-            apple: Apple::default(),
+            mail: Vec::new(),
+            calendars: Vec::new(),
             sends_per_hour: DEFAULT_SENDS_PER_HOUR,
             changes_per_hour: DEFAULT_CHANGES_PER_HOUR,
         }
@@ -463,181 +218,83 @@ impl Rights {
             config,
             &[
                 "version",
-                "accounts",
-                APPLE,
+                "mail",
+                "calendars",
                 "sends_per_hour",
                 "changes_per_hour",
             ],
             "config",
         )?;
-        let apple = match config.get(APPLE) {
-            Some(value) => parse_apple(object_of(value, APPLE)?)?,
-            None => Apple::default(),
-        };
-        let accounts = parse_accounts(config)?;
-        check_shared_addresses(&accounts, &apple)?;
         Ok(Rights {
-            accounts,
-            apple,
+            mail: parse_mail(config)?,
+            calendars: parse_calendars(config)?,
             sends_per_hour: limit_of(config, "sends_per_hour", DEFAULT_SENDS_PER_HOUR)?,
             changes_per_hour: limit_of(config, "changes_per_hour", DEFAULT_CHANGES_PER_HOUR)?,
-        })
-    }
-
-    pub(crate) fn shared_address(&self, addresses: &[String]) -> Option<String> {
-        addresses
-            .iter()
-            .map(|address| address.to_lowercase())
-            .find(|address| linked_directly(&self.accounts, address).is_some())
-    }
-
-    fn apple_holds(&self, address: &str) -> bool {
-        self.apple.mail.iter().any(|(account, _)| {
-            account
-                .addresses
-                .iter()
-                .any(|known| known.to_lowercase() == address)
         })
     }
 
     pub(crate) fn to_config(&self) -> Object {
         let mut config = Object::new();
         config.insert("version", Json::Int(CONFIG_VERSION));
-        if !self.accounts.is_empty() {
-            let accounts: Vec<Json> = self.accounts.iter().map(account_json).collect();
-            config.insert("accounts", Json::Arr(accounts));
+        if !self.mail.is_empty() {
+            config.insert("mail", mail_json(&self.mail));
         }
-        if self.apple.enabled() {
-            config.insert(APPLE, apple_json(&self.apple));
+        if !self.calendars.is_empty() {
+            config.insert("calendars", calendars_json(&self.calendars));
         }
         config.insert("sends_per_hour", Json::Int(self.sends_per_hour));
         config.insert("changes_per_hour", Json::Int(self.changes_per_hour));
         config
     }
 
-    pub(crate) fn account(&self, provider: Provider, address: &str) -> Option<&RemoteAccount> {
-        self.accounts
-            .iter()
-            .find(|account| account.provider == provider && account.address == address)
+    pub(crate) fn enabled(&self) -> bool {
+        !self.mail.is_empty() || !self.calendars.is_empty()
     }
 
-    pub(crate) fn account_mut(
-        &mut self,
-        provider: Provider,
-        address: &str,
-    ) -> Option<&mut RemoteAccount> {
-        self.accounts
-            .iter_mut()
-            .find(|account| account.provider == provider && account.address == address)
-    }
-
-    pub(crate) fn add_account(&mut self, account: RemoteAccount) -> Result<(), Refusal> {
-        let holder = self
-            .accounts
-            .iter()
-            .find(|known| known.address == account.address)
-            .map(|known| known.provider)
-            .or_else(|| {
-                self.apple_holds(&account.address)
-                    .then_some(Provider::Apple)
-            });
-        if let Some(provider) = holder {
-            return Err(Refusal::Taken {
-                address: account.address,
-                provider,
-            });
-        }
-        if self.accounts.len() >= MAX_ACCOUNTS {
-            return Err(Refusal::Full);
-        }
-        self.accounts.push(account);
-        Ok(())
-    }
-
-    pub(crate) fn remove_account(&mut self, provider: Provider, address: &str) -> bool {
-        let known = self.accounts.len();
-        self.accounts
-            .retain(|account| !(account.provider == provider && account.address == address));
-        self.accounts.len() != known
-    }
-
-    pub(crate) fn apply(&mut self, before: &Rights, after: &Rights) -> Result<(), Refusal> {
-        for wanted in &after.accounts {
-            let Some(old) = before.account(wanted.provider, &wanted.address) else {
-                continue;
-            };
-            if old == wanted {
-                continue;
+    pub(crate) fn apply(&mut self, before: &Rights, after: &Rights) -> Result<(), Changed> {
+        if after.mail != before.mail || after.calendars != before.calendars {
+            if self.mail != before.mail || self.calendars != before.calendars {
+                return Err(Changed);
             }
-            match self.account_mut(wanted.provider, &wanted.address) {
-                Some(current) if *current == *old => *current = wanted.clone(),
-                _ => return Err(Refusal::Changed),
-            }
-        }
-        if after.apple != before.apple {
-            if self.apple != before.apple {
-                return Err(Refusal::Changed);
-            }
-            self.apple = after.apple.clone();
-            if check_shared_addresses(&self.accounts, &self.apple).is_err() {
-                return Err(Refusal::Changed);
-            }
+            self.mail = after.mail.clone();
+            self.calendars = after.calendars.clone();
         }
         Ok(())
     }
 
     pub(crate) fn revoke(&mut self) {
-        for account in &mut self.accounts {
-            account.mail = None;
-            account.calendars.clear();
-        }
-        self.apple = Apple::default();
-    }
-
-    pub(crate) fn mail_entries(&self) -> Vec<(MailAccount, Level)> {
-        self.accounts
-            .iter()
-            .filter_map(|account| Some((account.mail_account(), account.mail?)))
-            .chain(self.apple.mail.iter().cloned())
-            .collect()
-    }
-
-    pub(crate) fn calendar_entries(&self) -> Vec<(CalendarEntry, Level)> {
-        self.accounts
-            .iter()
-            .flat_map(RemoteAccount::calendar_entries)
-            .chain(self.apple.calendars.iter().cloned())
-            .collect()
+        self.mail.clear();
+        self.calendars.clear();
     }
 
     pub(crate) fn mail_at(&self, least: Level) -> Vec<MailAccount> {
-        self.mail_entries()
-            .into_iter()
+        self.mail
+            .iter()
             .filter(|(_, level)| *level >= least)
-            .map(|(account, _)| account)
+            .map(|(account, _)| account.clone())
             .collect()
     }
 
     pub(crate) fn calendars_at(&self, least: Level) -> Vec<CalendarEntry> {
-        self.calendar_entries()
-            .into_iter()
+        self.calendars
+            .iter()
             .filter(|(_, level)| *level >= least)
-            .map(|(calendar, _)| calendar)
+            .map(|(calendar, _)| calendar.clone())
             .collect()
     }
 
     pub(crate) fn mail_level(&self, id: &str) -> Option<Level> {
-        self.mail_entries()
-            .into_iter()
+        self.mail
+            .iter()
             .find(|(account, _)| account.id == id)
-            .map(|(_, level)| level)
+            .map(|(_, level)| *level)
     }
 
     pub(crate) fn calendar_level(&self, id: &str) -> Option<Level> {
-        self.calendar_entries()
-            .into_iter()
+        self.calendars
+            .iter()
             .find(|(calendar, _)| calendar.id == id)
-            .map(|(_, level)| level)
+            .map(|(_, level)| *level)
     }
 }
 
@@ -646,22 +303,13 @@ mod tests {
     use super::*;
     use crate::testutil::{args, TestResult};
 
-    const FULL: &str = r#"{"version": 3,
-        "accounts": [
-            {"provider": "google", "address": "alice@gmail.example", "mail": "write",
-             "calendars": [
-                {"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "write"},
-                {"id": "family123@group.calendar.google.example", "level": "read"}]},
-            {"provider": "microsoft", "address": "bob@outlook.example", "mail": "read",
-             "calendars": [{"id": "AQMk-_=", "name": "Calendar (bob@outlook.example)", "level": "read"}]},
-            {"provider": "google", "address": "carol@gmail.example"}],
-        "apple": {
-            "mail": [
-                {"id": "ACC-1", "name": "Privat", "type": "imap", "addresses": ["me@example.org"], "level": "write"},
-                {"id": "ACC-2", "name": "Arbeit", "level": "read"}],
-            "calendars": [
-                {"id": "CAL-1", "name": "Privat", "level": "write"},
-                {"id": "CAL-2", "level": "read"}]},
+    const FULL: &str = r#"{"version": 4,
+        "mail": [
+            {"id": "ACC-1", "name": "Privat", "type": "imap", "addresses": ["me@example.org"], "level": "write"},
+            {"id": "ACC-2", "name": "Arbeit", "level": "read"}],
+        "calendars": [
+            {"id": "CAL-1", "name": "Privat", "level": "write"},
+            {"id": "CAL-2", "level": "read"}],
         "sends_per_hour": 3, "changes_per_hour": 7}"#;
 
     fn parsed(text: &str) -> Result<Rights, String> {
@@ -677,46 +325,26 @@ mod tests {
     }
 
     #[test]
-    fn a_full_file_is_read_with_accounts_the_apple_section_and_limits() -> TestResult {
+    fn a_full_file_is_read_with_mail_calendars_and_limits() -> TestResult {
         let rights = parsed(FULL)?;
-        assert_eq!(rights.accounts.len(), 3);
-        let alice = rights
-            .account(Provider::Google, "alice@gmail.example")
-            .ok_or("alice")?;
-        assert_eq!(alice.provider(), Provider::Google);
-        assert_eq!(alice.address(), "alice@gmail.example");
-        assert_eq!(alice.mail, Some(Level::Write));
-        assert_eq!(alice.calendars.len(), 2);
-        assert_eq!(
-            alice.calendars[1].name,
-            "family123@group.calendar.google.example"
-        );
-        assert_eq!(alice.calendars[1].level, Level::Read);
-        let carol = rights
-            .account(Provider::Google, "carol@gmail.example")
-            .ok_or("carol")?;
-        assert_eq!(carol.mail, None);
-        assert!(carol.calendars.is_empty());
-        assert!(rights
-            .account(Provider::Microsoft, "alice@gmail.example")
-            .is_none());
-        assert_eq!(rights.apple.mail.len(), 2);
-        assert_eq!(rights.apple.mail[0].0.addresses, ["me@example.org"]);
-        assert_eq!(rights.apple.mail[1].0.name, "Arbeit");
-        assert_eq!(rights.apple.mail[1].0.kind, "");
-        assert_eq!(rights.apple.calendars[1].0.name, "CAL-2");
-        assert!(rights.apple.enabled());
+        assert_eq!(rights.mail.len(), 2);
+        assert_eq!(rights.mail[0].0.addresses, ["me@example.org"]);
+        assert_eq!(rights.mail[0].0.kind, "imap");
+        assert_eq!(rights.mail[1].0.name, "Arbeit");
+        assert_eq!(rights.mail[1].0.kind, "");
+        assert_eq!(rights.calendars[1].0.name, "CAL-2");
+        assert!(rights.enabled());
         assert_eq!((rights.sends_per_hour, rights.changes_per_hour), (3, 7));
         Ok(())
     }
 
     #[test]
     fn an_empty_file_grants_nothing_and_uses_the_default_limits() -> TestResult {
-        let rights = parsed(r#"{"version": 3}"#)?;
+        let rights = parsed(r#"{"version": 4}"#)?;
         assert_eq!(rights, Rights::empty());
         assert!(rights.mail_at(Level::Read).is_empty());
         assert!(rights.calendars_at(Level::Read).is_empty());
-        assert!(!rights.apple.enabled());
+        assert!(!rights.enabled());
         assert_eq!(rights.sends_per_hour, DEFAULT_SENDS_PER_HOUR);
         assert_eq!(rights.changes_per_hour, DEFAULT_CHANGES_PER_HOUR);
         Ok(())
@@ -739,116 +367,75 @@ mod tests {
             keys,
             [
                 "version",
-                "accounts",
-                "apple",
+                "mail",
+                "calendars",
                 "sends_per_hour",
                 "changes_per_hour"
             ]
         );
-        let carol = RemoteAccount::new(Provider::Google, "carol@gmail.example").ok_or("carol")?;
-        let mut only = Rights::empty();
-        only.accounts.push(carol);
-        let config = only.to_config();
-        let accounts = config
-            .get("accounts")
-            .and_then(Json::as_array)
-            .ok_or("accounts")?;
-        let entry = accounts[0].as_object().ok_or("entry")?;
-        let keys: Vec<&str> = entry.keys().collect();
-        assert_eq!(keys, ["provider", "address"]);
-        assert!(config.get("apple").is_none());
+        let mail_only = parsed(r#"{"version": 4, "mail": [{"id": "A", "level": "read"}]}"#)?;
+        let keys: Vec<String> = mail_only.to_config().keys().map(str::to_string).collect();
+        assert_eq!(
+            keys,
+            ["version", "mail", "sends_per_hour", "changes_per_hour"]
+        );
         Ok(())
     }
 
     #[test]
-    fn the_flat_views_use_the_runtime_ids_and_levels() -> TestResult {
+    fn the_views_use_the_ids_and_levels() -> TestResult {
         let rights = parsed(FULL)?;
         let mail: Vec<String> = rights
             .mail_at(Level::Read)
             .into_iter()
             .map(|account| account.id)
             .collect();
-        assert_eq!(
-            mail,
-            [
-                "google:alice@gmail.example",
-                "microsoft:bob@outlook.example",
-                "ACC-1",
-                "ACC-2"
-            ]
-        );
+        assert_eq!(mail, ["ACC-1", "ACC-2"]);
         let writing: Vec<String> = rights
             .mail_at(Level::Write)
             .into_iter()
             .map(|account| account.id)
             .collect();
-        assert_eq!(writing, ["google:alice@gmail.example", "ACC-1"]);
-        let first = rights.mail_at(Level::Read).remove(0);
-        assert_eq!(first.name, "alice@gmail.example");
-        assert_eq!(first.kind, "gmail");
-        assert_eq!(first.addresses, ["alice@gmail.example"]);
+        assert_eq!(writing, ["ACC-1"]);
         let calendars: Vec<String> = rights
             .calendars_at(Level::Read)
             .into_iter()
             .map(|calendar| calendar.id)
             .collect();
-        assert_eq!(
-            calendars,
-            [
-                "google:alice@gmail.example:alice@gmail.example",
-                "google:alice@gmail.example:family123@group.calendar.google.example",
-                "microsoft:bob@outlook.example:AQMk-_=",
-                "CAL-1",
-                "CAL-2"
-            ]
-        );
-        assert_eq!(rights.calendars_at(Level::Write).len(), 2);
+        assert_eq!(calendars, ["CAL-1", "CAL-2"]);
+        assert_eq!(rights.calendars_at(Level::Write).len(), 1);
         assert!(Level::Read < Level::Write);
-        assert_eq!(
-            rights.mail_level("microsoft:bob@outlook.example"),
-            Some(Level::Read)
-        );
-        assert_eq!(rights.mail_level("google:carol@gmail.example"), None);
+        assert_eq!(rights.mail_level("ACC-1"), Some(Level::Write));
         assert_eq!(rights.mail_level("ACC-2"), Some(Level::Read));
         assert_eq!(rights.mail_level("nope"), None);
-        assert_eq!(
-            rights.calendar_level("google:alice@gmail.example:alice@gmail.example"),
-            Some(Level::Write)
-        );
+        assert_eq!(rights.mail_level("CAL-1"), None);
         assert_eq!(rights.calendar_level("CAL-1"), Some(Level::Write));
+        assert_eq!(rights.calendar_level("CAL-2"), Some(Level::Read));
         assert_eq!(rights.calendar_level("ACC-1"), None);
-        assert_eq!(rights.calendar_level("google:alice@gmail.example"), None);
         Ok(())
     }
 
     #[test]
-    fn apple_is_enabled_only_by_entries() -> TestResult {
-        let off = parsed(r#"{"version": 3, "apple": {}}"#)?;
-        assert!(!off.apple.enabled());
-        assert!(off.to_config().get("apple").is_none());
-        let off = parsed(r#"{"version": 3, "apple": {"mail": [], "calendars": []}}"#)?;
-        assert!(!off.apple.enabled());
+    fn rights_are_enabled_exactly_when_mail_or_calendars_has_an_entry() -> TestResult {
+        let off = parsed(r#"{"version": 4, "mail": [], "calendars": []}"#)?;
+        assert!(!off.enabled());
+        assert!(off.to_config().get("mail").is_none());
+        assert!(off.to_config().get("calendars").is_none());
         let calendars_only =
-            parsed(r#"{"version": 3, "apple": {"calendars": [{"id": "C", "level": "read"}]}}"#)?;
-        assert!(calendars_only.apple.enabled());
-        assert!(calendars_only.to_config().get("apple").is_some());
-        let mail_only =
-            parsed(r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read"}]}}"#)?;
-        assert!(mail_only.apple.enabled());
-        assert!(Rights::empty().mail_entries().is_empty());
+            parsed(r#"{"version": 4, "calendars": [{"id": "C", "level": "read"}]}"#)?;
+        assert!(calendars_only.enabled());
+        assert!(calendars_only.to_config().get("calendars").is_some());
+        let mail_only = parsed(r#"{"version": 4, "mail": [{"id": "A", "level": "read"}]}"#)?;
+        assert!(mail_only.enabled());
+        assert!(!Rights::empty().enabled());
         Ok(())
     }
 
     #[test]
-    fn revoking_clears_grants_and_the_apple_section_but_keeps_the_accounts() -> TestResult {
+    fn revoking_clears_the_grants_and_keeps_the_limits() -> TestResult {
         let mut rights = parsed(FULL)?;
         rights.revoke();
-        assert_eq!(rights.accounts.len(), 3);
-        for account in &rights.accounts {
-            assert_eq!(account.mail, None);
-            assert!(account.calendars.is_empty());
-        }
-        assert!(!rights.apple.enabled());
+        assert!(!rights.enabled());
         assert!(rights.mail_at(Level::Read).is_empty());
         assert!(rights.calendars_at(Level::Read).is_empty());
         assert_eq!((rights.sends_per_hour, rights.changes_per_hour), (3, 7));
@@ -857,342 +444,94 @@ mod tests {
     }
 
     #[test]
-    fn remote_accounts_need_a_remote_provider_and_a_plain_lower_case_address() {
-        assert!(RemoteAccount::new(Provider::Google, "alice@gmail.example").is_some());
-        assert!(RemoteAccount::new(Provider::Microsoft, "bob@outlook.example").is_some());
-        assert!(RemoteAccount::new(Provider::Apple, "alice@gmail.example").is_none());
-        assert!(RemoteAccount::new(Provider::Google, "Alice@gmail.example").is_none());
-        assert!(RemoteAccount::new(Provider::Google, "nonsense").is_none());
-        assert!(RemoteAccount::new(Provider::Google, "a b@gmail.example").is_none());
-    }
-
-    #[test]
     fn names_and_addresses_must_be_visible_single_lines() {
         for text in [
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "name": "Privat\u200b", "level": "read"}]}}"#,
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "name": "Pri\nvat", "level": "read"}]}}"#,
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "name": "Privat\u202e", "level": "read"}]}}"#,
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "addresses": ["a@x.example\u200b"], "level": "read"}]}}"#,
-            r#"{"version": 3, "apple": {"calendars": [{"id": "C", "name": "Feiertage\u{e0041}", "level": "read"}]}}"#,
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "name": "Fa\nmilie", "level": "read"}]}]}"#,
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "name": "Fa\u200bmilie", "level": "read"}]}]}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "name": "Privat\u200b", "level": "read"}]}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "name": "Pri\nvat", "level": "read"}]}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "name": "Privat\u202e", "level": "read"}]}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "addresses": ["a@x.example\u200b"], "level": "read"}]}"#,
+            r#"{"version": 4, "calendars": [{"id": "C", "name": "Feiertage\u{e0041}", "level": "read"}]}"#,
+            r#"{"version": 4, "calendars": [{"id": "C", "name": "Fa\nmilie", "level": "read"}]}"#,
         ] {
             assert!(parsed(text).is_err(), "{text}");
         }
         assert!(parsed(
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "name": "Privat Gmail", "addresses": ["a@x.example"], "level": "read"}]}}"#
+            r#"{"version": 4, "mail": [{"id": "A", "name": "Privat Gmail", "addresses": ["a@x.example"], "level": "read"}]}"#
         )
         .is_ok());
     }
 
     #[test]
-    fn malformed_remote_accounts_are_rejected_with_their_place() {
-        let account = |inner: &str| format!(r#"{{"version": 3, "accounts": [{{{inner}}}]}}"#);
+    fn malformed_entries_are_rejected_with_their_place() {
         for (text, place) in [
-            (r#"{"version": 3, "accounts": {}}"#.to_string(), "accounts must be a list"),
-            (r#"{"version": 3, "accounts": [5]}"#.to_string(), "accounts[0] must be an object"),
-            (account(r#""address": "a@gmail.example""#), "accounts[0].provider must be"),
-            (account(r#""provider": "apple", "address": "a@gmail.example""#), "accounts[0].provider must be"),
-            (account(r#""provider": "yahoo", "address": "a@gmail.example""#), "accounts[0].provider must be"),
-            (account(r#""provider": 5, "address": "a@gmail.example""#), "accounts[0].provider must be"),
-            (account(r#""provider": "google""#), "accounts[0].address must be"),
-            (account(r#""provider": "google", "address": "A@Gmail.example""#), "accounts[0].address must be a plain lower-case mail address"),
-            (account(r#""provider": "google", "address": "nonsense""#), "accounts[0].address must be"),
-            (account(r#""provider": "google", "address": 5"#), "accounts[0].address must be"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "x": 1"#), "accounts[0] has the unknown key"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "mail": "off""#), "accounts[0].mail must be"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "mail": "WRITE""#), "accounts[0].mail must be"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "mail": true"#), "accounts[0].mail must be"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": {}"#), "accounts[0].calendars must be a list"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [5]"#), "accounts[0].calendars[0] must be an object"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"level": "read"}]"#), "accounts[0].calendars[0].id"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "", "level": "read"}]"#), "accounts[0].calendars[0].id"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "x y", "level": "read"}]"#), "accounts[0].calendars[0].id is not a valid calendar id"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "a/b", "level": "read"}]"#), "is not a valid calendar id"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c"}]"#), "accounts[0].calendars[0].level must be"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "none"}]"#), "accounts[0].calendars[0].level must be"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "read", "x": 1}]"#), "accounts[0].calendars[0] has the unknown key"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "read", "name": 5}]"#), "accounts[0].calendars[0].name must be text"),
-            (account(r#""provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "read"}, {"id": "c", "level": "write"}]"#), "accounts[0].calendars[1].id appears twice"),
+            (r#"{"version": 4, "mail": {}}"#, "mail must be a list"),
             (
-                r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@gmail.example"}, {"provider": "google", "address": "a@gmail.example"}]}"#.to_string(),
-                "accounts[1] appears twice",
-            ),
-        ] {
-            rejected(&text, place);
-        }
-        assert!(parsed(
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@gmail.example", "calendars": [{"id": "c", "level": "read"}]}, {"provider": "microsoft", "address": "b@outlook.example", "calendars": [{"id": "c", "level": "read"}]}]}"#
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn an_address_can_be_linked_only_once_whatever_the_provider() -> TestResult {
-        let twice = |first: &str, second: &str| {
-            format!(
-                r#"{{"version": 3, "accounts": [{{"provider": "{first}", "address": "a@example.org"}}, {{"provider": "{second}", "address": "a@example.org"}}]}}"#
-            )
-        };
-        rejected(
-            &twice("google", "microsoft"),
-            "accounts[1].address is already linked under google: an address can be linked only once",
-        );
-        rejected(
-            &twice("microsoft", "google"),
-            "accounts[1].address is already linked under microsoft: an address can be linked only once",
-        );
-        rejected(&twice("google", "google"), "accounts[1] appears twice");
-        let spaced = r#"{"version": 3, "accounts": [
-            {"provider": "google", "address": "a@example.org"},
-            {"provider": "google", "address": "b@example.org"},
-            {"provider": "microsoft", "address": "a@example.org"}]}"#;
-        rejected(spaced, "accounts[2].address is already linked under google");
-        assert!(parsed(
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "a@example.org"}, {"provider": "microsoft", "address": "b@example.org"}]}"#
-        )
-        .is_ok());
-        let mut rights = Rights::empty();
-        let first = RemoteAccount::new(Provider::Microsoft, "a@example.org").ok_or("account")?;
-        assert_eq!(rights.add_account(first), Ok(()));
-        let taken = RemoteAccount::new(Provider::Google, "a@example.org").ok_or("account")?;
-        assert_eq!(
-            rights.add_account(taken),
-            Err(Refusal::Taken {
-                address: "a@example.org".to_string(),
-                provider: Provider::Microsoft
-            })
-        );
-        let same = RemoteAccount::new(Provider::Microsoft, "a@example.org").ok_or("account")?;
-        assert_eq!(
-            rights.add_account(same),
-            Err(Refusal::Taken {
-                address: "a@example.org".to_string(),
-                provider: Provider::Microsoft
-            })
-        );
-        assert_eq!(rights.accounts.len(), 1);
-        for n in 1..MAX_ACCOUNTS {
-            let more = RemoteAccount::new(Provider::Google, &format!("u{n}@example.org"))
-                .ok_or("account")?;
-            assert_eq!(rights.add_account(more), Ok(()));
-        }
-        let late = RemoteAccount::new(Provider::Google, "late@example.org").ok_or("account")?;
-        assert_eq!(rights.add_account(late), Err(Refusal::Full));
-        let both = RemoteAccount::new(Provider::Google, "a@example.org").ok_or("account")?;
-        assert!(matches!(
-            rights.add_account(both),
-            Err(Refusal::Taken { .. })
-        ));
-        Ok(())
-    }
-
-    fn apple_mail_entry(name: &str, addresses: &str) -> String {
-        format!(
-            r#"{{"id": "ACC-1", "name": "{name}", "type": "imap", "addresses": {addresses}, "level": "write"}}"#
-        )
-    }
-
-    #[test]
-    fn an_address_that_is_linked_directly_cannot_also_be_enabled_through_apple() -> TestResult {
-        let accounts = r#"[{"provider": "google", "address": "alice@gmail.example", "mail": "write"}, {"provider": "microsoft", "address": "bob@outlook.example"}]"#;
-        for (entry, place) in [
-            (
-                apple_mail_entry("Privat", r#"["alice@gmail.example"]"#),
-                "apple.mail[0].addresses[0] is already linked directly as accounts[0]: an address can be used only once",
+                r#"{"version": 4, "mail": [5]}"#,
+                "mail[0] must be an object",
             ),
             (
-                apple_mail_entry("alice@gmail.example", r#"["alice@gmail.example"]"#),
-                "apple.mail[0].addresses[0] is already linked directly as accounts[0]",
+                r#"{"version": 4, "mail": [{"level": "read"}]}"#,
+                "mail[0].id",
             ),
             (
-                apple_mail_entry("Privat", r#"["Alice@Gmail.Example"]"#),
-                "apple.mail[0].addresses[0] is already linked directly as accounts[0]",
+                r#"{"version": 4, "mail": [{"id": "", "level": "read"}]}"#,
+                "mail[0].id",
             ),
             (
-                apple_mail_entry("Arbeit", r#"["x@example.org", "BOB@outlook.example"]"#),
-                "apple.mail[0].addresses[1] is already linked directly as accounts[1]",
-            ),
-        ] {
-            for text in [
-                format!(
-                    r#"{{"version": 3, "accounts": {accounts}, "apple": {{"mail": [{entry}]}}}}"#
-                ),
-                format!(
-                    r#"{{"version": 3, "apple": {{"mail": [{entry}]}}, "accounts": {accounts}}}"#
-                ),
-            ] {
-                rejected(&text, place);
-            }
-        }
-        let second = format!(
-            r#"{{"version": 3, "accounts": {accounts}, "apple": {{"mail": [{}, {}]}}}}"#,
-            r#"{"id": "A", "addresses": ["me@example.org"], "level": "read"}"#,
-            r#"{"id": "B", "addresses": ["alice@gmail.example"], "level": "read"}"#
-        );
-        rejected(
-            &second,
-            "apple.mail[1].addresses[0] is already linked directly",
-        );
-        for fine in [
-            apple_mail_entry("Privat", r#"["me@example.org"]"#),
-            apple_mail_entry("Privat", "[]"),
-            apple_mail_entry("alice", r#"["alice@mail.gmail.example"]"#),
-            apple_mail_entry("Privat", r#"["xalice@gmail.example"]"#),
-        ] {
-            let text = format!(
-                r#"{{"version": 3, "accounts": {accounts}, "apple": {{"mail": [{fine}]}}}}"#
-            );
-            assert!(parsed(&text).is_ok(), "{text}");
-        }
-        let calendars_only = format!(
-            r#"{{"version": 3, "accounts": {accounts}, "apple": {{"calendars": [{{"id": "alice@gmail.example", "level": "read"}}]}}}}"#
-        );
-        assert!(parsed(&calendars_only).is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn a_linked_account_is_refused_when_apple_already_serves_its_address() -> TestResult {
-        let entry = apple_mail_entry("Privat", r#"["Alice@Gmail.Example"]"#);
-        let text = format!(r#"{{"version": 3, "apple": {{"mail": [{entry}]}}}}"#);
-        let mut rights = parsed(&text)?;
-        let taken = RemoteAccount::new(Provider::Google, "alice@gmail.example").ok_or("account")?;
-        assert_eq!(
-            rights.add_account(taken),
-            Err(Refusal::Taken {
-                address: "alice@gmail.example".to_string(),
-                provider: Provider::Apple
-            })
-        );
-        assert!(rights.accounts.is_empty());
-        let other = RemoteAccount::new(Provider::Google, "bob@gmail.example").ok_or("account")?;
-        assert_eq!(rights.add_account(other), Ok(()));
-        assert_eq!(
-            rights.shared_address(&["x@example.org".to_string(), "BOB@gmail.example".to_string()]),
-            Some("bob@gmail.example".to_string())
-        );
-        assert_eq!(rights.shared_address(&["x@example.org".to_string()]), None);
-        assert_eq!(rights.shared_address(&[]), None);
-        assert_eq!(Rights::parse(&rights.to_config()), Ok(rights));
-        Ok(())
-    }
-
-    #[test]
-    fn a_setup_is_refused_when_the_address_was_linked_directly_meanwhile() -> TestResult {
-        let before = Rights::empty();
-        let entry = apple_mail_entry("Privat", r#"["alice@gmail.example"]"#);
-        let after = parsed(&format!(
-            r#"{{"version": 3, "apple": {{"mail": [{entry}]}}}}"#
-        ))?;
-        let mut fresh = before.clone();
-        assert_eq!(fresh.apply(&before, &after), Ok(()));
-        let mut linked_meanwhile = before.clone();
-        let account =
-            RemoteAccount::new(Provider::Google, "alice@gmail.example").ok_or("account")?;
-        assert_eq!(linked_meanwhile.add_account(account), Ok(()));
-        assert_eq!(
-            linked_meanwhile.apply(&before, &after),
-            Err(Refusal::Changed)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn the_names_in_the_error_texts_come_from_the_providers() {
-        rejected(
-            r#"{"version": 3, "accounts": [{"provider": "yahoo", "address": "a@gmail.example"}]}"#,
-            r#"accounts[0].provider must be "google" or "microsoft""#,
-        );
-        rejected(
-            r#"{"version": 3, "apple": {"mail": [{"id": "google:a@gmail.example", "level": "read"}]}}"#,
-            "apple.mail[0].id must not look like a Gmail or Outlook.com id",
-        );
-    }
-
-    #[test]
-    fn malformed_apple_sections_are_rejected_with_their_place() {
-        for (text, place) in [
-            (r#"{"version": 3, "apple": []}"#, "apple must be an object"),
-            (
-                r#"{"version": 3, "apple": {"write": []}}"#,
-                "apple has the unknown key",
+                r#"{"version": 4, "mail": [{"id": 7, "level": "read"}]}"#,
+                "mail[0].id",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": {}}}"#,
-                "apple.mail must be a list",
+                r#"{"version": 4, "mail": [{"id": "A"}]}"#,
+                "mail[0].level must be",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [5]}}"#,
-                "apple.mail[0] must be an object",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "off"}]}"#,
+                "mail[0].level must be",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"level": "read"}]}}"#,
-                "apple.mail[0].id",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "WRITE"}]}"#,
+                "mail[0].level must be",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "", "level": "read"}]}}"#,
-                "apple.mail[0].id",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "read", "x": 1}]}"#,
+                "mail[0] has the unknown key",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": 7, "level": "read"}]}}"#,
-                "apple.mail[0].id",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "read", "name": 5}]}"#,
+                "mail[0].name must be text",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A"}]}}"#,
-                "apple.mail[0].level must be",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "read", "type": 5}]}"#,
+                "mail[0].type must be text",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "off"}]}}"#,
-                "apple.mail[0].level must be",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "read", "addresses": [5]}]}"#,
+                "mail[0].addresses",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "WRITE"}]}}"#,
-                "apple.mail[0].level must be",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "read", "addresses": "a@example.org"}]}"#,
+                "mail[0].addresses",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read", "x": 1}]}}"#,
-                "apple.mail[0] has the unknown key",
+                r#"{"version": 4, "mail": [{"id": "A", "level": "read"}, {"id": "A", "level": "write"}]}"#,
+                "mail[1].id appears twice",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read", "name": 5}]}}"#,
-                "apple.mail[0].name must be text",
+                r#"{"version": 4, "calendars": "x"}"#,
+                "calendars must be a list",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read", "addresses": [5]}]}}"#,
-                "apple.mail[0].addresses",
+                r#"{"version": 4, "calendars": [{"id": "C", "level": "read", "addresses": []}]}"#,
+                "calendars[0] has the unknown key",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read", "addresses": "a@example.org"}]}}"#,
-                "apple.mail[0].addresses",
+                r#"{"version": 4, "calendars": [{"id": "C", "level": "none"}]}"#,
+                "calendars[0].level must be",
             ),
             (
-                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read"}, {"id": "A", "level": "write"}]}}"#,
-                "apple.mail[1].id appears twice",
-            ),
-            (
-                r#"{"version": 3, "apple": {"mail": [{"id": "google:a@gmail.example", "level": "read"}]}}"#,
-                "apple.mail[0].id must not look like",
-            ),
-            (
-                r#"{"version": 3, "apple": {"calendars": [{"id": "microsoft:a@outlook.example:c", "level": "read"}]}}"#,
-                "apple.calendars[0].id must not look like",
-            ),
-            (
-                r#"{"version": 3, "apple": {"calendars": "x"}}"#,
-                "apple.calendars must be a list",
-            ),
-            (
-                r#"{"version": 3, "apple": {"calendars": [{"id": "C", "level": "read", "addresses": []}]}}"#,
-                "apple.calendars[0] has the unknown key",
-            ),
-            (
-                r#"{"version": 3, "apple": {"calendars": [{"id": "C", "level": "none"}]}}"#,
-                "apple.calendars[0].level must be",
-            ),
-            (
-                r#"{"version": 3, "apple": {"calendars": [{"id": "C", "level": "read"}, {"id": "C", "level": "read"}]}}"#,
-                "apple.calendars[1].id appears twice",
+                r#"{"version": 4, "calendars": [{"id": "C", "level": "read"}, {"id": "C", "level": "read"}]}"#,
+                "calendars[1].id appears twice",
             ),
         ] {
             rejected(text, place);
@@ -1203,52 +542,58 @@ mod tests {
     fn versions_unknown_keys_and_limits_are_rejected() {
         for (text, place) in [
             (r#"{"version": 2}"#, "format version"),
-            (r#"{}"#, "format version"),
-            (r#"{"version": "3"}"#, "format version"),
+            (r#"{"version": 3}"#, "format version"),
             (
-                r#"{"version": 3, "allowed_accounts": []}"#,
+                r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read"}]}}"#,
+                "format version",
+            ),
+            (r#"{"version": 5}"#, "format version"),
+            (r#"{}"#, "format version"),
+            (r#"{"version": "4"}"#, "format version"),
+            (
+                r#"{"version": 4, "allowed_accounts": []}"#,
                 "allowed_accounts",
             ),
             (
-                r#"{"version": 3, "mail": {"accounts": []}}"#,
-                "config has the unknown key \"mail\"",
+                r#"{"version": 4, "apple": {"mail": []}}"#,
+                "config has the unknown key \"apple\"",
             ),
             (
-                r#"{"version": 3, "calendar": {"calendars": []}}"#,
+                r#"{"version": 4, "accounts": []}"#,
+                "config has the unknown key \"accounts\"",
+            ),
+            (
+                r#"{"version": 4, "calendar": {"calendars": []}}"#,
                 "config has the unknown key \"calendar\"",
             ),
             (
-                r#"{"version": 3, "cloud": {"accounts": []}}"#,
-                "config has the unknown key \"cloud\"",
-            ),
-            (
-                r#"{"version": 3, "sends_per_hour": 0}"#,
+                r#"{"version": 4, "sends_per_hour": 0}"#,
                 "sends_per_hour must be",
             ),
             (
-                r#"{"version": 3, "sends_per_hour": 31}"#,
+                r#"{"version": 4, "sends_per_hour": 31}"#,
                 "sends_per_hour must be",
             ),
             (
-                r#"{"version": 3, "sends_per_hour": "5"}"#,
+                r#"{"version": 4, "sends_per_hour": "5"}"#,
                 "sends_per_hour must be",
             ),
             (
-                r#"{"version": 3, "sends_per_hour": 2.5}"#,
+                r#"{"version": 4, "sends_per_hour": 2.5}"#,
                 "sends_per_hour must be",
             ),
             (
-                r#"{"version": 3, "changes_per_hour": true}"#,
+                r#"{"version": 4, "changes_per_hour": true}"#,
                 "changes_per_hour must be",
             ),
             (
-                r#"{"version": 3, "changes_per_hour": 0}"#,
+                r#"{"version": 4, "changes_per_hour": 0}"#,
                 "changes_per_hour must be",
             ),
         ] {
             rejected(text, place);
         }
-        let limits = parsed(r#"{"version": 3, "sends_per_hour": 30, "changes_per_hour": 1}"#);
+        let limits = parsed(r#"{"version": 4, "sends_per_hour": 30, "changes_per_hour": 1}"#);
         assert_eq!(
             limits.map(|rights| (rights.sends_per_hour, rights.changes_per_hour)),
             Ok((30, 1))
@@ -1257,225 +602,81 @@ mod tests {
 
     #[test]
     fn the_number_of_entries_is_bounded() {
-        let accounts = |count: usize| {
-            let entries: Vec<String> = (0..count)
-                .map(|n| format!(r#"{{"provider": "google", "address": "a{n}@gmail.example"}}"#))
-                .collect();
-            format!(r#"{{"version": 3, "accounts": [{}]}}"#, entries.join(","))
-        };
-        assert!(parsed(&accounts(MAX_ACCOUNTS)).is_ok());
-        rejected(
-            &accounts(MAX_ACCOUNTS + 1),
-            "accounts has more than 16 entries",
-        );
-        let calendars = |count: usize| {
-            let entries: Vec<String> = (0..count)
-                .map(|n| format!(r#"{{"id": "c{n}", "level": "read"}}"#))
-                .collect();
-            format!(
-                r#"{{"version": 3, "accounts": [{{"provider": "google", "address": "a@gmail.example", "calendars": [{}]}}]}}"#,
-                entries.join(",")
-            )
-        };
-        assert!(parsed(&calendars(MAX_CALENDARS)).is_ok());
-        rejected(
-            &calendars(MAX_CALENDARS + 1),
-            "accounts[0].calendars has more than 100 entries",
-        );
-        let apple = |count: usize| {
-            let entries: Vec<String> = (0..count)
-                .map(|n| format!(r#"{{"id": "A{n}", "level": "read"}}"#))
-                .collect();
-            format!(
-                r#"{{"version": 3, "apple": {{"mail": [{}]}}}}"#,
-                entries.join(",")
-            )
-        };
-        assert!(parsed(&apple(MAX_APPLE)).is_ok());
-        rejected(
-            &apple(MAX_APPLE + 1),
-            "apple.mail has more than 200 entries",
-        );
+        for key in ["mail", "calendars"] {
+            let list = |count: usize| {
+                let entries: Vec<String> = (0..count)
+                    .map(|n| format!(r#"{{"id": "A{n}", "level": "read"}}"#))
+                    .collect();
+                format!(r#"{{"version": 4, "{key}": [{}]}}"#, entries.join(","))
+            };
+            assert!(parsed(&list(MAX_ENTRIES)).is_ok(), "{key}");
+            rejected(
+                &list(MAX_ENTRIES + 1),
+                &format!("{key} has more than 200 entries"),
+            );
+        }
     }
 
     #[test]
-    fn a_change_is_applied_only_to_entries_that_are_still_as_they_were() -> TestResult {
+    fn a_change_is_applied_only_when_the_entries_are_still_as_they_were() -> TestResult {
         let before = parsed(FULL)?;
         let mut after = before.clone();
-        after
-            .account_mut(Provider::Google, "alice@gmail.example")
-            .ok_or("alice")?
-            .mail = Some(Level::Read);
+        after.mail.truncate(1);
         let mut fresh = before.clone();
         assert_eq!(fresh.apply(&before, &after), Ok(()));
-        assert_eq!(fresh, after);
-
-        let mut fresh = before.clone();
-        fresh
-            .account_mut(Provider::Microsoft, "bob@outlook.example")
-            .ok_or("bob")?
-            .mail = None;
-        fresh.sends_per_hour = 11;
-        assert_eq!(fresh.apply(&before, &after), Ok(()));
-        assert_eq!(
-            fresh.mail_level("google:alice@gmail.example"),
-            Some(Level::Read)
-        );
-        assert_eq!(fresh.mail_level("microsoft:bob@outlook.example"), None);
-        assert_eq!(fresh.sends_per_hour, 11);
+        assert_eq!(fresh.mail.len(), 1);
+        assert_eq!(fresh.calendars, before.calendars);
 
         let mut fresh = before.clone();
         fresh.revoke();
-        let revoked = fresh.clone();
-        assert_eq!(fresh.apply(&before, &after), Err(Refusal::Changed));
-        assert_eq!(fresh.mail_level("google:alice@gmail.example"), None);
-        let mut untouched = revoked.clone();
-        assert_eq!(untouched.apply(&before, &before), Ok(()));
-        assert_eq!(untouched, revoked);
-
-        let mut fresh = before.clone();
-        assert!(fresh.remove_account(Provider::Google, "alice@gmail.example"));
-        assert_eq!(fresh.apply(&before, &after), Err(Refusal::Changed));
-        assert!(fresh
-            .account(Provider::Google, "alice@gmail.example")
-            .is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn the_apple_section_is_replaced_only_when_it_is_still_as_it_was() -> TestResult {
-        let before = parsed(FULL)?;
-        let mut after = before.clone();
-        after.apple.mail.truncate(1);
-        let mut fresh = before.clone();
-        assert_eq!(fresh.apply(&before, &after), Ok(()));
-        assert_eq!(fresh.apple.mail.len(), 1);
-
-        let mut fresh = before.clone();
-        fresh.apple = Apple::default();
-        assert_eq!(fresh.apply(&before, &after), Err(Refusal::Changed));
-        assert!(!fresh.apple.enabled());
+        assert_eq!(fresh.apply(&before, &after), Err(Changed));
+        assert!(!fresh.enabled());
 
         let mut other = before.clone();
-        other.apple.calendars.truncate(1);
-        assert_eq!(other.apply(&before, &after), Err(Refusal::Changed));
+        other.calendars.truncate(1);
+        assert_eq!(other.apply(&before, &after), Err(Changed));
+        assert_eq!(other.mail, before.mail);
 
-        let mut unrelated = before.clone();
-        unrelated.apple = Apple::default();
-        let mut changes_accounts_only = before.clone();
-        changes_accounts_only
-            .account_mut(Provider::Google, "carol@gmail.example")
-            .ok_or("carol")?
-            .mail = Some(Level::Read);
-        assert_eq!(unrelated.apply(&before, &changes_accounts_only), Ok(()));
-        assert!(!unrelated.apple.enabled());
-        assert_eq!(
-            unrelated.mail_level("google:carol@gmail.example"),
-            Some(Level::Read)
-        );
-        Ok(())
-    }
+        let mut limits = before.clone();
+        limits.sends_per_hour = 11;
+        assert_eq!(limits.apply(&before, &after), Ok(()));
+        assert_eq!(limits.sends_per_hour, 11);
+        assert_eq!(limits.mail.len(), 1);
 
-    #[test]
-    fn accounts_are_added_up_to_the_limit_and_removed_by_provider_and_address() -> TestResult {
-        let mut rights = Rights::empty();
-        for n in 0..MAX_ACCOUNTS {
-            let account = RemoteAccount::new(Provider::Google, &format!("u{n}@gmail.example"))
-                .ok_or("account")?;
-            assert_eq!(rights.add_account(account), Ok(()));
-        }
-        let one_more =
-            RemoteAccount::new(Provider::Microsoft, "x@outlook.example").ok_or("account")?;
-        assert_eq!(rights.add_account(one_more), Err(Refusal::Full));
-        assert_eq!(rights.accounts.len(), MAX_ACCOUNTS);
-        assert!(!rights.remove_account(Provider::Microsoft, "u0@gmail.example"));
-        assert!(!rights.remove_account(Provider::Google, "nobody@gmail.example"));
-        assert!(rights.remove_account(Provider::Google, "u0@gmail.example"));
-        assert!(!rights.remove_account(Provider::Google, "u0@gmail.example"));
-        assert_eq!(rights.accounts.len(), MAX_ACCOUNTS - 1);
-        Ok(())
-    }
-
-    #[test]
-    fn lowering_never_raises_and_follows_the_two_write_capabilities() -> TestResult {
-        let full = parsed(FULL)?;
-        let alice = full
-            .account(Provider::Google, "alice@gmail.example")
-            .ok_or("alice")?;
-        let mut same = alice.clone();
-        same.lower(true, true);
-        assert_eq!(&same, alice);
-        let mut mail = alice.clone();
-        mail.lower(false, true);
-        assert_eq!(mail.mail, Some(Level::Read));
-        assert_eq!(mail.calendars, alice.calendars);
-        let mut calendar = alice.clone();
-        calendar.lower(true, false);
-        assert_eq!(calendar.mail, Some(Level::Write));
-        assert!(calendar
-            .calendars
-            .iter()
-            .all(|grant| grant.level == Level::Read));
-        let carol = full
-            .account(Provider::Google, "carol@gmail.example")
-            .ok_or("carol")?;
-        let mut none = carol.clone();
-        none.lower(false, false);
-        assert_eq!(&none, carol);
-        let bob = full
-            .account(Provider::Microsoft, "bob@outlook.example")
-            .ok_or("bob")?;
-        let mut read = bob.clone();
-        read.lower(false, false);
-        assert_eq!(&read, bob);
+        let mut untouched = before.clone();
+        untouched.revoke();
+        let revoked = untouched.clone();
+        assert_eq!(untouched.apply(&before, &before), Ok(()));
+        assert_eq!(untouched, revoked);
         Ok(())
     }
 
     fn names_of(rights: &Rights) -> Vec<String> {
-        let mail = rights.apple.mail.iter().map(|(account, _)| &account.name);
-        let calendars = rights.apple.calendars.iter().map(|(entry, _)| &entry.name);
-        let remote = rights
-            .accounts
-            .iter()
-            .flat_map(|account| account.calendars.iter().map(|grant| &grant.name));
-        mail.chain(calendars).chain(remote).cloned().collect()
+        let mail = rights.mail.iter().map(|(account, _)| &account.name);
+        let calendars = rights.calendars.iter().map(|(entry, _)| &entry.name);
+        mail.chain(calendars).cloned().collect()
     }
 
     #[test]
     fn a_name_less_entry_takes_its_id_as_a_one_line_name() -> TestResult {
         let rights = parsed(
-            r#"{"version": 3, "apple": {
+            r#"{"version": 4,
                 "mail": [{"id": " ACC-1 ", "level": "read"}],
-                "calendars": [{"id": "CAL\u200b 1", "level": "read"}]}}"#,
+                "calendars": [{"id": "CAL\u200b 1", "level": "read"}]}"#,
         )?;
-        assert_eq!(rights.apple.mail[0].0.id, " ACC-1 ");
-        assert_eq!(rights.apple.mail[0].0.name, "ACC-1");
-        assert_eq!(rights.apple.calendars[0].0.id, "CAL\u{200b} 1");
-        assert_eq!(rights.apple.calendars[0].0.name, "CAL 1");
+        assert_eq!(rights.mail[0].0.id, " ACC-1 ");
+        assert_eq!(rights.mail[0].0.name, "ACC-1");
+        assert_eq!(rights.calendars[0].0.id, "CAL\u{200b} 1");
+        assert_eq!(rights.calendars[0].0.name, "CAL 1");
         let long = "L".repeat(300);
         let clipped = one_line_str(&long, MAX_NAME);
         assert!(clipped.len() < long.len());
         assert_eq!(one_line_str(&clipped, MAX_NAME), clipped);
         let rights = parsed(&format!(
-            r#"{{"version": 3, "apple": {{"mail": [{{"id": "{long}", "level": "read"}}]}}}}"#
+            r#"{{"version": 4, "mail": [{{"id": "{long}", "level": "read"}}]}}"#
         ))?;
-        assert_eq!(rights.apple.mail[0].0.id, long);
-        assert_eq!(rights.apple.mail[0].0.name, clipped);
-        Ok(())
-    }
-
-    #[test]
-    fn a_name_less_remote_calendar_with_a_long_id_takes_a_clipped_name() -> TestResult {
-        let long = "c".repeat(300);
-        let rights = parsed(&format!(
-            r#"{{"version": 3, "accounts": [{{"provider": "google", "address": "alice@gmail.example",
-                "calendars": [{{"id": "{long}", "level": "read"}}]}}]}}"#
-        ))?;
-        let grant = &rights.accounts[0].calendars[0];
-        assert_eq!(grant.id, long);
-        assert_eq!(grant.name, one_line_str(&long, MAX_NAME));
-        assert_ne!(grant.name, grant.id);
-        assert_eq!(Rights::parse(&rights.to_config())?, rights);
+        assert_eq!(rights.mail[0].0.id, long);
+        assert_eq!(rights.mail[0].0.name, clipped);
         Ok(())
     }
 
@@ -1500,7 +701,7 @@ mod tests {
         for id in ids {
             for section in ["mail", "calendars"] {
                 let text = format!(
-                    r#"{{"version": 3, "apple": {{"{section}": [{{"id": "{id}", "level": "read"}}]}}}}"#
+                    r#"{{"version": 4, "{section}": [{{"id": "{id}", "level": "read"}}]}}"#
                 );
                 let rights = parsed(&text)?;
                 let again = Rights::parse(&rights.to_config())
@@ -1517,10 +718,8 @@ mod tests {
     #[test]
     fn an_id_that_is_nothing_but_hidden_text_keeps_an_empty_name_that_reads_back_equal(
     ) -> TestResult {
-        let rights = parsed(
-            r#"{"version": 3, "apple": {"calendars": [{"id": "\u200b", "level": "read"}]}}"#,
-        )?;
-        assert_eq!(rights.apple.calendars[0].0.name, "");
+        let rights = parsed(r#"{"version": 4, "calendars": [{"id": "\u200b", "level": "read"}]}"#)?;
+        assert_eq!(rights.calendars[0].0.name, "");
         assert_eq!(Rights::parse(&rights.to_config())?, rights);
         Ok(())
     }

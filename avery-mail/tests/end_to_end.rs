@@ -21,7 +21,7 @@ fn account(id: &str, name: &str, level: &str) -> String {
 
 fn mail_config(level: &str) -> String {
     format!(
-        r#"{{"version": 3, "apple": {{"mail": [{}]}}}}"#,
+        r#"{{"version": 4, "mail": [{}]}}"#,
         account("ACC-1", "Privat Gmail", level)
     )
 }
@@ -182,26 +182,24 @@ fn an_uncertain_outcome_asks_the_user_to_check_mail_and_stays_pending() -> TestR
 
 #[test]
 fn real_mode_reads_the_configuration_file_and_never_guesses() -> TestResult {
-    let calendars =
-        r#"{"version": 3, "apple": {"calendars": [{"id": "C", "name": "K", "level": "write"}]}}"#;
+    let calendars = r#"{"version": 4, "calendars": [{"id": "C", "name": "K", "level": "write"}]}"#;
     for (config, tools) in [
         (mail_config("read"), 5),
         (mail_config("write"), 7),
         (calendars.to_string(), 6),
-        (r#"{"version": 3}"#.to_string(), 0),
+        (r#"{"version": 4}"#.to_string(), 0),
         (r#"{"version": 2, "allowed_accounts": []}"#.to_string(), 8),
         (
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "root"}]}}"#.to_string(),
+            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read"}]}}"#.to_string(),
             8,
         ),
         (
-            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "read"}]}}"#.to_string(),
+            r#"{"version": 4, "mail": [{"id": "A", "level": "root"}]}"#.to_string(),
             8,
         ),
         (
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write"}]}"#
-                .to_string(),
-            7,
+            r#"{"version": 4, "mail": {"accounts": [{"id": "A", "level": "read"}]}}"#.to_string(),
+            8,
         ),
         ("not json".to_string(), 8),
     ] {
@@ -291,30 +289,31 @@ fn demo_mode_selftest_and_accounts_work_without_mail() -> TestResult {
 }
 
 #[test]
-fn setup_reads_its_answers_from_standard_input() -> TestResult {
+fn status_and_revoke_work_on_the_configuration_file() -> TestResult {
     let sandbox = Sandbox::new()?;
     sandbox.write(
         "config.json",
-        r#"{"version": 3, "apple": {
-            "mail": [{"id": "ACC-1", "name": "Privat Gmail", "level": "read"},
+        r#"{"version": 4,
+            "mail": [{"id": "ACC-1", "name": "Privat Gmail", "level": "write"},
                      {"id": "ACC-2", "name": "Privat Outlook", "level": "read"}],
-            "calendars": [{"id": "CAL-1", "name": "Privat", "level": "read"}]}}"#,
+            "calendars": [{"id": "CAL-1", "name": "Privat", "level": "write"}]}"#,
     )?;
-    let output = run_cli(&sandbox, &[], &["setup"], "2\n0\n2\nj\n")?;
-    assert_eq!(output.code, Some(0), "{}", output.stdout);
-    let saved = sandbox.read("config.json");
-    assert!(
-        saved.contains("\"level\": \"write\"") && saved.contains("CAL-1"),
-        "{saved}"
-    );
-    assert!(!saved.contains("ACC-2"), "{saved}");
     let status = run_cli(&sandbox, &[], &["status"], "")?;
-    assert!(status.stdout.contains("Mail: Privat Gmail (schreiben)"));
+    assert_eq!(status.code, Some(0), "{}", status.stdout);
+    assert!(status
+        .stdout
+        .contains("Mail: Privat Gmail (schreiben), Privat Outlook (lesen)"));
     assert!(status.stdout.contains("Kalender: Privat (schreiben)"));
     let revoked = run_cli(&sandbox, &[], &["revoke"], "")?;
-    assert_eq!(revoked.code, Some(0));
-    assert!(!sandbox.read("config.json").contains("level"));
+    assert_eq!(revoked.code, Some(0), "{}", revoked.stdout);
+    let saved = sandbox.read("config.json");
+    assert!(
+        !saved.contains("level") && saved.contains("\"version\": 4"),
+        "{saved}"
+    );
     assert!(sandbox.path("config.lock").exists());
+    let status = run_cli(&sandbox, &[], &["status"], "")?;
+    assert!(status.stdout.contains("Mail: keine"), "{}", status.stdout);
     Ok(())
 }
 
@@ -323,11 +322,7 @@ fn demo_mode_refuses_the_commands_that_change_the_configuration() -> TestResult 
     let sandbox = Sandbox::new()?;
     let env = [("MAIL_MCP_FAKE", "1")];
     for (args, input) in [
-        (vec!["link", "google"], "id\nsecret\n1\n"),
-        (vec!["unlink", "alice@gmail.example"], "j\n"),
-        (vec!["unlink", "google:alice@gmail.example"], "j\n"),
-        (vec!["setup"], "1\nj\n"),
-        (vec!["setup", "apple"], "2\n1\n\n1\n\n\n\nj\n"),
+        (vec!["setup"], "2\n1\n\n1\n\n\n\nj\n"),
         (vec!["revoke"], ""),
     ] {
         let output = run_cli(&sandbox, &env, &args, input)?;
@@ -365,12 +360,7 @@ fn onboarding_refuses_in_demo_mode_before_any_dialog_and_with_an_unknown_option(
         "{}",
         typo.stdout
     );
-    for name in [
-        "config.json",
-        "config.lock",
-        "vault.lock",
-        "onboard.dismissed",
-    ] {
+    for name in ["config.json", "config.lock", "onboard.dismissed"] {
         assert!(!sandbox.path(name).exists(), "{name}");
     }
     Ok(())
@@ -380,8 +370,8 @@ fn onboarding_refuses_in_demo_mode_before_any_dialog_and_with_an_unknown_option(
 fn the_flag_stays_silent_when_something_is_set_up_dismissed_switched_off_or_in_demo_mode(
 ) -> TestResult {
     let configured = [
-        r#"{"version": 3, "accounts": [{"provider": "microsoft", "address": "bob@outlook.example"}]}"#,
-        r#"{"version": 3, "apple": {"calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}}"#,
+        r#"{"version": 4, "mail": [{"id": "A1", "name": "iCloud", "level": "read"}]}"#,
+        r#"{"version": 4, "calendars": [{"id": "C1", "name": "Privat", "level": "read"}]}"#,
     ];
     for config in configured {
         let sandbox = Sandbox::new()?;
@@ -404,23 +394,13 @@ fn the_flag_stays_silent_when_something_is_set_up_dismissed_switched_off_or_in_d
             "{env:?}"
         );
     }
-    for name in [
-        "config.json",
-        "config.lock",
-        "vault.lock",
-        "onboard.dismissed",
-    ] {
+    for name in ["config.json", "config.lock", "onboard.dismissed"] {
         assert!(!sandbox.path(name).exists(), "{name}");
     }
     Ok(())
 }
 
-const NO_FILES: [&str; 4] = [
-    "config.json",
-    "config.lock",
-    "vault.lock",
-    "onboard.dismissed",
-];
+const NO_FILES: [&str; 3] = ["config.json", "config.lock", "onboard.dismissed"];
 
 #[test]
 fn the_dialogs_go_through_the_program_the_environment_names_and_a_failing_one_ends_the_run(
@@ -524,7 +504,8 @@ fn a_config_that_cannot_be_read_is_reported_by_the_flag_and_never_gets_a_dialog(
     for original in [
         r#"{"version": 2, "allowed_accounts": []}"#,
         "not json",
-        r#"{"version": 3, "accounts": 5}"#,
+        r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read"}]}}"#,
+        r#"{"version": 4, "mail": 5}"#,
     ] {
         let sandbox = Sandbox::new()?;
         sandbox.write("config.json", original)?;
@@ -567,17 +548,16 @@ fn the_server_offers_no_onboarding_and_refuses_to_run_one() -> TestResult {
     let mut server = Server::start(&sandbox, &[("MAIL_MCP_FAKE", "1")])?;
     let names = server.tool_names()?;
     for name in &names {
-        for word in ["onboard", "link", "setup", "dialog", "dismiss", "ask"] {
+        for word in ["onboard", "setup", "dialog", "dismiss", "ask"] {
             assert!(!name.contains(word), "{name}");
         }
     }
     for name in [
         "onboard",
-        "link",
         "setup",
         "onboard_if_needed",
         "ask_text",
-        "open_url",
+        "notify",
     ] {
         let (error, text) = server.call(name, "{}")?;
         assert!(
@@ -597,17 +577,13 @@ fn an_unsupported_configuration_is_never_overwritten() -> TestResult {
     let sandbox = Sandbox::new()?;
     let originals = [
         r#"{"version": 2, "allowed_accounts": [], "write": {"accounts": []}}"#,
+        r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "read"}]}}"#,
         r#"{"version": 4, "areas": {"calendar": "write"}}"#,
         "not json",
     ];
     for original in originals {
         sandbox.write("config.json", original)?;
-        for (args, input) in [
-            (vec!["setup"], "1\nj\n"),
-            (vec!["setup", "apple"], "1\nj\n"),
-            (vec!["revoke"], ""),
-            (vec!["unlink", "alice@gmail.example"], "j\n"),
-        ] {
+        for (args, input) in [(vec!["setup"], "1\nj\n"), (vec!["revoke"], "")] {
             let output = run_cli(&sandbox, &[], &args, input)?;
             assert_eq!(output.code, Some(1), "{args:?}: {}", output.stdout);
             assert_eq!(sandbox.read("config.json"), original);

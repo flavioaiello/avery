@@ -1,24 +1,19 @@
-use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 
-use super::{
-    cmd_selftest, editable, failed, finish, granted, known_calendars, link_account,
-    list_account_calendars, setup_apple, setup_calendars, LinkDone,
-};
+use super::{cmd_selftest, editable, failed, setup};
 use crate::config::{dirname, make_dirs, Settings};
-use crate::console::{Buttons, Console, Dialogs, Icon, List, Screen, Stop, Talk, RESTART_GOOSE};
+use crate::console::{Buttons, Console, Dialogs, Icon, Screen, Stop, Talk, RESTART_GOOSE};
 use crate::context::Context;
 use crate::osascript::Host;
-use crate::provider::Provider;
 use crate::rights::Rights;
 use crate::text::one_line_str;
 
 const WELCOME_TITLE: &str = "Willkommen bei Avery";
 const DONE_TITLE: &str = "Avery ist eingerichtet";
-const WELCOME_TEXT: &str = "Avery braucht Zugriff auf dein privates Mail- und Kalenderkonto. Die Einrichtung dauert ein paar Minuten und gilt dauerhaft. Deine Anmeldung bleibt im Schlüsselbund dieses Macs. Jeden Schritt kannst du abbrechen: dann wird nichts gespeichert.";
-const ACCOUNTS_TEXT: &str = "Welche Konten soll Avery nutzen? Apple Mail und Kalender geht ohne Registrierung und ist der schnellste Start. Gmail und Outlook.com direkt brauchen eine eigene App-Registrierung (siehe README).";
+const SETUP_TITLE: &str = "Apple Mail und Kalender";
+const WELCOME_TEXT: &str = "Avery braucht Zugriff auf dein privates Mail- und Kalenderkonto in Apple Mail und Kalender. Die Einrichtung dauert ein paar Minuten und gilt dauerhaft. Eine Anmeldung ist nicht nötig. Jeden Schritt kannst du abbrechen: dann wird nichts gespeichert.";
 const SELFTEST_TEXT: &str =
     "Soll Avery jetzt den Lesezugriff prüfen? Dabei wird nichts gesendet oder geändert.";
 const SELFTEST_NOTICE: &str = "Der Lesetest läuft ...";
@@ -85,7 +80,7 @@ fn needed(ctx: &Context, screen: &Screen) -> Need {
     }
     match ctx.settings.stored_rights() {
         Err(error) => return Need::Unreadable(error),
-        Ok(rights) if !rights.accounts.is_empty() || rights.apple.enabled() => return Need::No,
+        Ok(rights) if rights.enabled() => return Need::No,
         Ok(_) => {}
     }
     if (screen.gui)() {
@@ -100,11 +95,9 @@ enum Ending {
     Finished,
     Later,
     Dismissed,
-    NothingChosen,
     Empty,
     Cancelled,
     TimedOut,
-    Away,
     Failed(String),
 }
 
@@ -112,17 +105,13 @@ fn ending_of(stop: Stop) -> Ending {
     match stop {
         Stop::Cancelled => Ending::Cancelled,
         Stop::TimedOut => Ending::TimedOut,
-        Stop::Away => Ending::Away,
         Stop::Failed(message) => Ending::Failed(message),
     }
 }
 
 enum Step {
     Welcome,
-    Accounts,
-    Link(Provider),
-    Calendars(Provider, String),
-    Apple,
+    Setup,
     Summary,
 }
 
@@ -131,51 +120,18 @@ enum Next {
     End(Ending),
 }
 
-#[derive(Default)]
-struct Plan {
-    remote: VecDeque<Provider>,
-    apple: bool,
-}
-
 struct Flow<'a> {
     ctx: &'a Context,
     host: &'a dyn Host,
     talk: Talk,
-    plan: Plan,
 }
 
 fn overview(rights: &Rights) -> String {
-    let mut lines: Vec<String> = rights
-        .accounts
-        .iter()
-        .map(|account| {
-            let calendars: Vec<(String, crate::rights::Level)> = account
-                .calendars
-                .iter()
-                .map(|grant| (grant.name.clone(), grant.level))
-                .collect();
-            format!(
-                "{}: {}\n    Mail: {}\n    Kalender: {}",
-                account.provider().display(),
-                account.address(),
-                super::level_word(account.mail),
-                granted(&calendars)
-            )
-        })
-        .collect();
-    if rights.apple.enabled() {
-        lines.push(format!(
-            "{}: {} Konten, {} Kalender",
-            Provider::Apple.display(),
-            rights.apple.mail.len(),
-            rights.apple.calendars.len()
-        ));
-    }
-    lines.join("\n")
-}
-
-fn holds_something(rights: &Rights) -> bool {
-    !rights.accounts.is_empty() || rights.apple.enabled()
+    format!(
+        "{SETUP_TITLE}: {} Konten, {} Kalender",
+        rights.mail.len(),
+        rights.calendars.len()
+    )
 }
 
 impl<'a> Flow<'a> {
@@ -184,7 +140,6 @@ impl<'a> Flow<'a> {
             ctx,
             host,
             talk: Talk::new(),
-            plan: Plan::default(),
         }
     }
 
@@ -192,35 +147,18 @@ impl<'a> Flow<'a> {
         Dialogs::new(self.host, &mut self.talk)
     }
 
-    fn note(&mut self, text: &str) {
-        self.dialogs().say(text);
-    }
-
     fn run(&mut self) -> Ending {
         let mut step = Step::Welcome;
         loop {
             let next = match step {
                 Step::Welcome => self.welcome(),
-                Step::Accounts => self.accounts(),
-                Step::Link(provider) => self.link(provider),
-                Step::Calendars(provider, address) => self.calendars(provider, &address),
-                Step::Apple => self.apple(),
+                Step::Setup => self.setup(),
                 Step::Summary => self.summary(),
             };
             match next {
                 Next::Go(following) => step = following,
                 Next::End(ending) => return ending,
             }
-        }
-    }
-
-    fn after_providers(&mut self) -> Step {
-        if let Some(provider) = self.plan.remote.pop_front() {
-            Step::Link(provider)
-        } else if std::mem::take(&mut self.plan.apple) {
-            Step::Apple
-        } else {
-            Step::Summary
         }
     }
 
@@ -234,7 +172,7 @@ impl<'a> Flow<'a> {
             icon: Icon::Note,
         });
         match answer {
-            Ok(2) => Next::Go(Step::Accounts),
+            Ok(2) => Next::Go(Step::Setup),
             Ok(1) => match dismiss(&self.ctx.settings) {
                 Ok(()) => Next::End(Ending::Dismissed),
                 Err(error) => Next::End(Ending::Failed(format!(
@@ -247,48 +185,12 @@ impl<'a> Flow<'a> {
         }
     }
 
-    fn accounts(&mut self) -> Next {
-        let remote: Vec<Provider> = Provider::remote().collect();
-        let mut labels: Vec<String> = remote
-            .iter()
-            .map(|provider| format!("{} (eigene App nötig)", provider.display()))
-            .collect();
-        labels.push(format!(
-            "{} (ohne Registrierung)",
-            Provider::Apple.display()
-        ));
-        let defaults: Vec<usize> = vec![remote.len()];
-        let chosen = self.dialogs().choose_list(&List {
-            text: ACCOUNTS_TEXT,
-            items: &labels,
-            defaults: &defaults,
-            multiple: true,
-            ok: NEXT,
-        });
-        let selected = match chosen {
-            Ok(selected) => selected,
-            Err(stop) => return Next::End(ending_of(stop)),
-        };
-        self.plan.remote = remote
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| selected.contains(index))
-            .map(|(_, provider)| *provider)
-            .collect();
-        self.plan.apple = selected.contains(&remote.len());
-        if self.plan.remote.is_empty() && !self.plan.apple {
-            return Next::End(Ending::NothingChosen);
-        }
-        Next::Go(self.after_providers())
-    }
-
     fn failure(&mut self, title: &str) -> Next {
         let stop = self.talk.take_stop();
         let notes = self.talk.take_notes();
         let message = match stop {
             Some(Stop::Cancelled) => return Next::End(Ending::Cancelled),
             Some(Stop::TimedOut) => return Next::End(Ending::TimedOut),
-            Some(Stop::Away) => return Next::End(Ending::Away),
             Some(Stop::Failed(message)) if notes.is_empty() => message,
             Some(Stop::Failed(message)) => format!("{notes}\n{message}"),
             None if notes.is_empty() => "Unbekannter Fehler.".to_string(),
@@ -303,123 +205,21 @@ impl<'a> Flow<'a> {
             icon: Icon::Caution,
         });
         match answer {
-            Ok(1) => Next::Go(self.after_providers()),
+            Ok(1) => Next::Go(Step::Summary),
             Ok(_) | Err(Stop::Cancelled) => Next::End(Ending::Cancelled),
             Err(Stop::TimedOut) => Next::End(Ending::TimedOut),
             Err(_) => Next::End(Ending::Failed(message)),
         }
     }
 
-    fn link(&mut self, provider: Provider) -> Next {
-        let title = format!("{} verbinden", provider.display());
-        self.talk.set_title(&title);
-        let outcome = {
-            let mut console = Console::Dialogs(Dialogs::new(self.host, &mut self.talk));
-            link_account(self.ctx, &mut console, provider)
-        };
-        match outcome {
-            Ok(done) => self.linked(provider, done),
-            Err(_) => self.failure(&format!("{title}: fehlgeschlagen")),
-        }
-    }
-
-    fn linked(&mut self, provider: Provider, done: LinkDone) -> Next {
-        self.talk.take_notes();
-        let relinked = if done.relinked {
-            "\nDas Konto war schon verbunden: die Freigaben bleiben, höchstens abgesenkt auf das, was die neue Anmeldung erlaubt."
-        } else {
-            ""
-        };
-        let text = format!(
-            "{} ist verbunden: {}\nMail: {}.{relinked}",
-            provider.display(),
-            done.address,
-            super::level_word(done.level)
-        );
-        let answer = self.dialogs().ask_buttons(&Buttons {
-            text: &text,
-            buttons: &[NEXT],
-            default: 0,
-            cancel: None,
-            icon: Icon::Note,
-        });
-        match answer {
-            Ok(_) => Next::Go(Step::Calendars(provider, done.address)),
-            Err(stop) => Next::End(ending_of(stop)),
-        }
-    }
-
-    fn calendars(&mut self, provider: Provider, address: &str) -> Next {
-        let title = format!("{}: Kalender", provider.display());
-        self.talk.set_title(&title);
-        let mut rights = match self.ctx.settings.stored_rights() {
-            Ok(rights) => rights,
-            Err(error) => {
-                self.note(&format!("Fehler: {error}"));
-                return self.failure(&title);
-            }
-        };
-        let before = rights.clone();
-        let Some(account) = rights.account_mut(provider, address) else {
-            self.note("Das Konto steht nicht mehr in der Konfiguration.");
-            return self.failure(&title);
-        };
-        let listing = list_account_calendars(self.ctx, account);
+    fn setup(&mut self) -> Next {
+        self.talk.set_title(SETUP_TITLE);
         let code = {
             let mut console = Console::Dialogs(Dialogs::new(self.host, &mut self.talk));
-            match known_calendars(&mut console, account, listing) {
-                None => None,
-                Some(listed) if listed.is_empty() => {
-                    console.say("Dieses Konto hat keine Kalender.");
-                    None
-                }
-                Some(listed) => match setup_calendars(&mut console, account, listed) {
-                    Ok(()) => Some(finish(
-                        self.ctx,
-                        &mut console,
-                        &before,
-                        &rights,
-                        "avery mail setup",
-                    )),
-                    Err(code) => Some(code),
-                },
-            }
-        };
-        match code {
-            Some(0) => {
-                self.talk.take_notes();
-                Next::Go(self.after_providers())
-            }
-            Some(_) => self.failure(&title),
-            None => self.notice(&title),
-        }
-    }
-
-    fn notice(&mut self, title: &str) -> Next {
-        let notes = self.talk.take_notes();
-        self.talk.set_title(title);
-        let answer = self.dialogs().ask_buttons(&Buttons {
-            text: &notes,
-            buttons: &[NEXT],
-            default: 0,
-            cancel: None,
-            icon: Icon::Note,
-        });
-        match answer {
-            Ok(_) => Next::Go(self.after_providers()),
-            Err(stop) => Next::End(ending_of(stop)),
-        }
-    }
-
-    fn apple(&mut self) -> Next {
-        let title = Provider::Apple.display();
-        self.talk.set_title(title);
-        let code = {
-            let mut console = Console::Dialogs(Dialogs::new(self.host, &mut self.talk));
-            setup_apple(self.ctx, &mut console)
+            setup(self.ctx, &mut console)
         };
         if code != 0 {
-            return self.failure(title);
+            return self.failure(SETUP_TITLE);
         }
         self.talk.take_notes();
         Next::Go(Step::Summary)
@@ -431,7 +231,7 @@ impl<'a> Flow<'a> {
             Ok(rights) => rights,
             Err(error) => return Next::End(Ending::Failed(error.message())),
         };
-        if !holds_something(&rights) {
+        if !rights.enabled() {
             return Next::End(Ending::Empty);
         }
         let text = format!(
@@ -484,7 +284,7 @@ impl<'a> Flow<'a> {
             .settings
             .stored_rights()
             .ok()
-            .filter(holds_something);
+            .filter(Rights::enabled);
         match kept {
             None => self.dialogs().notify(CANCELLED_NOTICE),
             Some(rights) => {
@@ -529,14 +329,9 @@ impl<'a> Flow<'a> {
                 ));
                 0
             }
-            Ending::NothingChosen => {
-                self.dialogs().notify(NOTHING_NOTICE);
-                console.say("Nichts ausgewaehlt, nichts geaendert.");
-                0
-            }
             Ending::Empty => {
                 self.dialogs().notify(NOTHING_NOTICE);
-                console.say("Es ist noch kein Konto verbunden.");
+                console.say("Es ist noch kein Konto freigegeben.");
                 0
             }
             Ending::Cancelled => {
@@ -547,10 +342,6 @@ impl<'a> Flow<'a> {
             Ending::TimedOut => {
                 self.kept("Keine Antwort im Dialog, die Einrichtung wurde beendet.");
                 console.say("Keine Antwort im Dialog, abgebrochen.");
-                0
-            }
-            Ending::Away => {
-                console.say("Die Anleitung wurde geoeffnet. Danach Avery erneut starten.");
                 0
             }
             Ending::Failed(message) => {

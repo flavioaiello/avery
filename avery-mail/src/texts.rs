@@ -24,13 +24,13 @@ pub(crate) const UNTRUSTED: &str = concat!(
 );
 
 pub(crate) const NO_ACCOUNTS: &str = concat!(
-    "No mail account is enabled yet. Ask the user to connect Gmail or Outlook.com with ",
-    "`avery mail link` and to enable the private account with `avery mail setup` in a terminal."
+    "No mail account is enabled yet. Ask the user to enable the private account ",
+    "with `avery mail setup` in a terminal."
 );
 
 pub(crate) const NO_CALENDARS: &str = concat!(
-    "No calendar is enabled yet. Ask the user to connect Gmail or Outlook.com with ",
-    "`avery mail link` and to enable the private calendars with `avery mail setup` in a terminal."
+    "No calendar is enabled yet. Ask the user to enable the private calendars ",
+    "with `avery mail setup` in a terminal."
 );
 
 pub(crate) const WRITE_OFF: &str = concat!(
@@ -74,17 +74,15 @@ pub(crate) const CHANGES_TOO_LARGE: &str = concat!(
 );
 
 const INTRO: &str =
-    "Access to the user's private mail accounts (Gmail, Outlook.com, optionally Apple Mail) and calendars, as far as the user enabled them.";
+    "Access to the user's private mail accounts and calendars in Apple Mail and Calendar, as far as the user enabled them.";
 const MAIL_WORKFLOW: &str =
     " Mail: list_messages or search_messages first, then read_message for the text.";
 const CALENDAR_WORKFLOW: &str = concat!(
     " Calendar: list_events for a time range (recurring events are expanded, times are local), ",
     "then get_event for notes and attendees."
 );
-const NOTHING_ENABLED: &str = concat!(
-    " Nothing is enabled yet: ask the user to connect an account with `avery mail link` ",
-    "and to enable it with `avery mail setup` in a terminal."
-);
+const NOTHING_ENABLED: &str =
+    " Nothing is enabled yet: ask the user to enable accounts and calendars with `avery mail setup` in a terminal.";
 
 pub(crate) fn read_instructions(mail: bool, calendar: bool) -> String {
     let mut text = INTRO.to_string();
@@ -102,13 +100,11 @@ pub(crate) fn read_instructions(mail: bool, calendar: bool) -> String {
     text
 }
 
-pub(crate) const COMMANDS: [&str; 13] = [
+pub(crate) const COMMANDS: [&str; 11] = [
     "accounts",
     "calendars",
     "onboard",
     "setup",
-    "link",
-    "unlink",
     "revoke",
     "selftest",
     "sendlog",
@@ -119,13 +115,12 @@ pub(crate) const COMMANDS: [&str; 13] = [
 ];
 
 pub(crate) const HELP: &str = concat!(
-    "MCP server (stdio) for private mail and calendars (Gmail and Google Calendar, Outlook.com, optionally Apple Mail and Calendar): reading, drafts, sending and calendar changes with approval.\n",
+    "MCP server (stdio) for private mail and calendars in Apple Mail and Calendar: reading, drafts, sending and calendar changes with approval.\n",
     "\n",
-    "- Rust, standard library only; Gmail and Outlook.com are reached through their APIs (via curl, sign-in token in the\n",
-    "  Keychain), personal accounts only. The optional Apple Mail and Calendar bridge uses osascript (JXA) and is off\n",
-    "  until you run `setup apple`; nothing starts Mail or Calendar before that.\n",
+    "- Rust, standard library only. Apple Mail and Calendar are driven through osascript (JXA); Avery signs in to\n",
+    "  nothing and stores no password or token. Nothing starts Mail or Calendar until a command or tool needs it.\n",
     "- Rights per account (mail) and per calendar: off, read or write. They are set with\n",
-    "  `link` and `setup`, done by the human in a terminal; the model cannot change them.\n",
+    "  `setup`, done by the human in a terminal or in the setup dialogs; the model cannot change them.\n",
     "- No code path deletes, moves, flags or marks mail.\n",
     "- Every send and every calendar change needs a click in a native macOS dialog that the model\n",
     "  cannot operate; the dialog shows exactly what is about to happen.\n",
@@ -137,24 +132,20 @@ pub(crate) const HELP: &str = concat!(
     "\n",
     "Usage\n",
     "  avery mail [serve]         MCP server on stdin/stdout (what goose starts)\n",
-    "  avery mail onboard [--if-needed]   guided first setup in macOS dialogs (Gmail, Outlook.com, optionally Apple);\n",
+    "  avery mail onboard [--if-needed]   guided first setup in macOS dialogs;\n",
     "                             --if-needed asks only while nothing is set up and not dismissed (what Avery.app runs)\n",
-    "  avery mail link google|microsoft   connect Gmail or Outlook.com (OAuth in the browser)\n",
-    "  avery mail unlink <address>        disconnect such an account and delete its sign-in; google:<address> or\n",
-    "                             microsoft:<address> also deletes a sign-in that has no config entry\n",
-    "  avery mail setup           choose the level per account and calendar\n",
-    "  avery mail setup apple     include Apple Mail and Calendar (optional; lists them live)\n",
-    "  avery mail accounts        list the accounts with their level\n",
-    "  avery mail calendars       list the calendars with their level\n",
-    "  avery mail revoke          remove all rights (mail and calendar, Apple off again)\n",
+    "  avery mail setup           choose the level per account and calendar (lists them live from Mail and Calendar)\n",
+    "  avery mail accounts        list the enabled accounts with their level\n",
+    "  avery mail calendars       list the enabled calendars with their level\n",
+    "  avery mail revoke          remove all rights (mail and calendar)\n",
     "  avery mail sendlog         show the latest send attempts\n",
     "  avery mail changes         show the latest calendar changes\n",
     "  avery mail undo [id]       undo a calendar change (asks for the approval dialog again)\n",
-    "  avery mail status          show configuration and rights (no network, no Mail or Calendar access)\n",
+    "  avery mail status          show configuration and rights (no Mail or Calendar access)\n",
     "  avery mail selftest        check read access without printing any content\n",
     "  avery mail selftest-write  check the approval dialog, drafts and sending\n",
-    "Set MAIL_MCP_FAKE=1 to run against synthetic demo data (no account, no Mail or Calendar access);\n",
-    "link, unlink, setup, onboard and revoke refuse in demo mode.\n"
+    "Set MAIL_MCP_FAKE=1 to run against synthetic demo data (no Mail or Calendar access);\n",
+    "setup, onboard and revoke refuse in demo mode.\n"
 );
 
 pub(crate) fn calendar_write_instructions() -> String {

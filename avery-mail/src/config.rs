@@ -10,15 +10,14 @@ use crate::error::{ToolError, ToolResult};
 use crate::fake;
 use crate::json::{self, Json, Object};
 use crate::lock::{self, FileLock, LockError};
-use crate::rights::{Apple, Level, Refusal, Rights, CONFIG_VERSION};
+use crate::rights::{Changed, Level, Rights, CONFIG_VERSION};
 use crate::text::{clean, text_of};
 use crate::texts::{
     CALENDAR_WRITE_OFF, DEFAULT_CHANGES_PER_HOUR, DEFAULT_SENDS_PER_HOUR, NO_ACCOUNTS,
     NO_CALENDARS, WRITE_OFF,
 };
 
-const LINK_AGAIN: &str = "connect the accounts again with `avery mail link google` or `avery mail link microsoft` (Apple Mail and Calendar: `avery mail setup apple`)";
-const UNLINK_FIRST: &str = "Before the file goes, `avery mail unlink google:<address>` or `microsoft:<address>` removes the stored sign-in of each linked account.";
+const SETUP_AGAIN: &str = "run `avery mail setup`";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -34,7 +33,7 @@ pub(crate) enum UpdateError {
     Busy,
     Lock(io::ErrorKind),
     Unreadable(ToolError),
-    Refused(Refusal),
+    Changed,
     Invalid(String),
     Write(io::ErrorKind),
 }
@@ -88,10 +87,6 @@ impl Settings {
         join_path(&dirname(&self.config_path), "config.lock")
     }
 
-    pub(crate) fn vault_lock_path(&self) -> String {
-        join_path(&dirname(&self.config_path), "vault.lock")
-    }
-
     pub(crate) fn onboard_marker_path(&self) -> String {
         join_path(&dirname(&self.config_path), "onboard.dismissed")
     }
@@ -103,7 +98,7 @@ impl Settings {
     pub(crate) fn load_config(&self) -> ToolResult<Object> {
         let unreadable = || {
             ToolError::msg(format!(
-                "config.json is unreadable. Ask the user to move the file away and {LINK_AGAIN}. {UNLINK_FIRST}"
+                "config.json is unreadable. Ask the user to move the file away and {SETUP_AGAIN}."
             ))
         };
         let bytes = match read_bounded(&self.config_path) {
@@ -119,12 +114,12 @@ impl Settings {
         let data = json::parse(&text).map_err(|_| unreadable())?;
         let Json::Obj(object) = data else {
             return Err(ToolError::msg(format!(
-                "config.json has an unexpected format. Ask the user to move the file away and {LINK_AGAIN}. {UNLINK_FIRST}"
+                "config.json has an unexpected format. Ask the user to move the file away and {SETUP_AGAIN}."
             )));
         };
         if object.get("version") != Some(&Json::Int(CONFIG_VERSION)) {
             return Err(ToolError::msg(format!(
-                "config.json has an unsupported format version (expected {CONFIG_VERSION}). Ask the user to move the file away and {LINK_AGAIN}. {UNLINK_FIRST}"
+                "config.json has an unsupported format version (expected {CONFIG_VERSION}). Ask the user to move the file away and {SETUP_AGAIN}."
             )));
         }
         Ok(object)
@@ -160,7 +155,7 @@ impl Settings {
         let config = self.load_config()?;
         Rights::parse(&config).map_err(|what| {
             ToolError::msg(format!(
-                "config.json is invalid ({what}). Ask the user to fix it, or to move it away and {LINK_AGAIN}. {UNLINK_FIRST}"
+                "config.json is invalid ({what}). Ask the user to fix it, or to move it away and {SETUP_AGAIN}."
             ))
         })
     }
@@ -174,12 +169,12 @@ impl Settings {
 
     pub(crate) fn update_rights<T>(
         &self,
-        change: impl FnOnce(&mut Rights) -> Result<T, Refusal>,
+        change: impl FnOnce(&mut Rights) -> Result<T, Changed>,
     ) -> Result<T, UpdateError> {
         let _lock = self.lock()?;
         let stored = self.stored_rights().map_err(UpdateError::Unreadable)?;
         let mut rights = stored.clone();
-        let value = change(&mut rights).map_err(UpdateError::Refused)?;
+        let value = change(&mut rights).map_err(|Changed| UpdateError::Changed)?;
         if rights != stored {
             let config = rights.to_config();
             match Rights::parse(&config) {
@@ -211,25 +206,22 @@ impl Settings {
             }
         };
         Rights {
-            accounts: Vec::new(),
-            apple: Apple {
-                mail: fake::accounts()
-                    .into_iter()
-                    .filter(|entry| entry.id != "FAKE-WORK")
-                    .map(|entry| {
-                        let granted = level(&entry.id);
-                        (entry, granted)
-                    })
-                    .collect(),
-                calendars: calendar::demo_entries()
-                    .into_iter()
-                    .filter(|entry| entry.id != "FAKE-CAL-FIRMA")
-                    .map(|entry| {
-                        let granted = level(&entry.id);
-                        (entry, granted)
-                    })
-                    .collect(),
-            },
+            mail: fake::accounts()
+                .into_iter()
+                .filter(|entry| entry.id != "FAKE-WORK")
+                .map(|entry| {
+                    let granted = level(&entry.id);
+                    (entry, granted)
+                })
+                .collect(),
+            calendars: calendar::demo_entries()
+                .into_iter()
+                .filter(|entry| entry.id != "FAKE-CAL-FIRMA")
+                .map(|entry| {
+                    let granted = level(&entry.id);
+                    (entry, granted)
+                })
+                .collect(),
             sends_per_hour: DEFAULT_SENDS_PER_HOUR,
             changes_per_hour: DEFAULT_CHANGES_PER_HOUR,
         }
@@ -496,8 +488,6 @@ mod tests {
     use super::*;
     use crate::account::MailAccount;
     use crate::calendar::CalendarEntry;
-    use crate::provider::Provider;
-    use crate::rights::RemoteAccount;
     use crate::testutil::{j, settings_at, TempDir, TestResult};
     use std::collections::HashMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -505,13 +495,9 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    fn account(provider: Provider, address: &str) -> Result<RemoteAccount, String> {
-        RemoteAccount::new(provider, address).ok_or_else(|| format!("account {address}"))
-    }
-
     fn updated<T>(
         settings: &Settings,
-        change: impl FnOnce(&mut Rights) -> Result<T, Refusal>,
+        change: impl FnOnce(&mut Rights) -> Result<T, Changed>,
     ) -> Result<T, String> {
         settings
             .update_rights(change)
@@ -536,21 +522,34 @@ mod tests {
         Ok(settings_at(&path))
     }
 
-    const TWO_ACCOUNTS: &str = r#"{"version": 3, "apple": {"mail": [
+    const TWO_ACCOUNTS: &str = r#"{"version": 4, "mail": [
         {"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "read"},
-        {"id": "ACC-2", "name": "Outlook", "type": "exchange", "addresses": ["me@outlook.example", "alias@outlook.example"], "level": "read"}]}}"#;
+        {"id": "ACC-2", "name": "Outlook", "type": "exchange", "addresses": ["me@outlook.example", "alias@outlook.example"], "level": "read"}]}"#;
 
-    const CALENDARS: &str = r#"{"version": 3, "apple": {"calendars": [
+    const CALENDARS: &str = r#"{"version": 4, "calendars": [
         {"id": "CAL-1", "name": "Privat", "level": "write"},
-        {"id": "CAL-2", "name": "Familie", "level": "read"}]}, "changes_per_hour": 4}"#;
+        {"id": "CAL-2", "name": "Familie", "level": "read"}], "changes_per_hour": 4}"#;
 
-    const REMOTE: &str = r#"{"version": 3, "accounts": [
-        {"provider": "google", "address": "alice@gmail.example", "mail": "write",
-         "calendars": [
-            {"id": "alice@gmail.example", "name": "alice@gmail.example", "level": "write"},
-            {"id": "family@group", "name": "Familie (alice@gmail.example)", "level": "read"}]},
-        {"provider": "microsoft", "address": "bob@outlook.example", "mail": "read"}],
+    const STORED: &str = r#"{"version": 4,
+        "mail": [
+            {"id": "ACC-1", "name": "Privat", "type": "imap", "addresses": ["me@example.org"], "level": "write"},
+            {"id": "ACC-2", "name": "Arbeit", "level": "read"}],
+        "calendars": [
+            {"id": "CAL-1", "name": "Privat", "level": "write"},
+            {"id": "CAL-2", "name": "Familie", "level": "read"}],
         "sends_per_hour": 2}"#;
+
+    fn entry(id: &str) -> (MailAccount, Level) {
+        (
+            MailAccount {
+                id: id.to_string(),
+                name: id.to_string(),
+                kind: String::new(),
+                addresses: Vec::new(),
+            },
+            Level::Read,
+        )
+    }
 
     #[test]
     fn paths_follow_the_environment() {
@@ -646,14 +645,14 @@ mod tests {
     }
 
     #[test]
-    fn the_four_config_errors_tell_how_to_connect_the_accounts_again() -> TestResult {
+    fn the_four_config_errors_tell_how_to_set_up_again() -> TestResult {
         let dir = TempDir::new()?;
         let mut messages = Vec::new();
         for text in [
             "nope",
             "[]",
-            "{\"version\": 2}",
-            "{\"version\": 3, \"x\": 1}",
+            "{\"version\": 3, \"apple\": {}}",
+            "{\"version\": 4, \"x\": 1}",
         ] {
             let s = write_config(&dir, text)?;
             let Err(error) = s.stored_rights() else {
@@ -669,18 +668,12 @@ mod tests {
             } else {
                 "move the file away"
             };
-            for wanted in [
-                away,
-                "`avery mail link google`",
-                "`avery mail link microsoft`",
-                "`avery mail setup apple`",
-                "`avery mail unlink google:<address>`",
-                "microsoft:<address>",
-            ] {
+            for wanted in [away, "`avery mail setup`"] {
                 assert!(message.contains(wanted), "{wanted}: {message}");
             }
-            assert!(!message.contains("`avery mail setup` again"), "{message}");
+            assert!(!message.contains("link"), "{message}");
         }
+        assert!(messages[2].contains("unsupported format version (expected 4)"));
         assert!(messages[3].contains("fix it, or to move it away"));
         Ok(())
     }
@@ -707,14 +700,15 @@ mod tests {
             "{\"allowed_accounts\": []}",
             "{\"version\": 1, \"allowed_accounts\": []}",
             "{\"version\": 2, \"allowed_accounts\": [], \"write\": {\"accounts\": []}}",
-            "{\"version\": 4}",
-            "{\"version\": \"3\"}",
-            "{\"version\": 3.0}",
+            "{\"version\": 3}",
+            "{\"version\": 5}",
+            "{\"version\": \"4\"}",
+            "{\"version\": 4.0}",
             "{\"version\": null}",
         ] {
             let s = write_config(&dir, text)?;
             assert!(
-                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unsupported format version (expected 3)")),
+                matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unsupported format version (expected 4)")),
                 "{text:?}"
             );
             assert!(s.rights().is_err(), "{text:?}");
@@ -728,10 +722,10 @@ mod tests {
         let s = settings_at(&dir.path(""));
         assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
         let padding = " ".repeat(MAX_CONFIG_BYTES);
-        let s = write_config(&dir, &format!("{{\"version\": 3}}{padding}"))?;
+        let s = write_config(&dir, &format!("{{\"version\": 4}}{padding}"))?;
         assert!(matches!(s.load_config(), Err(ToolError::Msg(m)) if m.contains("unreadable")));
         let padding = " ".repeat(MAX_CONFIG_BYTES - 14);
-        let s = write_config(&dir, &format!("{{\"version\": 3}}{padding}"))?;
+        let s = write_config(&dir, &format!("{{\"version\": 4}}{padding}"))?;
         assert!(s.load_config().is_ok());
         Ok(())
     }
@@ -740,13 +734,13 @@ mod tests {
     fn a_config_with_unexpected_content_is_invalid_as_a_whole() -> TestResult {
         let dir = TempDir::new()?;
         for text in [
-            r#"{"version": 3, "allowed_accounts": []}"#,
-            r#"{"version": 3, "mail": {"accounts": []}}"#,
-            r#"{"version": 3, "apple": {"mail": [{"id": 7, "level": "read"}]}}"#,
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "admin"}]}}"#,
-            r#"{"version": 3, "sends_per_hour": 0}"#,
-            r#"{"version": 3, "apple": {"calendars": [{"id": "C"}]}}"#,
-            r#"{"version": 3, "accounts": [{"provider": "google", "address": "Alice@Gmail.example"}]}"#,
+            r#"{"version": 4, "allowed_accounts": []}"#,
+            r#"{"version": 4, "mail": {"accounts": []}}"#,
+            r#"{"version": 4, "mail": [{"id": 7, "level": "read"}]}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "level": "admin"}]}"#,
+            r#"{"version": 4, "sends_per_hour": 0}"#,
+            r#"{"version": 4, "calendars": [{"id": "C"}]}"#,
+            r#"{"version": 4, "apple": {"mail": []}}"#,
         ] {
             let s = write_config(&dir, text)?;
             assert!(
@@ -763,7 +757,7 @@ mod tests {
     #[test]
     fn a_config_without_sections_grants_nothing() -> TestResult {
         let dir = TempDir::new()?;
-        let s = write_config(&dir, "{\"version\": 3}")?;
+        let s = write_config(&dir, "{\"version\": 4}")?;
         assert_eq!(s.allowed_accounts(), Ok(vec![]));
         assert_eq!(s.allowed_calendars(), Ok(vec![]));
         Ok(())
@@ -845,9 +839,9 @@ mod tests {
         assert_eq!(off.resolve_writable(None), Err(ToolError::msg(WRITE_OFF)));
         let writing = write_config(
             &dir,
-            r#"{"version": 3, "apple": {"mail": [
+            r#"{"version": 4, "mail": [
                 {"id": "ACC-1", "name": "A", "level": "read"},
-                {"id": "ACC-2", "name": "B", "level": "write"}]}}"#,
+                {"id": "ACC-2", "name": "B", "level": "write"}]}"#,
         )?;
         let settings = writing.write_settings()?;
         let ids: Vec<&str> = settings.accounts.iter().map(|a| a.id.as_str()).collect();
@@ -869,7 +863,7 @@ mod tests {
         let dir = TempDir::new()?;
         let with = |limit: &str| {
             format!(
-                r#"{{"version": 3, "apple": {{"mail": [{{"id": "A", "name": "A", "level": "write"}}]}}, {limit}}}"#
+                r#"{{"version": 4, "mail": [{{"id": "A", "name": "A", "level": "write"}}], {limit}}}"#
             )
         };
         let s = write_config(&dir, &with(r#""sends_per_hour": 3"#))?;
@@ -880,7 +874,7 @@ mod tests {
         assert!(s.write_settings().is_err());
         let s = write_config(
             &dir,
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "write"}]}}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "level": "write"}]}"#,
         )?;
         assert_eq!(s.write_settings()?.max_per_hour, 5);
         for bad in ["0", "31", "\"7\"", "null", "true"] {
@@ -958,7 +952,7 @@ mod tests {
         );
         let read_only = write_config(
             &dir,
-            r#"{"version": 3, "apple": {"calendars": [{"id": "C", "name": "N", "level": "read"}]}}"#,
+            r#"{"version": 4, "calendars": [{"id": "C", "name": "N", "level": "read"}]}"#,
         )?;
         assert_eq!(
             read_only.resolve_writable_calendar(None),
@@ -1009,7 +1003,7 @@ mod tests {
         let s = settings_at(&dir.path("sub/dir/config.json"));
         let mut rights = Rights::empty();
         rights.sends_per_hour = 7;
-        rights.apple.mail.push((
+        rights.mail.push((
             crate::account::MailAccount {
                 id: "A".into(),
                 name: "N".into(),
@@ -1018,20 +1012,13 @@ mod tests {
             },
             Level::Write,
         ));
-        rights.apple.calendars.push((
+        rights.calendars.push((
             crate::calendar::CalendarEntry {
                 id: "C".into(),
                 name: "K".into(),
             },
             Level::Read,
         ));
-        let mut account = crate::rights::RemoteAccount::new(
-            crate::provider::Provider::Microsoft,
-            "bob@outlook.example",
-        )
-        .ok_or("account")?;
-        account.mail = Some(Level::Read);
-        rights.accounts.push(account);
         let saved = rights.clone();
         updated(&s, |stored| {
             *stored = saved;
@@ -1042,55 +1029,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_accounts_are_read_with_runtime_ids_labels_and_limits() -> TestResult {
-        let dir = TempDir::new()?;
-        let s = write_config(&dir, REMOTE)?;
-        let accounts = s.allowed_accounts()?;
-        let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "google:alice@gmail.example",
-                "microsoft:bob@outlook.example"
-            ]
-        );
-        assert_eq!(accounts[0].label, "alice@gmail.example");
-        assert_eq!(accounts[0].kind, "gmail");
-        assert_eq!(accounts[1].kind, "outlook");
-        let writing = s.write_settings()?;
-        let ids: Vec<&str> = writing.accounts.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["google:alice@gmail.example"]);
-        assert_eq!(writing.max_per_hour, 2);
-        let calendars = s.allowed_calendars()?;
-        let ids: Vec<&str> = calendars.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "google:alice@gmail.example:alice@gmail.example",
-                "google:alice@gmail.example:family@group"
-            ]
-        );
-        assert_eq!(
-            s.resolve(Some(&j("\"bob@outlook.example\"")?))?[0].id,
-            "microsoft:bob@outlook.example"
-        );
-        let changing = s.calendar_write_settings()?;
-        let ids: Vec<&str> = changing.calendars.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["google:alice@gmail.example:alice@gmail.example"]);
-        let (only, _) = s.resolve_writable_calendar(None)?;
-        assert_eq!(only.label, "alice@gmail.example");
-        Ok(())
-    }
-
-    #[test]
     fn save_config_writes_indented_json_with_private_permissions() -> TestResult {
         let dir = TempDir::new()?;
         let s = settings_at(&dir.path("sub/dir/config.json"));
         let mut config = Object::new();
-        config.insert("version", 3i64);
+        config.insert("version", 4i64);
         s.save_config(&config)?;
         let text = fs::read_to_string(dir.path("sub/dir/config.json"))?;
-        assert_eq!(text, "{\n  \"version\": 3\n}");
+        assert_eq!(text, "{\n  \"version\": 4\n}");
         let file_mode = fs::metadata(dir.path("sub/dir/config.json"))?
             .permissions()
             .mode()
@@ -1128,32 +1074,32 @@ mod tests {
         fs::write(dir.path("victim"), "keep")?;
         std::os::unix::fs::symlink(dir.path("victim"), format!("{}.tmp", s.config_path))?;
         let mut config = Object::new();
-        config.insert("version", 3i64);
+        config.insert("version", 4i64);
         s.save_config(&config)?;
         assert_eq!(fs::read_to_string(dir.path("victim"))?, "keep");
-        assert!(fs::read_to_string(&s.config_path)?.contains("\"version\": 3"));
+        assert!(fs::read_to_string(&s.config_path)?.contains("\"version\": 4"));
         Ok(())
     }
 
     #[test]
     fn an_update_changes_what_is_stored_and_returns_what_the_change_returns() -> TestResult {
         let dir = TempDir::new()?;
-        let s = write_config(&dir, REMOTE)?;
+        let s = write_config(&dir, STORED)?;
         let seen = updated(&s, |rights| {
-            let seen = rights.accounts.len();
+            let seen = rights.mail.len();
             rights.sends_per_hour = 4;
             Ok(seen)
         })?;
         assert_eq!(seen, 2);
         let rights = s.stored_rights()?;
-        assert_eq!((rights.accounts.len(), rights.sends_per_hour), (2, 4));
+        assert_eq!((rights.mail.len(), rights.sends_per_hour), (2, 4));
         Ok(())
     }
 
     #[test]
     fn the_change_runs_on_what_another_writer_saved_after_the_snapshot() -> TestResult {
         let dir = TempDir::new()?;
-        let s = write_config(&dir, REMOTE)?;
+        let s = write_config(&dir, STORED)?;
         let snapshot = s.stored_rights()?;
         updated(&s, |rights| {
             rights.sends_per_hour = 9;
@@ -1161,12 +1107,12 @@ mod tests {
         })?;
         let outcome = s.update_rights(|fresh| {
             if *fresh != snapshot {
-                return Err(Refusal::Changed);
+                return Err(Changed);
             }
             fresh.sends_per_hour = 1;
             Ok(())
         });
-        assert_eq!(outcome, Err(UpdateError::Refused(Refusal::Changed)));
+        assert_eq!(outcome, Err(UpdateError::Changed));
         assert_eq!(s.stored_rights()?.sends_per_hour, 9);
         let carried = s.update_rights(|fresh| Ok(fresh.sends_per_hour));
         assert_eq!(carried, Ok(9));
@@ -1176,17 +1122,18 @@ mod tests {
     #[test]
     fn a_refused_change_and_an_unreadable_config_leave_the_file_alone() -> TestResult {
         let dir = TempDir::new()?;
-        let s = write_config(&dir, REMOTE)?;
+        let s = write_config(&dir, STORED)?;
         assert_eq!(
-            s.update_rights(|_| Err::<(), _>(Refusal::Full)),
-            Err(UpdateError::Refused(Refusal::Full))
+            s.update_rights(|_| Err::<(), _>(Changed)),
+            Err(UpdateError::Changed)
         );
-        assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE);
+        assert_eq!(fs::read_to_string(&s.config_path)?, STORED);
         for text in [
             "not json",
             "{\"version\": 2}",
             "[]",
-            "{\"version\": 3, \"x\": 1}",
+            "{\"version\": 3, \"apple\": {}}",
+            "{\"version\": 4, \"x\": 1}",
         ] {
             fs::write(&s.config_path, text)?;
             let mut ran = false;
@@ -1210,7 +1157,7 @@ mod tests {
         let s = settings_at(&dir.path("config.json"));
         updated(&s, |_| Ok(()))?;
         assert!(!Path::new(&s.config_path).exists());
-        let handwritten = r#"{"version": 3}"#;
+        let handwritten = r#"{"version": 4}"#;
         fs::write(&s.config_path, handwritten)?;
         updated(&s, |_| Ok(()))?;
         assert_eq!(fs::read_to_string(&s.config_path)?, handwritten);
@@ -1227,9 +1174,9 @@ mod tests {
             let s = write_config(
                 &dir,
                 &format!(
-                    r#"{{"version": 3, "apple": {{
+                    r#"{{"version": 4, 
                         "mail": [{{"id": "{id}", "level": "read"}}],
-                        "calendars": [{{"id": "{id}", "level": "write"}}]}}}}"#
+                        "calendars": [{{"id": "{id}", "level": "write"}}]}}"#
                 ),
             )?;
             updated(&s, |rights| {
@@ -1240,11 +1187,11 @@ mod tests {
             let rights = s.stored_rights()?;
             assert_eq!(rights.sends_per_hour, 7);
             assert_eq!(
-                rights.apple.mail[0].0.name,
+                rights.mail[0].0.name,
                 crate::text::one_line_str(id, crate::rights::MAX_NAME)
             );
-            assert_eq!(rights.apple.mail[0].0.id, id);
-            assert_eq!(rights.apple.calendars[0].1, Level::Write);
+            assert_eq!(rights.mail[0].0.id, id);
+            assert_eq!(rights.calendars[0].1, Level::Write);
             updated(&s, |rights| {
                 rights.sends_per_hour = 8;
                 Ok(())
@@ -1257,7 +1204,7 @@ mod tests {
     #[test]
     fn a_read_only_lock_file_still_serialises_the_updates() -> TestResult {
         let dir = TempDir::new()?;
-        let mut s = write_config(&dir, REMOTE)?;
+        let mut s = write_config(&dir, STORED)?;
         s.lock_wait = Duration::from_millis(200);
         fs::write(s.lock_path(), "")?;
         fs::set_permissions(s.lock_path(), fs::Permissions::from_mode(0o400))?;
@@ -1276,10 +1223,10 @@ mod tests {
 
     #[test]
     fn an_update_never_saves_a_config_that_the_reader_would_refuse() -> TestResult {
-        type Break = fn(&mut Rights) -> Result<(), Refusal>;
-        let breaks: [(&str, Break); 4] = [
+        type Break = fn(&mut Rights) -> Result<(), Changed>;
+        let breaks: [(&str, Break); 3] = [
             ("one line", |rights| {
-                rights.apple.mail.push((
+                rights.mail.push((
                     MailAccount {
                         id: "ACC-9".to_string(),
                         name: "a\u{200b}b".to_string(),
@@ -1291,15 +1238,13 @@ mod tests {
                 Ok(())
             }),
             ("more than", |rights| {
-                for index in 0..=crate::rights::MAX_ACCOUNTS {
-                    let address = format!("u{index}@gmail.example");
-                    let added = RemoteAccount::new(Provider::Google, &address);
-                    rights.accounts.extend(added);
+                for index in 0..=crate::rights::MAX_ENTRIES {
+                    rights.mail.push(entry(&format!("ACC-{index}")));
                 }
                 Ok(())
             }),
             ("differently", |rights| {
-                rights.apple.calendars.push((
+                rights.calendars.push((
                     CalendarEntry {
                         id: " x".to_string(),
                         name: String::new(),
@@ -1308,31 +1253,19 @@ mod tests {
                 ));
                 Ok(())
             }),
-            ("already linked directly", |rights| {
-                rights.apple.mail.push((
-                    MailAccount {
-                        id: "ACC-9".to_string(),
-                        name: "Privat".to_string(),
-                        kind: String::new(),
-                        addresses: vec!["alice@gmail.example".to_string()],
-                    },
-                    Level::Read,
-                ));
-                Ok(())
-            }),
         ];
         for (reason, change) in breaks {
             let dir = TempDir::new()?;
-            let s = write_config(&dir, REMOTE)?;
+            let s = write_config(&dir, STORED)?;
             let outcome = s.update_rights(change);
             assert!(
                 matches!(&outcome, Err(UpdateError::Invalid(what)) if what.contains(reason)),
                 "{reason}: {outcome:?}"
             );
-            assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE, "{reason}");
+            assert_eq!(fs::read_to_string(&s.config_path)?, STORED, "{reason}");
             assert!(!Path::new(&format!("{}.tmp", s.config_path)).exists());
             drop(hold(&s)?);
-            assert_eq!(s.stored_rights()?.accounts.len(), 2);
+            assert_eq!(s.stored_rights()?.mail.len(), 2);
         }
         Ok(())
     }
@@ -1394,7 +1327,7 @@ mod tests {
     #[test]
     fn an_update_waits_for_a_lock_that_is_released_in_time() -> TestResult {
         let dir = TempDir::new()?;
-        let mut s = write_config(&dir, REMOTE)?;
+        let mut s = write_config(&dir, STORED)?;
         s.lock_wait = Duration::from_secs(10);
         let holder = s.clone();
         let (locked, ready) = mpsc::channel();
@@ -1420,7 +1353,7 @@ mod tests {
     #[test]
     fn an_update_gives_up_when_the_lock_stays_taken_and_changes_nothing() -> TestResult {
         let dir = TempDir::new()?;
-        let mut s = write_config(&dir, REMOTE)?;
+        let mut s = write_config(&dir, STORED)?;
         s.lock_wait = Duration::from_millis(200);
         let held = hold(&s)?;
         let started = Instant::now();
@@ -1437,7 +1370,7 @@ mod tests {
             waited >= Duration::from_millis(200) && waited < Duration::from_secs(5),
             "{waited:?}"
         );
-        assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE);
+        assert_eq!(fs::read_to_string(&s.config_path)?, STORED);
         drop(held);
         Ok(())
     }
@@ -1457,15 +1390,17 @@ mod tests {
             .map(|n| {
                 let own = s.clone();
                 thread::spawn(move || -> Result<(), String> {
-                    let fresh = account(Provider::Google, &format!("u{n}@gmail.example"))?;
-                    updated(&own, |rights| rights.add_account(fresh))
+                    updated(&own, |rights| {
+                        rights.mail.push(entry(&format!("ACC-{n}")));
+                        Ok(())
+                    })
                 })
             })
             .collect();
         for handle in threads {
             handle.join().map_err(|_| "thread")??;
         }
-        assert_eq!(s.stored_rights()?.accounts.len(), 12);
+        assert_eq!(s.stored_rights()?.mail.len(), 12);
         s.lock_wait = Duration::ZERO;
         drop(hold(&s)?);
         Ok(())
@@ -1494,14 +1429,14 @@ mod tests {
     #[test]
     fn a_failed_write_is_reported_and_releases_the_lock() -> TestResult {
         let dir = TempDir::new()?;
-        let mut s = write_config(&dir, REMOTE)?;
+        let mut s = write_config(&dir, STORED)?;
         fs::create_dir(format!("{}.tmp", s.config_path))?;
         let outcome = s.update_rights(|rights| {
             rights.sends_per_hour = 3;
             Ok(())
         });
         assert!(matches!(outcome, Err(UpdateError::Write(_))), "{outcome:?}");
-        assert_eq!(fs::read_to_string(&s.config_path)?, REMOTE);
+        assert_eq!(fs::read_to_string(&s.config_path)?, STORED);
         s.lock_wait = Duration::ZERO;
         drop(hold(&s)?);
         Ok(())

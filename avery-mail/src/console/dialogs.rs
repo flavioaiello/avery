@@ -1,11 +1,10 @@
 use std::fmt;
 
-use super::{level_word, Area, Choice, GrantChange, Recap, Topic};
+use super::{level_word, Area, Choice, GrantChange, Recap};
 use crate::error::ToolError;
 use crate::json::{Json, Object};
 use crate::jxa::exchange;
 use crate::osascript::{App, Host};
-use crate::provider::{Page, Provider};
 use crate::rights::{Level, MAX_NAME};
 use crate::text::{char_len, clean_str, one_line_str};
 
@@ -22,12 +21,11 @@ const MAX_LABEL: usize = 32;
 const MAX_ITEMS: usize = 500;
 const MAX_ITEM: usize = 140;
 const MAX_ANSWER: usize = 512;
-const MAX_CLIENT: usize = 400;
 const MAX_NOTE_LINE: usize = 400;
 const MAX_NOTE_LINES: usize = 200;
 const MAX_NOTE_CHARS: usize = 1500;
 const MAX_RECAP_LINES: usize = 30;
-const ANY_COMMAND: &str = "avery mail setup (bzw. avery mail setup apple)";
+const SETUP_COMMAND: &str = "avery mail setup";
 const CUT: &str = "[...]";
 const TIMED_OUT: &str = "Keine Antwort im Dialog.";
 const TOO_LONG: &str = "Die Eingabe war zu lang.";
@@ -35,15 +33,7 @@ const MALFORMED: &str = "Der Dialog hat eine unerwartete Antwort geliefert.";
 const BAD_REQUEST: &str = "Der Dialog konnte nicht angezeigt werden (interner Fehler).";
 const READ_PROMPT: &str = "Welche davon soll Avery lesen?";
 const WRITE_PROMPT: &str = "Bei welchen darf Avery auch schreiben? Jede Änderung braucht danach deinen Klick in einem macOS-Dialog.";
-const PAGES_PROMPT: &str = "Welche Seiten sollen sich im Browser öffnen?";
-const PAGES_NOTICE: &str = "Registriere die App wie in der Anleitung. Danach startest du Avery erneut: die Einrichtung geht dort weiter.";
-const BROWSER_NOTICE: &str =
-    "Melde dich im Browser an und erlaube den Zugriff. Avery wartet bis zu 3 Minuten.";
-const APPLE_TEXT: &str = "Avery startet jetzt Mail und Kalender und listet deine Konten und Kalender auf. macOS fragt dabei einmal um Erlaubnis (Automation): bitte erlauben. Avery braucht für Apple keine Anmeldung.\n\nNur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
-const LEVEL_TEXT: &str = "Was darf Avery mit diesem Konto tun?\n\nNur lesen: Mails und Termine lesen.\nLesen und mit Freigabe schreiben: zusätzlich Entwürfe, Senden und Termine ändern; jede Änderung erst nach deinem Klick in einem macOS-Dialog, den der Agent nicht bedienen kann.";
-const READ_ONLY: &str = "Nur lesen";
-const READ_WRITE: &str = "Lesen und mit Freigabe schreiben";
-const OPEN_GUIDE: &str = "Anleitung öffnen";
+const ACCESS_TEXT: &str = "Avery startet jetzt Mail und Kalender und listet deine Konten und Kalender auf. macOS fragt dabei einmal um Erlaubnis (Automation): bitte erlauben. Avery braucht dafür keine Anmeldung.\n\nNur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
 const CANCEL: &str = "Abbrechen";
 const NEXT: &str = "Weiter";
 
@@ -51,7 +41,6 @@ const NEXT: &str = "Weiter";
 pub(crate) enum Stop {
     Cancelled,
     TimedOut,
-    Away,
     Failed(String),
 }
 
@@ -60,7 +49,6 @@ impl fmt::Display for Stop {
         match self {
             Stop::Cancelled => f.write_str("Abgebrochen."),
             Stop::TimedOut => f.write_str(TIMED_OUT),
-            Stop::Away => f.write_str("Die Anleitung wurde geöffnet."),
             Stop::Failed(message) => f.write_str(message),
         }
     }
@@ -163,7 +151,6 @@ impl Talk {
 pub(crate) struct Text<'a> {
     pub(crate) text: &'a str,
     pub(crate) default: &'a str,
-    pub(crate) hidden: bool,
     pub(crate) max: usize,
     pub(crate) ok: &'a str,
 }
@@ -295,8 +282,8 @@ fn numbered(index: usize, text: &str) -> String {
     format!("{}. {}", index + 1, one_line_str(text, MAX_ITEM))
 }
 
-fn too_many(command: &str) -> String {
-    format!("Es sind zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: {command}")
+fn too_many() -> String {
+    format!("Es sind zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: {SETUP_COMMAND}")
 }
 
 fn rank(level: Option<Level>) -> u8 {
@@ -447,7 +434,6 @@ impl<'a> Dialogs<'a> {
         let text = self.framed(ask.text).text;
         let mut request = self.base("ask_text", &text);
         request.insert("default", one_line_str(ask.default, max));
-        request.insert("hidden", ask.hidden);
         request.insert("max", max);
         request.insert("ok", label(ask.ok));
         request.insert("cancel", CANCEL);
@@ -536,21 +522,10 @@ impl<'a> Dialogs<'a> {
         }
     }
 
-    fn signal(&self, request: Object) -> bool {
-        matches!(self.converse(request, SIGNAL_SECONDS), Ok(Parsed::Done))
-    }
-
     pub(crate) fn notify(&mut self, text: &str) {
         let shown = clean_str(text, Some(MAX_SIGNAL));
         let request = self.base("notify", &shown);
-        self.signal(request);
-    }
-
-    pub(crate) fn open_url(&mut self, page: Page) -> bool {
-        let mut request = Object::new();
-        request.insert("op", "open_url");
-        request.insert("url", page.url());
-        self.signal(request)
+        let _ = self.converse(request, SIGNAL_SECONDS);
     }
 
     pub(crate) fn say(&mut self, text: &str) {
@@ -561,7 +536,6 @@ impl<'a> Dialogs<'a> {
         self.ask_text(&Text {
             text: prompt,
             default: "",
-            hidden: false,
             max: MAX_ANSWER,
             ok: "OK",
         })
@@ -569,23 +543,23 @@ impl<'a> Dialogs<'a> {
     }
 
     pub(crate) fn confirm(&mut self, question: &str) -> bool {
-        self.confirmed(question, ANY_COMMAND)
+        self.confirmed(question)
     }
 
     pub(crate) fn confirm_grants(&mut self, recap: &Recap) -> bool {
         match recap_text(&recap.changes) {
-            Some(text) => self.confirmed(&text, &recap.command),
+            Some(text) => self.confirmed(&text),
             None => {
-                self.say(&too_many(&recap.command));
+                self.say(&too_many());
                 false
             }
         }
     }
 
-    fn confirmed(&mut self, text: &str, command: &str) -> bool {
+    fn confirmed(&mut self, text: &str) -> bool {
         let framed = self.framed(text);
         if framed.cut {
-            self.say(&too_many(command));
+            self.say(&too_many());
             return false;
         }
         let ask = Buttons {
@@ -598,105 +572,17 @@ impl<'a> Dialogs<'a> {
         matches!(self.buttons_asked(&framed.text, &ask), Ok(1))
     }
 
-    pub(crate) fn explain(&mut self, topic: Topic) -> bool {
-        match topic {
-            Topic::Registration(provider) => self.explain_registration(provider),
-            Topic::AppleAccess => matches!(
-                self.ask_buttons(&Buttons {
-                    text: APPLE_TEXT,
-                    buttons: &[CANCEL, NEXT],
-                    default: 1,
-                    cancel: Some(0),
-                    icon: Icon::Note,
-                }),
-                Ok(1)
-            ),
-        }
-    }
-
-    fn explain_registration(&mut self, provider: Provider) -> bool {
-        let Some(oauth) = provider.oauth() else {
-            return true;
-        };
-        match self.ask_buttons(&Buttons {
-            text: oauth.explanation,
-            buttons: &[CANCEL, OPEN_GUIDE, NEXT],
-            default: 2,
-            cancel: Some(0),
-            icon: Icon::Note,
-        }) {
-            Ok(2) => true,
-            Ok(1) => {
-                self.open_pages(provider);
-                false
-            }
-            _ => false,
-        }
-    }
-
-    fn open_pages(&mut self, provider: Provider) {
-        let pages = provider.pages();
-        let labels: Vec<String> = pages.iter().map(|page| page.label().to_string()).collect();
-        let Ok(chosen) = self.choose_list(&List {
-            text: PAGES_PROMPT,
-            items: &labels,
-            defaults: &[0, 1],
-            multiple: true,
-            ok: "Öffnen",
-        }) else {
-            return;
-        };
-        for page in chosen.into_iter().filter_map(|index| pages.get(index)) {
-            self.open_url(*page);
-        }
-        self.notify(PAGES_NOTICE);
-        self.talk.stop = Some(Stop::Away);
-    }
-
-    pub(crate) fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
-        let name = provider.display();
-        let id = self
-            .ask_text(&Text {
-                text: &format!("{name}: Client-ID deiner App"),
-                default: "",
-                hidden: false,
-                max: MAX_CLIENT,
-                ok: NEXT,
-            })
-            .ok()?;
-        if !provider.oauth().is_some_and(|oauth| oauth.secret) {
-            return Some((id, String::new()));
-        }
-        let secret = self
-            .ask_text(&Text {
-                text: &format!(
-                    "{name}: Client-Secret deiner App. Es wird nicht angezeigt und nur im macOS-Schlüsselbund gespeichert."
-                ),
-                default: "",
-                hidden: true,
-                max: MAX_CLIENT,
-                ok: NEXT,
-            })
-            .ok()?;
-        Some((id, secret))
-    }
-
-    pub(crate) fn ask_write(&mut self) -> Option<bool> {
-        match self.ask_buttons(&Buttons {
-            text: LEVEL_TEXT,
-            buttons: &[CANCEL, READ_ONLY, READ_WRITE],
-            default: 1,
-            cancel: Some(0),
-            icon: Icon::Note,
-        }) {
-            Ok(1) => Some(false),
-            Ok(2) => Some(true),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn browser(&mut self) {
-        self.notify(BROWSER_NOTICE);
+    pub(crate) fn explain(&mut self) -> bool {
+        matches!(
+            self.ask_buttons(&Buttons {
+                text: ACCESS_TEXT,
+                buttons: &[CANCEL, NEXT],
+                default: 1,
+                cancel: Some(0),
+                icon: Icon::Note,
+            }),
+            Ok(1)
+        )
     }
 
     pub(crate) fn ask_levels(&mut self, choices: &[Choice]) -> Result<Vec<Option<Level>>, u8> {
@@ -781,7 +667,6 @@ mod tests {
         Text {
             text: prompt,
             default: "",
-            hidden: false,
             max: 40,
             ok: "Weiter",
         }
@@ -795,11 +680,10 @@ mod tests {
     fn a_text_question_is_a_strict_bounded_request_and_returns_the_answer() -> TestResult {
         let script = Script::new().then("ask_text", Reply::text("abc-123"));
         let mut talk = Talk::new();
-        talk.set_title("Gmail verbinden");
+        talk.set_title("Mail einrichten");
         let answer = Dialogs::new(&script, &mut talk).ask_text(&Text {
-            text: "Client-ID",
+            text: "Nummer",
             default: "alt",
-            hidden: true,
             max: 40,
             ok: "Weiter",
         })?;
@@ -813,40 +697,16 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["cancel", "default", "hidden", "max", "ok", "op", "seconds", "text", "title"]
+            ["cancel", "default", "max", "ok", "op", "seconds", "text", "title"]
         );
         assert_eq!(seen[0].text("op"), "ask_text");
-        assert_eq!(seen[0].text("title"), "Gmail verbinden");
-        assert_eq!(seen[0].text("text"), "Client-ID");
+        assert_eq!(seen[0].text("title"), "Mail einrichten");
+        assert_eq!(seen[0].text("text"), "Nummer");
         assert_eq!(seen[0].text("default"), "alt");
         assert_eq!(seen[0].text("cancel"), "Abbrechen");
-        assert_eq!(seen[0].field("hidden"), Some(Json::Bool(true)));
         assert_eq!(seen[0].field("max"), Some(Json::Int(40)));
         assert_eq!(seen[0].field("seconds"), Some(Json::Int(600)));
         assert!(script.mismatches().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn the_answer_is_cleaned_and_a_secret_stays_out_of_every_request() -> TestResult {
-        let secret = "GOCSPX-s3cr3t_value";
-        let script = Script::new().then("ask_text", Reply::text("id-1")).then(
-            "ask_text",
-            Reply::text(&format!("\u{200b}{secret}\u{202e}\n")),
-        );
-        let mut talk = Talk::new();
-        let (id, found) = Dialogs::new(&script, &mut talk)
-            .ask_client(Provider::Google)
-            .ok_or("client")?;
-        assert_eq!(id, "id-1");
-        assert_eq!(found, secret);
-        let requests = script.seen();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].field("hidden"), Some(Json::Bool(false)));
-        assert_eq!(requests[1].field("hidden"), Some(Json::Bool(true)));
-        for request in &requests {
-            assert!(!request.payload.contains(secret), "{}", request.payload);
-        }
         Ok(())
     }
 
@@ -1324,65 +1184,27 @@ mod tests {
     }
 
     #[test]
-    fn notifications_and_pages_are_best_effort_and_never_stop_the_conversation() -> TestResult {
+    fn notifications_are_best_effort_and_never_stop_the_conversation() -> TestResult {
         let script = Script::new()
             .then("notify", Reply::Done)
             .then("notify", Reply::Silent)
-            .then("open_url", Reply::Done)
-            .then("open_url", Reply::Hung)
-            .then("open_url", Reply::Cancel);
+            .then("notify", Reply::Hung)
+            .then("notify", Reply::Cancel);
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&script, &mut talk);
         dialogs.notify("Hallo\u{202e} Welt");
         dialogs.notify(&"n".repeat(5000));
-        assert!(dialogs.open_url(Page::Readme));
-        assert!(!dialogs.open_url(Page::GoogleProject));
-        assert!(!dialogs.open_url(Page::EntraApps));
+        dialogs.notify("haengt");
+        dialogs.notify("abgebrochen");
         assert_eq!(talk.take_stop(), None);
         let seen = script.seen();
         assert_eq!(seen[0].text("text"), "Hallo Welt");
         assert!(chars(&seen[1].text("text")) <= MAX_SIGNAL + 6);
         assert_eq!(seen[0].wait, Duration::from_secs(SIGNAL_SECONDS));
-        assert_eq!(seen[2].text("url"), Page::Readme.url());
-        let request = json::parse(&seen[2].payload)?;
+        let request = json::parse(&seen[0].payload)?;
         let object = request.as_object().ok_or("object")?;
-        assert_eq!(object.len(), 2);
+        assert_eq!(object.len(), 3);
         Ok(())
-    }
-
-    #[test]
-    fn the_pages_are_https_addresses_of_three_known_hosts_and_every_page_is_offered() {
-        let hosts = [
-            "github.com",
-            "console.cloud.google.com",
-            "entra.microsoft.com",
-        ];
-        let mut offered: Vec<Page> = Vec::new();
-        for provider in Provider::ALL {
-            offered.extend_from_slice(provider.pages());
-            for page in provider.pages() {
-                assert!(!page.label().is_empty());
-                assert!(chars(page.label()) <= MAX_ITEM);
-            }
-        }
-        assert!(Provider::Apple.pages().is_empty());
-        for page in Page::ALL {
-            assert!(offered.contains(&page), "{page:?}");
-            let url = page.url();
-            assert!(url.starts_with("https://"), "{url}");
-            assert!(url.len() <= 300, "{url}");
-            assert!(
-                url.is_ascii() && !url.contains(char::is_whitespace),
-                "{url}"
-            );
-            let host = url["https://".len()..]
-                .split(['/', '#', '?'])
-                .next()
-                .unwrap_or("");
-            assert!(hosts.contains(&host), "{url}");
-            assert!(!url.contains('?') && !url.contains('@'), "{url}");
-        }
-        assert_eq!(offered.len(), Page::ALL.len() + 1);
     }
 
     #[test]
@@ -1508,12 +1330,11 @@ mod tests {
         }
     }
 
-    fn recap_of(changes: Vec<GrantChange>, command: &str) -> Recap {
+    fn recap_of(changes: Vec<GrantChange>) -> Recap {
         Recap {
             mail: String::new(),
             calendars: String::new(),
             changes,
-            command: command.to_string(),
         }
     }
 
@@ -1648,10 +1469,12 @@ mod tests {
             .then("ask_buttons", Reply::Cancel);
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&script, &mut talk);
-        let recap = recap_of(
-            vec![grant(Area::Calendar, "Privat", None, Some(Level::Write))],
-            "avery mail setup",
-        );
+        let recap = recap_of(vec![grant(
+            Area::Calendar,
+            "Privat",
+            None,
+            Some(Level::Write),
+        )]);
         assert!(dialogs.confirm_grants(&recap));
         assert!(!dialogs.confirm_grants(&recap));
         assert!(!dialogs.confirm_grants(&recap));
@@ -1691,22 +1514,20 @@ mod tests {
             })
             .collect();
         for changes in [many, long] {
-            for command in ["avery mail setup", "avery mail setup apple"] {
-                let script = Script::new();
-                let mut talk = Talk::new();
-                let mut dialogs = Dialogs::new(&script, &mut talk);
-                assert!(!dialogs.confirm_grants(&recap_of(changes.clone(), command)));
-                assert!(script.seen().is_empty());
-                assert_eq!(talk.take_stop(), None);
-                let notes = talk.take_notes();
-                assert!(
-                    notes.contains(
-                        "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: "
-                    ),
-                    "{notes}"
-                );
-                assert!(notes.ends_with(command), "{notes}");
-            }
+            let script = Script::new();
+            let mut talk = Talk::new();
+            let mut dialogs = Dialogs::new(&script, &mut talk);
+            assert!(!dialogs.confirm_grants(&recap_of(changes)));
+            assert!(script.seen().is_empty());
+            assert_eq!(talk.take_stop(), None);
+            let notes = talk.take_notes();
+            assert!(
+                notes.contains(
+                    "zu viele Eintraege fuer einen Dialog, nichts gespeichert, bitte im Terminal: "
+                ),
+                "{notes}"
+            );
+            assert!(notes.ends_with("avery mail setup"), "{notes}");
         }
         Ok(())
     }
@@ -1787,83 +1608,14 @@ mod tests {
     }
 
     #[test]
-    fn the_registration_explanation_goes_on_only_with_the_third_button() -> TestResult {
-        for provider in Provider::remote() {
-            let explanation = provider.oauth().ok_or("oauth")?.explanation;
-            let script = Script::new().then("ask_buttons", Reply::Button(2));
-            let mut talk = Talk::new();
-            assert!(Dialogs::new(&script, &mut talk).explain(Topic::Registration(provider)));
-            let seen = script.seen();
-            assert_eq!(seen[0].text("text"), explanation);
-            assert_eq!(
-                seen[0].field("buttons"),
-                Some(json::parse(
-                    "[\"Abbrechen\", \"Anleitung öffnen\", \"Weiter\"]"
-                )?)
-            );
-            assert_eq!(seen[0].field("default"), Some(Json::Int(2)));
-            for reply in [Reply::Cancel, Reply::Timeout, Reply::Silent] {
-                let script = Script::new().then("ask_buttons", reply);
-                let mut talk = Talk::new();
-                assert!(!Dialogs::new(&script, &mut talk).explain(Topic::Registration(provider)));
-                assert!(talk.take_stop().is_some());
-            }
-        }
-        let script = Script::new();
-        let mut talk = Talk::new();
-        assert!(Dialogs::new(&script, &mut talk).explain(Topic::Registration(Provider::Apple)));
-        assert!(script.seen().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn the_guide_opens_the_chosen_pages_tells_so_and_ends_the_run_without_an_error() -> TestResult {
-        let script = Script::new()
-            .then("ask_buttons", Reply::Button(1))
-            .then("choose_list", Reply::List(vec![0, 4]))
-            .then("open_url", Reply::Done)
-            .then("open_url", Reply::Done)
-            .then("notify", Reply::Done);
-        let mut talk = Talk::new();
-        assert!(!Dialogs::new(&script, &mut talk).explain(Topic::Registration(Provider::Google)));
-        assert_eq!(talk.take_stop(), Some(Stop::Away));
-        let seen = script.seen();
-        assert!(script.mismatches().is_empty(), "{:?}", script.mismatches());
-        assert_eq!(seen[2].text("url"), Page::Readme.url());
-        assert_eq!(seen[3].text("url"), Page::GoogleConsent.url());
-        assert_eq!(seen[1].field("defaults"), Some(json::parse("[0, 1]")?));
-        let labels = seen[1].field("items").ok_or("items")?;
-        assert_eq!(
-            labels.as_array().map(Vec::len),
-            Some(Provider::Google.pages().len())
-        );
-        assert!(seen[4].text("text").contains("startest du Avery erneut"));
-        for reply in [Reply::Cancel, Reply::Timeout] {
-            let script = Script::new()
-                .then("ask_buttons", Reply::Button(1))
-                .then("choose_list", reply);
-            let mut talk = Talk::new();
-            assert!(
-                !Dialogs::new(&script, &mut talk).explain(Topic::Registration(Provider::Microsoft))
-            );
-            assert!(matches!(
-                talk.take_stop(),
-                Some(Stop::Cancelled | Stop::TimedOut)
-            ));
-            assert_eq!(script.seen().len(), 2);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn the_apple_explanation_waits_for_the_go_ahead() -> TestResult {
+    fn the_access_explanation_waits_for_the_go_ahead() -> TestResult {
         let script = Script::new()
             .then("ask_buttons", Reply::Button(1))
             .then("ask_buttons", Reply::Cancel);
         let mut talk = Talk::new();
         let mut dialogs = Dialogs::new(&script, &mut talk);
-        assert!(dialogs.explain(Topic::AppleAccess));
-        assert!(!dialogs.explain(Topic::AppleAccess));
+        assert!(dialogs.explain());
+        assert!(!dialogs.explain());
         let seen = script.seen();
         assert!(seen[0].text("text").contains("Automation"));
         assert_eq!(
@@ -1874,79 +1626,18 @@ mod tests {
     }
 
     #[test]
-    fn the_apple_step_says_to_share_private_accounts_only_like_the_terminal_does() -> TestResult {
+    fn the_access_step_says_to_share_private_accounts_only_like_the_terminal_does() -> TestResult {
         let script = Script::new().then("ask_buttons", Reply::Button(1));
         let mut talk = Talk::new();
-        assert!(Dialogs::new(&script, &mut talk).explain(Topic::AppleAccess));
+        assert!(Dialogs::new(&script, &mut talk).explain());
         let text = script.seen()[0].text("text");
         assert!(text.contains(PRIVATE_ONLY), "{text}");
         assert!(
             text.contains("Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche"),
             "{text}"
         );
-        assert!(APPLE_TEXT.contains(PRIVATE_ONLY));
+        assert!(ACCESS_TEXT.contains(PRIVATE_ONLY));
         assert!(chars(&text) < MAX_TEXT);
-        Ok(())
-    }
-
-    #[test]
-    fn the_client_is_asked_for_a_secret_only_where_the_provider_needs_one() -> TestResult {
-        let script = Script::new().then("ask_text", Reply::text("0a1b-guid"));
-        let mut talk = Talk::new();
-        let got = Dialogs::new(&script, &mut talk).ask_client(Provider::Microsoft);
-        assert_eq!(got, Some(("0a1b-guid".to_string(), String::new())));
-        assert_eq!(script.seen().len(), 1);
-        for replies in [
-            vec![Reply::Cancel],
-            vec![Reply::text("id"), Reply::Cancel],
-            vec![Reply::text("id"), Reply::Timeout],
-            vec![Reply::text(&"x".repeat(401))],
-        ] {
-            let mut script = Script::new();
-            for reply in replies {
-                script = script.then("ask_text", reply);
-            }
-            let mut talk = Talk::new();
-            assert_eq!(
-                Dialogs::new(&script, &mut talk).ask_client(Provider::Google),
-                None
-            );
-            assert!(talk.take_stop().is_some());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn the_write_level_is_chosen_with_buttons_and_cancel_means_nothing() -> TestResult {
-        for (reply, expected) in [
-            (Reply::Button(1), Some(false)),
-            (Reply::Button(2), Some(true)),
-            (Reply::Cancel, None),
-            (Reply::Timeout, None),
-        ] {
-            let script = Script::new().then("ask_buttons", reply);
-            let mut talk = Talk::new();
-            assert_eq!(Dialogs::new(&script, &mut talk).ask_write(), expected);
-            let seen = script.seen();
-            assert_eq!(
-                seen[0].field("buttons"),
-                Some(json::parse(
-                    "[\"Abbrechen\", \"Nur lesen\", \"Lesen und mit Freigabe schreiben\"]"
-                )?)
-            );
-            assert_eq!(seen[0].field("default"), Some(Json::Int(1)));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn the_browser_step_is_a_notification_without_the_address() -> TestResult {
-        let script = Script::new().then("notify", Reply::Done);
-        let mut talk = Talk::new();
-        Dialogs::new(&script, &mut talk).browser();
-        let seen = script.seen();
-        assert!(seen[0].text("text").contains("Browser"));
-        assert!(!seen[0].payload.contains("http"));
         Ok(())
     }
 
@@ -2192,7 +1883,7 @@ function run(argv) {
     #[cfg(target_os = "macos")]
     fn ask_text_request(extra: &str) -> String {
         format!(
-            r#"{{"op": "ask_text", "title": "Titel", "text": "Frage", "default": "", "hidden": false, "max": 20,
+            r#"{{"op": "ask_text", "title": "Titel", "text": "Frage", "default": "", "max": 20,
                  "ok": "Weiter", "cancel": "Abbrechen", "seconds": 30{extra}}}"#
         )
     }
@@ -2200,7 +1891,7 @@ function run(argv) {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_text_script_shows_clean_text_and_maps_every_way_out() -> TestResult {
-        let request = r#"{"op": "ask_text", "title": "Ti\u200btel", "text": "Frage\u202e?\nZweite Zeile", "default": "d", "hidden": true,
+        let request = r#"{"op": "ask_text", "title": "Ti\u200btel", "text": "Frage\u202e?\nZweite Zeile", "default": "d",
                           "max": 20, "ok": "Weiter", "cancel": "Abbrechen", "seconds": 30}"#;
         let shown = probe(r#"{"typed": "abc"}"#, request)?;
         assert!(shown.ok, "{}", shown.error);
@@ -2212,7 +1903,6 @@ function run(argv) {
         assert_eq!(shown.calls(), ["activate", "displayDialog"]);
         assert_eq!(shown.logged("text"), Json::from("Frage?\nZweite Zeile"));
         assert_eq!(shown.option("withTitle"), Json::from("Titel"));
-        assert_eq!(shown.option("hiddenAnswer"), Json::Bool(true));
         assert_eq!(shown.option("defaultAnswer"), Json::from("d"));
         assert_eq!(shown.option("givingUpAfter"), Json::Int(30));
         assert_eq!(shown.option("defaultButton"), Json::from("Weiter"));
@@ -2251,8 +1941,6 @@ function run(argv) {
             separators.logged("text"),
             Json::from("Zeile Zwei Drei Vier\nFuenf")
         );
-        let open = probe(r#"{"typed": "x"}"#, &ask_text_request(""))?;
-        assert_eq!(open.option("hiddenAnswer"), Json::Bool(false));
         Ok(())
     }
 
@@ -2265,7 +1953,6 @@ function run(argv) {
             ask_text_request("").replace("\"Titel\"", &quote(&long(81))),
             ask_text_request("").replace("\"Frage\"", &quote(&long(2001))),
             ask_text_request("").replace("\"default\": \"\"", "\"default\": 1"),
-            ask_text_request("").replace("\"hidden\": false", "\"hidden\": \"true\""),
             ask_text_request("").replace("\"max\": 20", "\"max\": 0"),
             ask_text_request("").replace("\"max\": 20", "\"max\": 1001"),
             ask_text_request("").replace("\"max\": 20", "\"max\": 1.5"),
@@ -2527,63 +2214,6 @@ function run(argv) {
             );
             assert!(answer.calls().is_empty(), "{bad}");
         }
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_page_script_opens_the_allowlisted_pages_and_nothing_else() -> TestResult {
-        for page in Page::ALL {
-            let request = format!(r#"{{"op": "open_url", "url": {}}}"#, quote(page.url()));
-            let shown = probe("{}", &request)?;
-            assert!(shown.ok, "{}: {}", page.url(), shown.error);
-            assert_eq!(shown.calls(), ["openLocation"], "{}", page.url());
-            assert_eq!(shown.logged("url"), Json::from(page.url()));
-        }
-        let too_long = format!("https://github.com/{}", "a".repeat(300));
-        for bad in [
-            "http://github.com/flavioaiello/avery",
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "x-apple.systempreferences:com.apple.preference.security",
-            "https://",
-            "https:///path",
-            "https://exa mple.com/",
-            "https://github.com/a b",
-            "https://github.com/\n",
-            "https://github.com/\u{202e}",
-            "https://github.com/\"",
-            "https://github.com/<x>",
-            "https://user@github.com/",
-            "https://github.com:8443/",
-            "HTTPS://github.com/",
-            " https://github.com/",
-            "ftp://github.com/",
-            "",
-            too_long.as_str(),
-        ] {
-            let request = format!(r#"{{"op": "open_url", "url": {}}}"#, quote(bad));
-            let answer = probe("{}", &request)?;
-            assert!(!answer.ok, "{bad:?}");
-            assert!(
-                answer.error.starts_with("bad_request"),
-                "{bad:?}: {}",
-                answer.error
-            );
-            assert!(answer.calls().is_empty(), "{bad:?}");
-        }
-        for request in [r#"{"op": "open_url"}"#, r#"{"op": "open_url", "url": 5}"#] {
-            let answer = probe("{}", request)?;
-            assert!(!answer.ok && answer.calls().is_empty(), "{request}");
-        }
-        let broken = probe(
-            r#"{"fail": "no browser"}"#,
-            &format!(
-                r#"{{"op": "open_url", "url": {}}}"#,
-                quote(Page::Readme.url())
-            ),
-        )?;
-        assert_eq!(broken.error, "dialog_failed: no browser");
         Ok(())
     }
 

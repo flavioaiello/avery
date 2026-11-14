@@ -897,34 +897,26 @@ mod tests {
                 r#"{{"id": "ACC-1", "name": "Privat Gmail", "type": "imap", "addresses": ["me@gmail.example"], "level": "{level}"}}"#
             )
         };
-        let with = |level: &str| {
-            format!(
-                r#"{{"version": 3, "apple": {{"mail": [{}]}}}}"#,
-                account(level)
-            )
-        };
+        let with = |level: &str| format!(r#"{{"version": 4, "mail": [{}]}}"#, account(level));
         assert_eq!(names(&real_mode(&dir, &with("read"))?)?, READ_TOOLS);
         assert_eq!(names(&real_mode(&dir, &with("write"))?)?.len(), 7);
-        let calendar = r#"{"version": 3, "apple": {"calendars": [{"id": "C", "name": "K", "level": "read"}]}}"#;
+        let calendar =
+            r#"{"version": 4, "calendars": [{"id": "C", "name": "K", "level": "read"}]}"#;
         assert_eq!(names(&real_mode(&dir, calendar)?)?, CALENDAR_TOOLS);
-        let both = r#"{"version": 3,
-            "apple": {"mail": [{"id": "A", "level": "read"}],
-                      "calendars": [{"id": "C", "level": "write"}]}}"#;
-        let remote = r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example", "mail": "write"}]}"#;
-        assert_eq!(names(&real_mode(&dir, remote)?)?.len(), 7);
-        let linked_only = r#"{"version": 3, "accounts": [{"provider": "google", "address": "alice@gmail.example"}]}"#;
-        assert!(names(&real_mode(&dir, linked_only)?)?.is_empty());
+        let both = r#"{"version": 4,
+            "mail": [{"id": "A", "level": "read"}],
+                      "calendars": [{"id": "C", "level": "write"}]}"#;
         let mut expected = read_and_calendar();
         expected.extend(CALENDAR_WRITE_TOOLS);
         assert_eq!(names(&real_mode(&dir, both)?)?, expected);
-        let empty = r#"{"version": 3}"#;
+        let empty = r#"{"version": 4}"#;
         let ctx = real_mode(&dir, empty)?;
         assert!(names(&ctx)?.is_empty());
         assert!(instructions(&ctx).contains("Nothing is enabled yet"));
         for broken in [
             r#"{"version": 2, "allowed_accounts": []}"#,
-            r#"{"version": 3, "apple": {"mail": [{"id": "A", "level": "root"}]}}"#,
-            r#"{"version": 3, "mail": {"accounts": [{"id": "A", "level": "read"}]}}"#,
+            r#"{"version": 4, "mail": [{"id": "A", "level": "root"}]}"#,
+            r#"{"version": 4, "mail": {"accounts": [{"id": "A", "level": "read"}]}}"#,
             "not json",
         ] {
             let ctx = real_mode(&dir, broken)?;

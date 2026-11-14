@@ -1,11 +1,8 @@
-use crate::calendar::{
-    last_day, local_today, Calendar, CalendarInfo, EventDetail, RawEvent, Window,
-};
+use crate::calendar::{last_day, local_today, Calendar, EventDetail, RawEvent, Window};
 use crate::civil::{Date, DateTime};
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{Json, Object};
-use crate::provider::{calendar_origin, Provider};
 use crate::recurrence::{self, Rule};
 use crate::text::{char_len, clean, clean_str, one_line_str, take_chars, to_int};
 use crate::texts::{NO_CALENDARS, UNTRUSTED};
@@ -189,59 +186,27 @@ fn line(occurrence: &Occurrence) -> String {
     format!("- {}", parts.join(" | "))
 }
 
-struct Listing<'a> {
-    provider: Provider,
-    address: &'a str,
-    calendars: Option<Vec<CalendarInfo>>,
-}
-
-fn known_calendars<'a>(ctx: &Context, calendars: &'a [Calendar]) -> ToolResult<Vec<Listing<'a>>> {
-    let mut known: Vec<Listing> = Vec::new();
-    for calendar in calendars {
-        let Some((provider, address, _)) = calendar_origin(&calendar.id) else {
-            continue;
-        };
-        if known
-            .iter()
-            .any(|seen| seen.provider == provider && seen.address == address)
-        {
-            continue;
-        }
-        let listed = match ctx.calendar.calendars(provider, address) {
-            Ok(listed) => Some(listed),
-            Err(error) if error.is_tool_error() => None,
-            Err(error) => return Err(error),
-        };
-        known.push(Listing {
-            provider,
-            address,
-            calendars: listed,
-        });
-    }
-    Ok(known)
-}
-
 pub(crate) fn list_calendars(ctx: &Context, _args: &Object) -> ToolResult<String> {
     let rights = ctx.settings.rights()?;
     let calendars = ctx.settings.allowed_calendars()?;
     if calendars.is_empty() {
         return Err(ToolError::msg(NO_CALENDARS));
     }
-    let known = known_calendars(ctx, &calendars)?;
+    let known = match ctx.calendar.calendars() {
+        Ok(known) => Some(known),
+        Err(error) if error.is_tool_error() => None,
+        Err(error) => return Err(error),
+    };
     let lines: Vec<String> = calendars
         .iter()
         .map(|calendar| {
             let level = rights
                 .calendar_level(&calendar.id)
                 .map_or("read", |level| level.as_str());
-            let found = calendar_origin(&calendar.id).and_then(|(provider, address, raw)| {
-                let listing = known
-                    .iter()
-                    .find(|seen| seen.provider == provider && seen.address == address)?;
-                let listed = listing.calendars.as_ref()?;
-                Some(listed.iter().find(|info| info.id == raw))
-            });
-            let note = match found {
+            let note = match known
+                .as_ref()
+                .map(|list| list.iter().find(|info| info.id == calendar.id))
+            {
                 Some(Some(info)) if !info.writable => " (read-only)",
                 Some(None) => " (not found)",
                 _ => "",
@@ -444,7 +409,6 @@ mod tests {
     use super::*;
     use crate::calendar::{CalendarBackend, CalendarInfo};
     use crate::fake::FakeOptions;
-    use crate::provider::Linker;
     use crate::testutil::{args, settings_at, TempDir, TestResult};
 
     fn demo(write: &str) -> Context {
@@ -637,7 +601,7 @@ mod tests {
     struct Stub(Vec<RawEvent>);
 
     impl CalendarBackend for Stub {
-        fn calendars(&self, _: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
+        fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
             Err(ToolError::msg("down"))
         }
         fn events(&self, _: &Calendar, window: Window) -> ToolResult<Vec<RawEvent>> {
@@ -683,7 +647,6 @@ mod tests {
             settings,
             Box::new(crate::fake::FakeBackend::new(FakeOptions::default())),
             Box::new(Stub(events)),
-            Linker::inert(),
         )
     }
 

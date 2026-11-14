@@ -8,8 +8,6 @@ use crate::error::ToolResult;
 use crate::journal;
 use crate::json::{Json, Object};
 use crate::localtime;
-use crate::provider::{calendar_parts, Provider};
-use crate::sha256::sha256_hex;
 use crate::text::text_of;
 
 pub(crate) use crate::journal::Origin;
@@ -30,7 +28,7 @@ pub(crate) const MAX_KEPT_NOTES: usize = 4000;
 pub(crate) const MAX_KEPT_URL: usize = 500;
 
 pub(crate) trait CalendarBackend {
-    fn calendars(&self, source: Provider, address: &str) -> ToolResult<Vec<CalendarInfo>>;
+    fn calendars(&self) -> ToolResult<Vec<CalendarInfo>>;
     fn events(&self, calendar: &Calendar, window: Window) -> ToolResult<Vec<RawEvent>>;
     fn event(&self, calendar: &Calendar, uid: &str) -> ToolResult<EventDetail>;
     fn change(
@@ -374,13 +372,7 @@ pub(crate) fn demo_entries() -> Vec<CalendarEntry> {
 const SHORT_ID: usize = 8;
 
 fn short_id(id: &str) -> String {
-    match calendar_parts(id) {
-        Some((_, address, _)) => {
-            let digest: String = sha256_hex(id.as_bytes()).chars().take(SHORT_ID).collect();
-            format!("{address}:{digest}")
-        }
-        None => id.chars().take(SHORT_ID).collect(),
-    }
+    id.chars().take(SHORT_ID).collect()
 }
 
 pub(crate) fn with_labels(entries: Vec<CalendarEntry>) -> Vec<Calendar> {
@@ -430,88 +422,12 @@ mod tests {
         assert_eq!(twins[2].label, "Other");
     }
 
-    fn labels(calendars: &[Calendar]) -> Vec<&str> {
-        calendars
-            .iter()
-            .map(|calendar| calendar.label.as_str())
-            .collect()
-    }
-
-    #[test]
-    fn duplicate_cloud_calendars_carry_the_account_address_and_a_digest_of_the_id() {
-        let calendars = with_labels(vec![
-            entry("microsoft:bob@outlook.example:AQMkCALENDAR1", "Calendar"),
-            entry("microsoft:eve@outlook.example:AQMkCALENDAR1", "calendar"),
-            entry("microsoft:bob@outlook.example:AQMkCALENDAR2", "Birthdays"),
-        ]);
-        assert_eq!(
-            labels(&calendars),
-            [
-                "Calendar <bob@outlook.example:aafe82be>",
-                "calendar <eve@outlook.example:6c3c914d>",
-                "Birthdays",
-            ]
-        );
-    }
-
-    #[test]
-    fn calendars_of_one_account_whose_ids_share_a_long_prefix_stay_apart() {
-        let prefix = "AQMkADAwATNiZmYAZC0yMzI1LTcyMzQtMDACLTAwCgBGAAADAAAAAAAA";
-        let calendars = with_labels(vec![
-            entry(
-                &format!("microsoft:bob@outlook.example:{prefix}B_OVmxAAA="),
-                "Birthdays",
-            ),
-            entry(
-                &format!("microsoft:bob@outlook.example:{prefix}B-FEkAAA="),
-                "Birthdays",
-            ),
-        ]);
-        assert_eq!(
-            labels(&calendars),
-            [
-                "Birthdays <bob@outlook.example:cb91960d>",
-                "Birthdays <bob@outlook.example:75ec5b39>",
-            ]
-        );
-    }
-
-    #[test]
-    fn the_same_address_at_two_providers_gets_different_labels() {
-        let calendars = with_labels(vec![
-            entry("google:bob@example.org:primary", "Calendar"),
-            entry("microsoft:bob@example.org:primary", "Calendar"),
-        ]);
-        assert_eq!(
-            labels(&calendars),
-            [
-                "Calendar <bob@example.org:1e50393a>",
-                "Calendar <bob@example.org:7995e6a0>",
-            ]
-        );
-    }
-
-    #[test]
-    fn apple_ids_keep_their_first_eight_characters_next_to_cloud_calendars() {
-        let calendars = with_labels(vec![
-            entry("0123456789ABC", "Calendar"),
-            entry("microsoft:bob@outlook.example:AQMkCALENDAR1", "Calendar"),
-        ]);
-        assert_eq!(
-            labels(&calendars),
-            [
-                "Calendar <01234567>",
-                "Calendar <bob@outlook.example:aafe82be>",
-            ]
-        );
-    }
-
     #[test]
     fn every_duplicate_label_names_exactly_one_calendar_and_the_plain_name_names_all() {
         let calendars = with_labels(vec![
-            entry("microsoft:bob@outlook.example:AQMkCALENDAR1", "Calendar"),
-            entry("microsoft:eve@outlook.example:AQMkCALENDAR1", "Calendar"),
-            entry("google:bob@gmail.example:primary", "Calendar"),
+            entry("AAAAAAAA-0001", "Calendar"),
+            entry("BBBBBBBB-0002", "Calendar"),
+            entry("CCCCCCCC-0003", "calendar"),
         ]);
         for calendar in &calendars {
             let wanted = calendar.label.to_lowercase();

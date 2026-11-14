@@ -12,7 +12,6 @@ use crate::console::Screen;
 use crate::error::{ToolError, ToolResult};
 use crate::json::{self, Json, Object, ParseError};
 use crate::osascript::{App, Finished, Host};
-use crate::provider::Provider;
 use crate::sendlog::{LogEntry, Outcome};
 use std::collections::VecDeque;
 use std::error::Error;
@@ -29,15 +28,6 @@ pub(crate) type TestResult = Result<(), Box<dyn Error>>;
 
 pub(crate) fn j(text: &str) -> Result<Json, ParseError> {
     json::parse(text)
-}
-
-pub(crate) fn gm(text: &str) -> String {
-    text.replace("{gmail}", "gmail.com")
-        .replace("{googlemail}", "googlemail.com")
-}
-
-pub(crate) fn gmail(local: &str) -> String {
-    format!("{local}@{}", "gmail.com")
 }
 
 pub(crate) fn mid(text: &str) -> Result<crate::backend::MessageId, Box<dyn Error>> {
@@ -160,12 +150,8 @@ impl Backend for Listing {
 }
 
 impl CalendarBackend for Listing {
-    fn calendars(&self, provider: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
-        if provider == Provider::Apple {
-            Ok(self.calendars.clone())
-        } else {
-            Err(ToolError::msg("only listed"))
-        }
+    fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
+        Ok(self.calendars.clone())
     }
 
     fn events(&self, _: &Calendar, _: Window) -> ToolResult<Vec<RawEvent>> {
@@ -234,7 +220,7 @@ impl Backend for Untouchable {
 }
 
 impl CalendarBackend for Untouchable {
-    fn calendars(&self, _: Provider, _: &str) -> ToolResult<Vec<CalendarInfo>> {
+    fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
         self.touched()
     }
 

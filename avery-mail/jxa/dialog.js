@@ -1,6 +1,5 @@
 var MAX_TITLE = 80, MAX_TEXT = 2000, MAX_NOTE = 300, MAX_LABEL = 40, MAX_ITEMS = 500, MAX_ITEM = 160;
-var MAX_ANSWER = 1000, MAX_SECONDS = 3600, MAX_URL = 300;
-var URL_PATTERN = /^https:\/\/[A-Za-z0-9.-]+(\/[A-Za-z0-9._~!$&'()*+,;=:@%\/#?-]*)?$/;
+var MAX_ANSWER = 1000, MAX_SECONDS = 3600;
 
 function run(argv) {
   var req = JSON.parse(argv[0]);
@@ -13,13 +12,10 @@ function run(argv) {
 
 function dispatch(req) {
   if (req.op === 'ping') { return {jxa: true}; }
-  if (req.op === 'approve_send') { return {decision: askApproval(req, req.seconds)}; }
-  if (req.op === 'approve_change') { return {decision: changeDecision(req, req.before, req.after)}; }
   if (req.op === 'ask_text') { return askText(req); }
   if (req.op === 'ask_buttons') { return askButtons(req); }
   if (req.op === 'choose_list') { return chooseList(req); }
   if (req.op === 'notify') { return notify(req); }
-  if (req.op === 'open_url') { return openUrl(req); }
   throw new Error('unknown_op');
 }
 
@@ -75,13 +71,12 @@ function askText(req) {
   var title = field(req.title, MAX_TITLE, 'title'), text = field(req.text, MAX_TEXT, 'text');
   var initial = field(req['default'], MAX_ANSWER, 'default'), ok = label(req.ok, 'ok'), cancel = label(req.cancel, 'cancel');
   var max = whole(req.max, 1, MAX_ANSWER, 'max'), seconds = whole(req.seconds, 1, MAX_SECONDS, 'seconds');
-  if (typeof req.hidden !== 'boolean') { bad('hidden'); }
   if (ok === cancel) { bad('ok'); }
   var look = icon(req.icon);
   var app = screen(true), answer;
   try {
     answer = app.displayDialog(text, {
-      withTitle: title, defaultAnswer: initial, hiddenAnswer: req.hidden, buttons: [cancel, ok],
+      withTitle: title, defaultAnswer: initial, buttons: [cancel, ok],
       defaultButton: ok, cancelButton: cancel, withIcon: look, givingUpAfter: seconds
     });
   } catch (e) {
@@ -162,16 +157,6 @@ function notify(req) {
   var title = field(req.title, MAX_TITLE, 'title'), text = field(req.text, MAX_NOTE, 'text');
   try {
     screen(false).displayNotification(text, {withTitle: title});
-  } catch (e) {
-    throw broken(e);
-  }
-  return {result: 'ok'};
-}
-
-function openUrl(req) {
-  if (typeof req.url !== 'string' || req.url.length > MAX_URL || !URL_PATTERN.test(req.url)) { bad('url'); }
-  try {
-    screen(false).openLocation(req.url);
   } catch (e) {
     throw broken(e);
   }

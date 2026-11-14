@@ -123,28 +123,6 @@ pub(crate) fn one_line(value: Option<&Json>, limit: usize) -> String {
     one_line_str(&text_of(value), limit)
 }
 
-pub(crate) const MAX_ADDRESS: usize = 254;
-
-pub(crate) fn plain_address(text: &str) -> bool {
-    let Some((local, domain)) = text.split_once('@') else {
-        return false;
-    };
-    text.len() <= MAX_ADDRESS
-        && !local.is_empty()
-        && local.len() <= 64
-        && domain.contains('.')
-        && !domain.contains('@')
-        && local
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
-        && domain
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
-        && !domain.starts_with(['.', '-'])
-        && !domain.ends_with(['.', '-'])
-        && !domain.contains("..")
-}
-
 pub(crate) fn bracketed(text: &str) -> Option<&str> {
     let mut start = 0;
     while let Some(offset) = text.get(start..)?.find('<') {
@@ -235,35 +213,6 @@ pub(crate) fn to_bool(value: Option<&Json>) -> bool {
 mod tests {
     use super::*;
     use crate::testutil::{j, TestResult};
-
-    #[test]
-    fn plain_addresses_are_ascii_and_have_a_dotted_domain() {
-        for good in ["alice@gmail.example", "a.b+c_d%e-f@mail.x-y.example"] {
-            assert!(plain_address(good), "{good:?}");
-        }
-        for bad in [
-            "",
-            "alice",
-            "alice@",
-            "@x.example",
-            "a b@x.example",
-            "a:b@x.example",
-            "a@x",
-            "a@x..example",
-            "a@-x.example",
-            "a@x.example-",
-            "a@b@x.example",
-            "\u{e4}@x.example",
-            "a\"@x.example",
-        ] {
-            assert!(!plain_address(bad), "{bad:?}");
-        }
-        assert!(!plain_address(&format!("{}@x.example", "a".repeat(65))));
-        assert!(!plain_address(&format!(
-            "a@{}.example",
-            "b".repeat(MAX_ADDRESS)
-        )));
-    }
 
     #[test]
     fn clean_strips_control_and_invisible_characters() {

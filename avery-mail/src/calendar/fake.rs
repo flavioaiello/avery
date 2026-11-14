@@ -8,7 +8,6 @@ use crate::calendar::{
 use crate::civil::{Date, DateTime, Weekday};
 use crate::error::{ToolError, ToolResult};
 use crate::fake::FakeOptions;
-use crate::provider::Provider;
 
 fn calendar(id: &str, name: &str, writable: bool) -> CalendarInfo {
     CalendarInfo {
@@ -196,7 +195,7 @@ fn apply(detail: &mut EventDetail, fields: &EventFields) {
 }
 
 impl CalendarBackend for FakeCalendar {
-    fn calendars(&self, _source: Provider, _address: &str) -> ToolResult<Vec<CalendarInfo>> {
+    fn calendars(&self) -> ToolResult<Vec<CalendarInfo>> {
         Ok(calendars())
     }
 

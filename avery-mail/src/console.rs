@@ -4,11 +4,10 @@ use std::io::{BufRead, Write};
 
 use crate::error::ToolError;
 use crate::osascript::Host;
-use crate::provider::Provider;
 use crate::rights::Level;
 use crate::server::{self, Line};
 
-pub(crate) use dialogs::{Buttons, Dialogs, Icon, List, Stop, Talk};
+pub(crate) use dialogs::{Buttons, Dialogs, Icon, Stop, Talk};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Area {
@@ -28,7 +27,6 @@ pub(crate) struct Recap {
     pub(crate) mail: String,
     pub(crate) calendars: String,
     pub(crate) changes: Vec<GrantChange>,
-    pub(crate) command: String,
 }
 
 const MAX_ANSWER_BYTES: usize = 8192;
@@ -37,12 +35,6 @@ const INVALID: &str = "Ungueltige Eingabe.";
 pub(crate) const PRIVATE_ONLY: &str =
     "Nur PRIVATE Konten und Kalender freigeben, niemals geschaeftliche.";
 pub(crate) const RESTART_GOOSE: &str = "Goose danach neu starten.";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Topic {
-    Registration(Provider),
-    AppleAccess,
-}
 
 pub(crate) struct Screen<'a> {
     pub(crate) host: &'a dyn Host,
@@ -99,31 +91,10 @@ impl<'a> Console<'a> {
         }
     }
 
-    pub(crate) fn explain(&mut self, topic: Topic) -> bool {
+    pub(crate) fn explain(&mut self) -> bool {
         match self {
-            Console::Terminal(terminal) => terminal.explain(topic),
-            Console::Dialogs(dialogs) => dialogs.explain(topic),
-        }
-    }
-
-    pub(crate) fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
-        match self {
-            Console::Terminal(terminal) => terminal.ask_client(provider),
-            Console::Dialogs(dialogs) => dialogs.ask_client(provider),
-        }
-    }
-
-    pub(crate) fn ask_write(&mut self) -> Option<bool> {
-        match self {
-            Console::Terminal(terminal) => terminal.ask_write(),
-            Console::Dialogs(dialogs) => dialogs.ask_write(),
-        }
-    }
-
-    pub(crate) fn browser(&mut self, url: &str) {
-        match self {
-            Console::Terminal(terminal) => terminal.browser(url),
-            Console::Dialogs(dialogs) => dialogs.browser(),
+            Console::Terminal(terminal) => terminal.explain(),
+            Console::Dialogs(dialogs) => dialogs.explain(),
         }
     }
 
@@ -166,60 +137,10 @@ impl Terminal<'_> {
         self.confirm("Korrekt?")
     }
 
-    fn explain(&mut self, topic: Topic) -> bool {
-        match topic {
-            Topic::Registration(provider) => {
-                for line in provider.oauth().map_or(&[][..], |oauth| oauth.registration) {
-                    self.say(line);
-                }
-                self.say(&format!(
-                    "Details: README, Abschnitt '{}'.",
-                    Provider::remote_names(" and ")
-                ));
-                self.say("Avery speichert die Anmeldung im macOS-Schluesselbund (Dienst avery-mail), nie in einer Datei.");
-                self.say("Der Agent bekommt nur das, was du danach mit 'avery mail setup' oder hier freigibst.");
-            }
-            Topic::AppleAccess => {
-                self.say(&format!(
-                    "{} einbeziehen (optional). Dazu startet Avery Mail und Kalender;",
-                    Provider::Apple.display()
-                ));
-                self.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
-            }
-        }
+    fn explain(&mut self) -> bool {
+        self.say("Avery liest und aendert Mail und Kalender ueber Apple Mail und Kalender. Dazu startet Avery beide Programme;");
+        self.say("macOS fragt beim ersten Mal nach der Automation-Berechtigung. Avery braucht dafuer keine Anmeldung.");
         true
-    }
-
-    fn ask_client(&mut self, provider: Provider) -> Option<(String, String)> {
-        let Some(id) = self.ask("Client-ID: ") else {
-            self.say(INVALID);
-            return None;
-        };
-        if !provider.oauth().is_some_and(|oauth| oauth.secret) {
-            return Some((id, String::new()));
-        }
-        let Some(secret) = self.ask("Client-Secret: ") else {
-            self.say(INVALID);
-            return None;
-        };
-        Some((id, secret))
-    }
-
-    fn ask_write(&mut self) -> Option<bool> {
-        let answer = self.ask("Stufe: 1 = lesen, 2 = schreiben (Entwuerfe, Senden, Termine aendern; jedes Mal mit Klick) [1]: ");
-        match answer.as_deref().map(str::trim) {
-            Some("" | "1") => Some(false),
-            Some("2") => Some(true),
-            _ => {
-                self.say(INVALID);
-                None
-            }
-        }
-    }
-
-    fn browser(&mut self, url: &str) {
-        self.say("\nDer Browser oeffnet sich. Melde dich an und erlaube den Zugriff. Falls nicht, oeffne diese Adresse:");
-        self.say(&format!("  {url}"));
     }
 
     fn ask_levels(&mut self, choices: &[Choice]) -> Result<Vec<Option<Level>>, u8> {
@@ -380,86 +301,14 @@ mod tests {
     }
 
     #[test]
-    fn the_client_is_asked_with_a_secret_only_where_the_provider_needs_one() {
-        let (mut out, mut reader) = terminal("id-1\nsecret-1\n");
-        let mut console = Console::terminal(&mut reader, &mut out);
-        assert_eq!(
-            console.ask_client(Provider::Google),
-            Some(("id-1".to_string(), "secret-1".to_string()))
-        );
-        assert_eq!(String::from_utf8_lossy(&out), "Client-ID: Client-Secret: ");
-        let (mut out, mut reader) = terminal("id-2\nignored\n");
-        let mut console = Console::terminal(&mut reader, &mut out);
-        assert_eq!(
-            console.ask_client(Provider::Microsoft),
-            Some(("id-2".to_string(), String::new()))
-        );
-        assert_eq!(String::from_utf8_lossy(&out), "Client-ID: ");
-        for (input, shown) in [("", "Client-ID: "), ("id\n", "Client-ID: Client-Secret: ")] {
-            let (mut out, mut reader) = terminal(input);
-            let mut console = Console::terminal(&mut reader, &mut out);
-            assert_eq!(console.ask_client(Provider::Google), None, "{input:?}");
-            assert_eq!(String::from_utf8_lossy(&out), format!("{shown}{INVALID}\n"));
-        }
-    }
-
-    #[test]
-    fn the_write_level_defaults_to_read_and_refuses_nonsense() {
-        for (input, expected) in [
-            ("\n", Some(false)),
-            ("1\n", Some(false)),
-            (" 2 \n", Some(true)),
-            ("3\n", None),
-            ("x\n", None),
-            ("", None),
-        ] {
-            let (mut out, mut reader) = terminal(input);
-            let mut console = Console::terminal(&mut reader, &mut out);
-            assert_eq!(console.ask_write(), expected, "{input:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&out).contains(INVALID),
-                expected.is_none(),
-                "{input:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn topics_are_explained_in_lines_and_never_stop_the_command_line() {
-        for provider in Provider::remote() {
-            let (mut out, mut reader) = terminal("");
-            let mut console = Console::terminal(&mut reader, &mut out);
-            assert!(console.explain(Topic::Registration(provider)));
-            let text = String::from_utf8_lossy(&out).into_owned();
-            let registration = provider.oauth().map_or(&[][..], |oauth| oauth.registration);
-            assert!(!registration.is_empty());
-            for line in registration {
-                assert!(text.contains(line), "{text}");
-            }
-            assert!(text.contains("Schluesselbund"), "{text}");
-        }
+    fn the_terminal_explains_the_automation_permission_and_never_stops_the_command() {
         let (mut out, mut reader) = terminal("");
         let mut console = Console::terminal(&mut reader, &mut out);
-        assert!(console.explain(Topic::AppleAccess));
+        assert!(console.explain());
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(text.contains("Automation-Berechtigung"), "{text}");
-        assert!(
-            text.contains("Apple Mail und Kalender einbeziehen"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn the_browser_hint_names_the_address() {
-        let (mut out, mut reader) = terminal("");
-        let mut console = Console::terminal(&mut reader, &mut out);
-        console.browser("https://accounts.example/auth?x=1");
-        let text = String::from_utf8_lossy(&out).into_owned();
-        assert!(text.contains("Der Browser oeffnet sich"), "{text}");
-        assert!(
-            text.ends_with("  https://accounts.example/auth?x=1\n"),
-            "{text}"
-        );
+        assert!(text.contains("Apple Mail und Kalender"), "{text}");
+        assert!(text.contains("keine Anmeldung"), "{text}");
     }
 
     #[test]
@@ -467,19 +316,16 @@ mod tests {
         use crate::testutil::{Reply, Script};
         let script = Script::new()
             .then("ask_buttons", Reply::Button(1))
-            .then("notify", Reply::Done)
             .then("ask_text", Reply::text("42"));
         let mut talk = Talk::new();
         let mut console = Console::Dialogs(Dialogs::new(&script, &mut talk));
         console.say("Neue Freigaben:");
         console.hint("Goose danach neu starten.");
         assert!(console.confirm("Korrekt?"));
-        console.browser("https://accounts.example/auth?state=geheim");
         assert_eq!(console.ask("Nummer?"), Some("42".to_string()));
         let seen = script.seen();
         assert_eq!(seen[0].text("text"), "Neue Freigaben:\n\nKorrekt?");
-        assert!(!seen[1].payload.contains("geheim"), "{}", seen[1].payload);
-        assert_eq!(seen[2].text("text"), "Nummer?");
+        assert_eq!(seen[1].text("text"), "Nummer?");
         assert!(script.mismatches().is_empty());
         Ok(())
     }
