@@ -307,13 +307,30 @@ function isGmail(acc) {
   try { return /(^|\.)(gmail|googlemail)\.com$/i.test(String(acc.serverName())); } catch (e) { return false; }
 }
 
+function midOf(m) {
+  try {
+    var mid = m.messageId();
+    return mid ? String(mid) : null;
+  } catch (e) { return null; }
+}
+
+function listing(box) {
+  var ids, has = {}, i;
+  try { ids = box.ref.messages.id(); } catch (e) { return null; }
+  for (i = 0; i < ids.length; i++) { has[ids[i]] = true; }
+  ids.sort(function (a, b) { return b - a; });
+  return {has: has, newest: ids};
+}
+
 function moveItems(acc, box, ids) {
-  var items = [], i, m, snap;
+  var items = [], listed = listing(box), i, m, snap;
+  if (listed === null) { throw new Error('message_not_found'); }
   for (i = 0; i < ids.length; i++) {
+    if (listed.has[ids[i]] !== true) { throw new Error('message_not_found'); }
     m = box.ref.messages.byId(ids[i]);
     if (!ownedBy(m, acc)) { throw new Error('message_not_in_account'); }
     try { snap = snapshotOfMessage(m); } catch (e) { throw new Error('message_not_found'); }
-    items.push({id: ids[i], subject: snap.subject, from: snap.from, ts: snap.ts});
+    items.push({id: ids[i], subject: snap.subject, from: snap.from, ts: snap.ts, mid: midOf(m)});
   }
   return items;
 }
@@ -348,19 +365,52 @@ function createMailbox(acc, name) {
   return made;
 }
 
-function stillThere(box, id) {
-  try { box.ref.messages.byId(id).id(); return true; } catch (e) { return false; }
+function countOf(box) {
+  try { return box.ref.messages.length; } catch (e) { return -1; }
 }
 
-function settle(src, target, ids) {
-  var left = ids.slice(), lost = ids.length, tries;
-  for (tries = 0; tries < 8; tries++) {
-    left = left.filter(function (id) { return stillThere(src, id); });
-    lost = left.filter(function (id) { return !stillThere(target, id); }).length;
-    if (lost === 0) { break; }
-    sleepSeconds(0.25);
+function subCountOf(box) {
+  try { return box.ref.mailboxes.length; } catch (e) { return -1; }
+}
+
+function newestMids(box, listed, room) {
+  var found = {}, i;
+  for (i = 0; i < listed.newest.length && i < room; i++) {
+    try { found[String(box.ref.messages.byId(listed.newest[i]).messageId())] = true; } catch (e) {}
   }
-  return {kept: left.length - lost, lost: lost};
+  return found;
+}
+
+function confirmMove(src, target, items) {
+  var last = -2, calm = 0, tries, now, room = items.length + 5, quiet = Math.min(6 + 2 * items.length, 60),
+      inSource, inTarget, midsSource, midsTarget, i, item, here, there,
+      result = {moved: 0, kept: 0, refused: 0, lost: 0};
+  for (tries = 0; tries < 120 && calm < quiet; tries++) {
+    sleepSeconds(0.5);
+    now = countOf(target);
+    calm = now === last ? calm + 1 : 0;
+    last = now;
+  }
+  if (calm < quiet) { throw new Error('move_incomplete:' + items.length); }
+  inSource = listing(src);
+  inTarget = listing(target);
+  if (inSource === null || inTarget === null) { throw new Error('move_incomplete:' + items.length); }
+  midsSource = newestMids(src, inSource, room);
+  midsTarget = newestMids(target, inTarget, room);
+  for (i = 0; i < items.length; i++) {
+    item = items[i];
+    here = inSource.has[item.id] === true;
+    there = inTarget.has[item.id] === true || (item.mid !== null && midsTarget[item.mid] === true);
+    if (there) {
+      result.moved++;
+      if (here) { result.kept++; }
+    } else if (here || (item.mid !== null && midsSource[item.mid] === true)) {
+      result.refused++;
+    } else {
+      result.lost++;
+    }
+  }
+  return result;
 }
 
 function moveMessages(acc, req) {
@@ -388,6 +438,7 @@ function moveMessages(acc, req) {
     created = true;
   }
   if (target.path === src.path) { throw new Error('same_mailbox'); }
+  var bare = countOf(target) === 0 && subCountOf(target) === 0;
   try {
     for (i = 0; i < ids.length; i++) {
       app.move(src.ref.messages.byId(ids[i]), {to: target.ref});
@@ -396,7 +447,10 @@ function moveMessages(acc, req) {
   } catch (e) {
     throw new Error('move_state_unknown: ' + moved + ' of ' + ids.length + ': ' + String((e && e.message) || e));
   }
-  var after = settle(src, target, ids);
+  var after = confirmMove(src, target, items);
   if (after.lost > 0) { throw new Error('move_incomplete:' + after.lost); }
-  return {status: 'moved', source: src.path, target: target.path, created: created, moved: ids.length, kept: after.kept};
+  if (after.moved === 0) {
+    throw new Error(created ? 'move_rejected_new_mailbox' : bare ? 'move_rejected_empty' : 'move_rejected');
+  }
+  return {status: 'moved', source: src.path, target: target.path, created: created, moved: after.moved, kept: after.kept, refused: after.refused};
 }

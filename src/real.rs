@@ -393,7 +393,7 @@ mod tests {
     fn a_move_sends_numeric_ids_the_label_the_limits_and_a_longer_deadline() -> TestResult {
         let (backend, script) = backend(vec![
             ok(
-                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 2, "kept": 1}"#,
+                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 2, "kept": 1, "refused": 1}"#,
             ),
             ok(r#"{"status": "declined"}"#),
             ok(r#"{"status": "timeout"}"#),
@@ -406,7 +406,8 @@ mod tests {
                 target: "Werbung".into(),
                 created: true,
                 count: 2,
-                kept: 1
+                kept: 1,
+                refused: 1
             }
         );
         assert_eq!(
@@ -1128,11 +1129,22 @@ var DECISION = 'Verschieben';
 var SCENARIO = null;
 var WORLD = null;
 var ACC = null;
+var CLOCK = 0;
+var LATER = [];
+var NEXT_ID = 900;
+var CHURN = null;
+var BOXES = [];
 function MOCKAPP() {
   return {
     includeStandardAdditions: false,
     activate: function () {},
-    delay: function () {},
+    delay: function (seconds) {
+      CLOCK += seconds;
+      var due = LATER.filter(function (event) { return event.at <= CLOCK; });
+      LATER = LATER.filter(function (event) { return event.at > CLOCK; });
+      due.forEach(function (event) { event.run(); });
+      if (CHURN) { CHURN.items.push({id: NEXT_ID++, subject: 'More', sender: 'x', ts: 1, mid: '<more' + NEXT_ID + '@x>'}); }
+    },
     displayDialog: function (text) {
       LOG.dialog = text;
       LOG.dialogs++;
@@ -1155,21 +1167,27 @@ function named(list) {
 }
 function box(title) {
   var b = {title: title, items: [], mailboxes: named([])};
-  b.messages = {byId: function (id) { return message(b, id); }};
+  BOXES.push(b);
+  b.messages = {
+    byId: function (id) { return message(b, id); },
+    id: function () { return b.items.map(function (m) { return m.id; }); }
+  };
+  Object.defineProperty(b.messages, 'length', {get: function () { return b.items.length; }});
   return b;
 }
 function message(b, want) {
-  var found = null;
-  b.items.forEach(function (m) { if (m.id === want) { found = m; } });
+  var found = null, home = b;
+  BOXES.forEach(function (x) { x.items.forEach(function (m) { if (m.id === want) { found = m; home = x; } }); });
   function need(read) {
-    if (!found) { throw new Error("Can't get message id " + want + " of mailbox " + b.title); }
+    if (!found) { throw new Error("Can't get message id " + want); }
     return read();
   }
   return {
-    box: b, want: want, found: found,
+    box: home, want: want, found: found,
     id: function () { return need(function () { return found.id; }); },
     subject: function () { return need(function () { return found.subject; }); },
     sender: function () { return need(function () { return found.sender; }); },
+    messageId: function () { return need(function () { return found.mid === undefined ? null : found.mid; }); },
     dateReceived: function () { return need(function () { return new Date(found.ts * 1000); }); },
     mailbox: function () {
       return {account: function () { return {id: function () { return SCENARIO.owner || 'ACC-1'; }}; }};
@@ -1178,7 +1196,9 @@ function message(b, want) {
 }
 function build() {
   var inbox = box('INBOX'), archive = box('Archiv'), gmail = box('[Gmail]'), all = box('All Mail'), top = named([]);
-  inbox.items = SCENARIO.messages.map(function (m) { return {id: m.id, subject: m.subject, sender: m.sender, ts: m.ts}; });
+  inbox.items = SCENARIO.messages.map(function (m) { return {id: m.id, subject: m.subject, sender: m.sender, ts: m.ts, mid: m.mid}; });
+  for (var k = 0; k < (SCENARIO.archiveHas || 0); k++) { archive.items.push({id: 700 + k, subject: 'Old', sender: 'x', ts: 1, mid: '<old' + k + '@x>'}); }
+  if (SCENARIO.archiveChild) { archive.mailboxes.push(box('2024')); }
   gmail.mailboxes.push(all);
   top.push(inbox); top.push(archive); top.push(gmail);
   top.push = function (b) {
@@ -1197,8 +1217,20 @@ var fakeMail = {
     if (SCENARIO.moveThrowsAt === LOG.moves.length + 1) { throw new Error('Mail got an error: boom'); }
     LOG.moves.push(m.want + '>' + opts.to.title);
     if (SCENARIO.stay || !m.found) { return; }
-    if (!SCENARIO.label) { m.box.items = m.box.items.filter(function (x) { return x.id !== m.want; }); }
-    opts.to.items.push(m.found);
+    var from = m.box, target = opts.to, item = m.found, copy = item;
+    if (SCENARIO.churn) { CHURN = target; }
+    if (!SCENARIO.label) { from.items = from.items.filter(function (x) { return x.id !== m.want; }); }
+    if (SCENARIO.vanish) { return; }
+    if (SCENARIO.renumber) { copy = JSON.parse(JSON.stringify(item)); copy.id = NEXT_ID++; }
+    target.items.push(copy);
+    if (SCENARIO.rollbackAll || (SCENARIO.rollbackIds || []).indexOf(m.want) >= 0) {
+      LATER.push({at: CLOCK + (SCENARIO.rollbackAfter || 1), run: function () {
+        target.items = target.items.filter(function (x) { return x !== copy; });
+        var back = JSON.parse(JSON.stringify(item));
+        back.id = NEXT_ID++;
+        from.items.push(back);
+      }});
+    }
   }
 };
 function mail() { return fakeMail; }
@@ -1222,9 +1254,9 @@ function run(argv) {
 
     #[cfg(target_os = "macos")]
     const MESSAGES: &str = r#"[
-        {"id": 5, "subject": "Newsletter November", "sender": "Shop <news@shop.example>", "ts": 1700000000},
-        {"id": 6, "subject": "Rechnung Oktober", "sender": "Stadtwerke <rechnung@stadtwerke.example>", "ts": 1700003600},
-        {"id": 7, "subject": "Angebot f\u00fcr dich", "sender": "Markt <angebot@markt.example>", "ts": 1700007200}]"#;
+        {"id": 5, "mid": "<m5@shop.example>", "subject": "Newsletter November", "sender": "Shop <news@shop.example>", "ts": 1700000000},
+        {"id": 6, "mid": "<m6@stadtwerke.example>", "subject": "Rechnung Oktober", "sender": "Stadtwerke <rechnung@stadtwerke.example>", "ts": 1700003600},
+        {"id": 7, "mid": "<m7@markt.example>", "subject": "Angebot f\u00fcr dich", "sender": "Markt <angebot@markt.example>", "ts": 1700007200}]"#;
 
     #[cfg(target_os = "macos")]
     fn scenario(extra: &str) -> String {
@@ -1307,7 +1339,7 @@ function run(argv) {
         assert_eq!(
             at(&answer, &["data"]),
             Some(&j(
-                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 0}"#
+                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 0, "refused": 0}"#
             )?)
         );
         assert_eq!(
@@ -1360,7 +1392,7 @@ function run(argv) {
         assert_eq!(
             at(&approved, &["data"]),
             Some(&j(
-                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 1, "kept": 0}"#
+                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 1, "kept": 0, "refused": 0}"#
             )?),
             "{approved:?}"
         );
@@ -1518,6 +1550,18 @@ function run(argv) {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn ids_that_live_in_another_mailbox_are_refused_before_the_dialog() -> TestResult {
+        let request =
+            move_req("[5]", "INBOX", false).replace("\"mailbox\": null", "\"mailbox\": \"Archiv\"");
+        let answer = move_probe(&scenario(""), &request, "Verschieben")?;
+        assert_eq!(text_of(at(&answer, &["error"])), "message_not_found");
+        assert_eq!(at(&answer, &["log", "dialogs"]), Some(&Json::Int(0)));
+        assert!(crate::account::string_list(at(&answer, &["log", "moves"])).is_empty());
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn failures_after_the_click_say_what_was_done() -> TestResult {
         let moves = |answer: &Json| crate::account::string_list(at(answer, &["log", "moves"]));
         let create = move_req("[5]", "Werbung", true);
@@ -1534,8 +1578,126 @@ function run(argv) {
         assert!(text_of(at(&answer, &["error"])).starts_with("move_state_unknown: 1 of 3"));
         assert_eq!(moves(&answer), ["5>Archiv"]);
         let answer = move_probe(&scenario(r#""stay": true"#), &existing, "Verschieben")?;
-        assert_eq!(text_of(at(&answer, &["error"])), "move_incomplete:3");
+        assert_eq!(text_of(at(&answer, &["error"])), "move_rejected_empty");
         assert_eq!(moves(&answer).len(), 3);
+        let busy = move_probe(
+            &scenario(r#""stay": true, "archiveHas": 2"#),
+            &existing,
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&busy, &["error"])), "move_rejected");
+        let parent = move_probe(
+            &scenario(r#""stay": true, "archiveChild": true"#),
+            &existing,
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&parent, &["error"])), "move_rejected");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_move_that_the_server_takes_back_is_refused_and_nothing_counts_as_moved() -> TestResult {
+        let every = r#""rollbackAll": true, "renumber": true"#;
+        let created = move_probe(
+            &scenario(every),
+            &move_req("[5, 6, 7]", "Werbung", true),
+            "Verschieben",
+        )?;
+        assert_eq!(at(&created, &["ok"]), Some(&Json::Bool(false)));
+        assert_eq!(
+            text_of(at(&created, &["error"])),
+            "move_rejected_new_mailbox"
+        );
+        assert_eq!(
+            crate::account::string_list(at(&created, &["log", "created"])),
+            ["Werbung"]
+        );
+        let back = numbers(at(&created, &["after", "inbox"]));
+        assert_eq!(back.len(), 3);
+        assert!(back.iter().all(|id| *id >= 900), "{back:?}");
+        let existing = move_probe(
+            &scenario(every),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&existing, &["error"])), "move_rejected_empty");
+        assert!(numbers(at(&existing, &["after", "archive"])).is_empty());
+        let late = move_probe(
+            &scenario(r#""rollbackAll": true, "rollbackAfter": 5"#),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&late, &["error"])), "move_rejected_empty");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_target_that_never_settles_leaves_the_outcome_unclear() -> TestResult {
+        let answer = move_probe(
+            &scenario(r#""churn": true"#),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&answer, &["error"])), "move_incomplete:3");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_move_that_is_partly_taken_back_reports_what_is_still_in_the_source() -> TestResult {
+        let answer = move_probe(
+            &scenario(r#""rollbackIds": [6], "renumber": true"#),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(at(&answer, &["ok"]), Some(&Json::Bool(true)), "{answer:?}");
+        assert_eq!(
+            at(&answer, &["data"]),
+            Some(&j(
+                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 2, "kept": 0, "refused": 1}"#
+            )?)
+        );
+        assert_eq!(numbers(at(&answer, &["after", "inbox"])).len(), 1);
+        assert_eq!(numbers(at(&answer, &["after", "archive"])).len(), 2);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn moved_messages_that_get_new_ids_are_found_in_the_target_by_their_message_id() -> TestResult {
+        let answer = move_probe(
+            &scenario(r#""renumber": true"#),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(
+            at(&answer, &["data"]),
+            Some(&j(
+                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 0, "refused": 0}"#
+            )?),
+            "{answer:?}"
+        );
+        assert!(numbers(at(&answer, &["after", "inbox"])).is_empty());
+        let arrived = numbers(at(&answer, &["after", "archive"]));
+        assert_eq!(arrived.len(), 3);
+        assert!(arrived.iter().all(|id| *id >= 900), "{arrived:?}");
+        let without = scenario(r#""renumber": true"#).replace("\"mid\"", "\"nomid\"");
+        let blind = move_probe(&without, &move_req("[5]", "Archiv", false), "Verschieben")?;
+        assert_eq!(text_of(at(&blind, &["error"])), "move_incomplete:1");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn messages_that_are_neither_in_the_target_nor_in_the_source_are_unclear() -> TestResult {
+        let answer = move_probe(
+            &scenario(r#""vanish": true"#),
+            &move_req("[5, 6, 7]", "Archiv", false),
+            "Verschieben",
+        )?;
+        assert_eq!(text_of(at(&answer, &["error"])), "move_incomplete:3");
         Ok(())
     }
 
@@ -1551,7 +1713,7 @@ function run(argv) {
         assert_eq!(
             at(&answer, &["data"]),
             Some(&j(
-                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 3}"#
+                r#"{"status": "moved", "source": "INBOX", "target": "Archiv", "created": false, "moved": 3, "kept": 3, "refused": 0}"#
             )?),
             "{answer:?}"
         );
@@ -1574,7 +1736,7 @@ function run(argv) {
             &move_req("[5]", "Archiv", false),
             "Verschieben",
         )?;
-        assert_eq!(text_of(at(&lost, &["error"])), "move_incomplete:1");
+        assert_eq!(text_of(at(&lost, &["error"])), "move_rejected_empty");
         Ok(())
     }
 

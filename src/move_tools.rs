@@ -139,7 +139,7 @@ fn shown(path: &str) -> String {
     one_line_str(path, SHOWN_PATH)
 }
 
-fn describe(report: &MoveReport) -> String {
+fn describe(account: &str, report: &MoveReport) -> String {
     match report {
         MoveReport::Moved {
             source,
@@ -147,21 +147,34 @@ fn describe(report: &MoveReport) -> String {
             created,
             count,
             kept,
+            refused,
         } => {
             let plural = if *count == 1 { "" } else { "s" };
-            let (source, target) = (shown(source), shown(target));
+            let (account, source, target) = (shown(account), shown(source), shown(target));
             let made = if *created {
                 " (the mailbox was created)"
             } else {
                 ""
             };
+            let left = if *refused == 0 {
+                String::new()
+            } else {
+                let (were, stay) = if *refused == 1 {
+                    ("was", "stays")
+                } else {
+                    ("were", "stay")
+                };
+                format!(
+                    " {refused} more {were} refused by the server and {stay} in '{source}': nothing was lost, tell the user."
+                )
+            };
             if *kept == 0 {
                 format!(
-                    "Moved {count} message{plural} from '{source}' to '{target}'{made} after the user approved it. Nothing was deleted. The messages have new ids in the target mailbox: use list_messages with that mailbox to see them."
+                    "Moved {count} message{plural} of account '{account}' from '{source}' to '{target}'{made} after the user approved it. Nothing was deleted. The messages have new ids in the target mailbox: use list_messages with that mailbox to see them.{left}"
                 )
             } else {
                 format!(
-                    "Added {count} message{plural} to '{target}'{made} after the user approved it, but {kept} of them also remain in '{source}': this account works with labels (Gmail), and Mail cannot take a message out of a mailbox through its scripting interface. Nothing was deleted. If they should leave '{source}', the user has to archive them in Mail."
+                    "Added {count} message{plural} of account '{account}' to '{target}'{made} after the user approved it, but {kept} of them also remain in '{source}': this account works with labels (Gmail), and Mail cannot take a message out of a mailbox through its scripting interface. Nothing was deleted. If they should leave '{source}', the user has to archive them in Mail.{left}"
                 )
             }
         }
@@ -238,7 +251,7 @@ pub(crate) fn move_messages(ctx: &Context, args: &Object) -> ToolResult<String> 
     match ctx.backend.move_messages(&account, &request) {
         Ok(report) => {
             attempt.log(outcome_of(&report), Some(&report), false)?;
-            Ok(describe(&report))
+            Ok(describe(&account.label, &report))
         }
         Err(ToolError::Msg(message)) => {
             attempt.log(Outcome::Error, None, false)?;
@@ -293,14 +306,17 @@ mod tests {
             &outlook,
             r#"{"ids": [201, 202], "to_mailbox": "Werbung", "create_mailbox": true}"#,
         )?;
-        assert!(text
-            .starts_with("Moved 2 messages from 'Inbox' to 'Werbung' (the mailbox was created)"));
+        assert!(text.starts_with(
+            "Moved 2 messages of account 'Demo Outlook' from 'Inbox' to 'Werbung' (the mailbox was created)"
+        ));
         assert!(text.contains("Nothing was deleted") && text.contains("new ids"));
         let text = run(
             &outlook,
             r#"{"ids": ["201"], "to_mailbox": "Archive", "mailbox": "inbox"}"#,
         )?;
-        assert!(text.starts_with("Moved 1 message from 'Inbox' to 'Archive' after"));
+        assert!(text.starts_with(
+            "Moved 1 message of account 'Demo Outlook' from 'Inbox' to 'Archive' after"
+        ));
         Ok(())
     }
 
@@ -309,15 +325,42 @@ mod tests {
         let dir = TempDir::new()?;
         let text = run(&gmail(&dir, "yes"), MOVE)?;
         assert!(text.starts_with(
-            "Added 2 messages to 'Werbung' (the mailbox was created) after the user approved it, but 2 of them also remain in 'INBOX'"
+            "Added 2 messages of account 'Demo Gmail' to 'Werbung' (the mailbox was created) after the user approved it, but 2 of them also remain in 'INBOX'"
         ));
         assert!(text.contains("archive them in Mail") && text.contains("Nothing was deleted"));
         let text = run(
             &gmail(&dir, "yes"),
             r#"{"ids": ["101"], "to_mailbox": "[Gmail]/All Mail", "mailbox": "inbox"}"#,
         )?;
-        assert!(text.starts_with("Added 1 message to '[Gmail]/All Mail' after"));
+        assert!(
+            text.starts_with("Added 1 message of account 'Demo Gmail' to '[Gmail]/All Mail' after")
+        );
         Ok(())
+    }
+
+    #[test]
+    fn messages_the_server_refused_are_named_and_stay_where_they_were() {
+        let report = |kept: usize, refused: usize| MoveReport::Moved {
+            source: "Posteingang".to_string(),
+            target: "Werbung".to_string(),
+            created: false,
+            count: 3,
+            kept,
+            refused,
+        };
+        let one = describe("Exchange", &report(0, 1));
+        assert!(one.starts_with(
+            "Moved 3 messages of account 'Exchange' from 'Posteingang' to 'Werbung' after"
+        ));
+        assert!(one.ends_with(
+            " 1 more was refused by the server and stays in 'Posteingang': nothing was lost, tell the user."
+        ));
+        let two = describe("Exchange", &report(0, 2));
+        assert!(two.contains(" 2 more were refused by the server and stay in 'Posteingang'"));
+        let labels = describe("Google", &report(3, 1));
+        assert!(labels.starts_with("Added 3 messages of account 'Google' to 'Werbung'"));
+        assert!(labels.ends_with("tell the user."));
+        assert!(!describe("Exchange", &report(0, 0)).contains("refused"));
     }
 
     #[test]
@@ -469,7 +512,9 @@ mod tests {
             &two,
             r#"{"account": "Demo Outlook", "ids": [201], "to_mailbox": "Archive"}"#,
         )?;
-        assert!(text.starts_with("Moved 1 message from 'Inbox' to 'Archive'"));
+        assert!(
+            text.starts_with("Moved 1 message of account 'Demo Outlook' from 'Inbox' to 'Archive'")
+        );
         assert!(refused(
             run(
                 &gmail(&dir, "yes"),

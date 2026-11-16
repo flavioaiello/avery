@@ -158,6 +158,7 @@ pub(crate) enum MoveReport {
         created: bool,
         count: usize,
         kept: usize,
+        refused: usize,
     },
     Declined,
     Timeout,
@@ -171,14 +172,16 @@ impl MoveReport {
             "declined" => Some(MoveReport::Declined),
             "timeout" => Some(MoveReport::Timeout),
             "moved" => {
-                let (count, kept) = (number("moved")?, number("kept")?);
+                let (count, kept, refused) =
+                    (number("moved")?, number("kept")?, number("refused")?);
                 let created = object.get("created").and_then(Json::as_bool)?;
-                (kept <= count).then(|| MoveReport::Moved {
+                (kept <= count && count > 0).then(|| MoveReport::Moved {
                     source: text_of(object.get("source")),
                     target: text_of(object.get("target")),
                     created,
                     count,
                     kept,
+                    refused,
                 })
             }
             _ => None,
@@ -516,22 +519,26 @@ mod tests {
         );
         assert_eq!(
             MoveReport::from_json(&j(
-                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 3, "kept": 1}"#
+                r#"{"status": "moved", "source": "INBOX", "target": "Werbung", "created": true, "moved": 3, "kept": 1, "refused": 2}"#
             )?),
             Some(MoveReport::Moved {
                 source: "INBOX".into(),
                 target: "Werbung".into(),
                 created: true,
                 count: 3,
-                kept: 1
+                kept: 1,
+                refused: 2
             })
         );
         for bad in [
-            r#"{"status": "moved", "source": "INBOX", "target": "W", "moved": 3, "kept": 0}"#,
-            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": -1, "kept": 0}"#,
-            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2}"#,
-            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "kept": 3}"#,
-            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "kept": -1}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "moved": 3, "kept": 0, "refused": 0}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": -1, "kept": 0, "refused": 0}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "refused": 0}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "kept": 0}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "kept": 3, "refused": 0}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "kept": -1, "refused": 0}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 2, "kept": 0, "refused": -1}"#,
+            r#"{"status": "moved", "source": "INBOX", "target": "W", "created": false, "moved": 0, "kept": 0, "refused": 3}"#,
             r#"{"status": "sent"}"#,
             "{}",
             "[]",

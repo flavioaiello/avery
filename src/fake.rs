@@ -431,6 +431,7 @@ impl Backend for FakeBackend {
                 } else {
                     0
                 },
+                refused: 0,
             },
             "timeout" => MoveReport::Timeout,
             _ => MoveReport::Declined,

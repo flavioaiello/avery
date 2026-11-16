@@ -17,6 +17,32 @@ fn move_failure(has: &dyn Fn(&str) -> bool) -> Option<String> {
         "Mail could not create the target mailbox, so NOTHING was moved.".to_string()
     } else if has("messages_changed") {
         "The messages changed while the dialog was open, so NOTHING was moved. Retry.".to_string()
+    } else if has("move_rejected_new_mailbox") {
+        concat!(
+            "Mail did not move the messages into the mailbox that was just created (the server refused them or Mail ",
+            "ignored the move), so NOTHING was moved. The new mailbox probably exists only on this Mac (typical for ",
+            "Exchange accounts) and stays empty in Mail. Ask the user to delete it there and to create the mailbox in ",
+            "Mail itself (Mailbox > New Mailbox, with this account as location) or to pick an existing one, and do ",
+            "not retry before."
+        )
+        .to_string()
+    } else if has("move_rejected_empty") {
+        concat!(
+            "Mail did not move the messages (the server refused them or Mail ignored the move), so NOTHING was ",
+            "moved. The target mailbox shows no messages and no sub-mailboxes in Mail and probably exists only on ",
+            "this Mac, for example because a script created it. Ask the user to check in Mail that it really is ",
+            "empty and only then to delete it and to create the mailbox there themselves (Mailbox > New Mailbox, ",
+            "with this account as location), or to pick another mailbox, and do not retry before."
+        )
+        .to_string()
+    } else if has("move_rejected") {
+        concat!(
+            "Mail did not move the messages (the server refused them or Mail ignored the move), so NOTHING was ",
+            "moved. Ask the user to check the target mailbox in Mail (is it full, read-only or missing on the ",
+            "server?) or to pick another one, and do not retry before. Never suggest deleting a mailbox that ",
+            "contains mail."
+        )
+        .to_string()
     } else if has("move_incomplete") || has("move_state_unknown") {
         concat!(
             "Mail did not move all messages. Some may have been moved: look at both mailboxes with ",
@@ -372,6 +398,9 @@ mod tests {
                 "could not create the target mailbox",
             ),
             ("messages_changed", "changed while the dialog was open"),
+            ("move_rejected", "Never suggest deleting a mailbox"),
+            ("move_rejected_empty", "shows no messages"),
+            ("move_rejected_new_mailbox", "just created"),
         ] {
             let message = map_error(text, Some("move"));
             assert!(
@@ -445,6 +474,9 @@ mod tests {
             "messages_changed",
             "too_many_messages",
             "message_not_found",
+            "move_rejected",
+            "move_rejected_empty",
+            "move_rejected_new_mailbox",
             "mailbox_create_failed: AppleEvent timed out. (-1712)",
             "approval_dialog_failed: timed out",
         ] {

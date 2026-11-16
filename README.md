@@ -10,7 +10,7 @@ tokens.
 
 Everything runs on your Mac. macOS keeps your credentials and Avery never sees them; the bridge also works offline.
 
-> Status: early (v0.8.0). After installing, run `avery mail selftest` and `avery mail selftest-write`. They check the
+> Status: early (v0.8.1). After installing, run `avery mail selftest` and `avery mail selftest-write`. They check the
 > integration with Mail.app and Calendar.app, which the automated tests cannot do (they use demo data and a mock of the
 > scripting interface).
 
@@ -130,6 +130,12 @@ Quit Goose before that, and start it again afterwards. From now on a changed pro
 `--force`: `avery doctor` says `Profil aktuell` or reports it as outdated, and the Avery app offers to renew it at the start
 (only when Goose is not running; *Später* keeps the old files and asks again next time).
 
+### Update from 0.8.0
+
+`brew upgrade avery` is enough. Moving mail now checks what Mail really did with the messages (see
+[Moving mail](#how-sending-and-changes-are-protected)), and the profile text for the model changed: the Avery app offers
+the new profile at the next start (only when Goose is not running), or run `avery init --force` after quitting Goose.
+
 ## First start: the setup dialogs
 
 When you open Goose with `avery app` and nothing is set up yet, native macOS dialogs guide you through the
@@ -243,12 +249,20 @@ doing something.
 - **Moving mail** (`move_messages`) moves up to 30 messages of one mailbox into another mailbox of the same account, for
   example advertising into a mailbox *Werbung* (created at the top level of the account when the model asks for it). The
   dialog shows the account, the source, the target (and that it will be created) and every single message with date,
-  sender and subject, each behind `│`; the server reads the messages again after your click and aborts if one changed.
+  sender and subject, each behind `│`; every id must be listed in the mailbox the dialog names as the source (Mail itself
+  finds a message by id in any mailbox), and the server reads the messages again after your click and aborts if one changed.
   Trash, Junk, Spam, Drafts and Sent are refused as targets (a second line of defence by name, in English and German; the
   dialog is the hard gate), nothing is deleted, and you can always move the messages back. A Gmail mailbox is a label,
   and Apple Mail's scripting can only add it: the message also stays in the inbox (the dialog says so, and so does the
   result), and you archive it in Mail, for example all at once from the label's mailbox. Other accounts (iCloud,
-  Exchange, IMAP) move the message for real. Every attempt is logged in `moves.jsonl` before anything happens (account,
+  Exchange, IMAP) move the message for real. Mail hands a move to the server in the background, so after your click
+  Avery waits until the target mailbox stays unchanged (3 seconds plus 1 second per message, at most a minute) and then
+  looks at every message: the result names the account and says what really arrived and which messages the server
+  refused (they stay where they were). If the server takes everything back, which is what happens to a mailbox that a
+  script created on an Exchange account (it exists only on this Mac), the call fails with *nothing moved* and the model
+  asks you to check that this mailbox is really empty, delete it in Mail and create it there yourself
+  (*Mailbox > New Mailbox*). Every attempt is
+  logged in `moves.jsonl` before anything happens (account,
   mailboxes and number of messages, never subjects) and counts against the limits below. If Mail fails or does not
   answer after the click, the outcome is unknown: the attempt stays `pending` in the log, keeps counting against the
   limits, and the model is told that some messages may have been moved and to look at both mailboxes.
@@ -353,6 +367,9 @@ checks before it is saved; a file that would be refused is never written.
   line, Goose for the agent, the Avery app for the setup dialogs); if Goose does not get the prompt, use
   `avery cli session` from a terminal.
 - Mail search covers subject and sender, not the message body.
+- A move is only checked while Mail shows it: a server that takes a message back after Avery has reported (more than
+  3 seconds plus 1 second per message later) is not noticed. A mailbox that a script creates on an Exchange account
+  exists only on this Mac, so create such mailboxes in Mail yourself. In Gmail a move only adds the label.
 - Single events without attendees can be changed; links on events (`url`) are not supported.
 - Avery is for Apple silicon.
 - `Avery.app` is a script that is not signed or notarized; it only starts the program that wrote it.

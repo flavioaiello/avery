@@ -140,7 +140,7 @@ fn moving_needs_the_write_level_and_the_click_and_never_reaches_trash() -> TestR
     let (error, text) = approved.call("move_messages", MOVE)?;
     assert!(
         !error
-            && text.starts_with("Added 2 messages to 'Werbung'")
+            && text.starts_with("Added 2 messages of account 'Demo Gmail' to 'Werbung'")
             && text.contains("also remain in 'INBOX'"),
         "{text}"
     );
