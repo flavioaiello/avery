@@ -1,7 +1,11 @@
+use crate::account::Account;
 use crate::backend::{MessageId, MoveReport, MoveRequest};
+use crate::changelog::Outcome;
 use crate::context::Context;
 use crate::error::{ToolError, ToolResult};
+use crate::journal;
 use crate::json::{Json, Object};
+use crate::movelog::{self, MoveEntry};
 use crate::text::{char_len, clean_str, one_line_str, text_of, to_bool};
 use crate::texts::{MAX_MAILBOX_NAME, MAX_MOVE_MESSAGES};
 
@@ -166,21 +170,93 @@ fn describe(report: &MoveReport) -> String {
     }
 }
 
+struct Attempt<'a> {
+    ctx: &'a Context,
+    account: &'a Account,
+    request: &'a MoveRequest,
+    id: &'a str,
+}
+
+impl Attempt<'_> {
+    fn log(&self, outcome: Outcome, report: Option<&MoveReport>, strict: bool) -> ToolResult<()> {
+        let (from, to, count, created) = match report {
+            Some(MoveReport::Moved {
+                source,
+                target,
+                created,
+                count,
+                ..
+            }) => (source.as_str(), target.as_str(), *count, *created),
+            _ => (
+                self.request.mailbox.as_deref().unwrap_or_default(),
+                self.request.target.as_str(),
+                self.request.ids.len(),
+                self.request.create,
+            ),
+        };
+        let entry = MoveEntry {
+            ts: journal::now_seconds(),
+            id: self.id.to_string(),
+            outcome,
+            account_id: self.account.id.clone(),
+            account: one_line_str(&self.account.label, SHOWN_PATH),
+            from: one_line_str(from, SHOWN_PATH),
+            to: one_line_str(to, SHOWN_PATH),
+            count,
+            created,
+        };
+        movelog::append(&self.ctx.settings, &entry, strict)
+    }
+}
+
+fn outcome_of(report: &MoveReport) -> Outcome {
+    match report {
+        MoveReport::Moved { .. } => Outcome::Done,
+        MoveReport::Declined => Outcome::Declined,
+        MoveReport::Timeout => Outcome::Timeout,
+    }
+}
+
 pub(crate) fn move_messages(ctx: &Context, args: &Object) -> ToolResult<String> {
     if let Some(error) = unknown_parameters(args) {
         return Err(error);
     }
     let (account, _) = ctx.settings.resolve_writable(args.get("account"))?;
     let request = request_from(args)?;
-    let report = ctx.backend.move_messages(&account, &request)?;
-    Ok(describe(&report))
+    let now = journal::now_seconds();
+    let history = movelog::read_window(&ctx.settings, now)?;
+    movelog::check_limits(&history.entries, now)?;
+    movelog::ensure_writable(&ctx.settings)?;
+    let id = journal::attempt_id()?;
+    let attempt = Attempt {
+        ctx,
+        account: &account,
+        request: &request,
+        id: &id,
+    };
+    attempt.log(Outcome::Pending, None, true)?;
+    match ctx.backend.move_messages(&account, &request) {
+        Ok(report) => {
+            attempt.log(outcome_of(&report), Some(&report), false)?;
+            Ok(describe(&report))
+        }
+        Err(ToolError::Msg(message)) => {
+            attempt.log(Outcome::Error, None, false)?;
+            Err(ToolError::Msg(message))
+        }
+        Err(other) => Err(other),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fake::FakeOptions;
-    use crate::testutil::{args, settings_at, TempDir, TestResult};
+    use crate::testutil::{args, j, settings_at, TempDir, TestResult};
+    use crate::texts::{MAX_ATTEMPTS_PER_10_MIN, MAX_MOVES_PER_HOUR};
+    use std::error::Error;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     fn writer(dir: &TempDir, accounts: &str, approve: &str) -> Context {
         let mut settings = settings_at(&dir.path("config.json"));
@@ -250,8 +326,136 @@ mod tests {
         let declined = run(&gmail(&dir, "no"), MOVE)?;
         assert!(declined.contains("did NOT approve") && declined.contains("NOTHING was moved"));
         assert!(declined.contains("Do not retry"));
-        let late = run(&gmail(&dir, "timeout"), MOVE)?;
+        let other = TempDir::new()?;
+        let late = run(&gmail(&other, "timeout"), MOVE)?;
         assert!(late.contains("did not answer") && late.contains("NOTHING was moved"));
+        Ok(())
+    }
+
+    fn entries(ctx: &Context) -> Result<Vec<MoveEntry>, Box<dyn Error>> {
+        let text = fs::read_to_string(ctx.settings.moves_path())?;
+        text.lines()
+            .map(|line| MoveEntry::from_json(&j(line)?).ok_or_else(|| "unreadable line".into()))
+            .collect()
+    }
+
+    #[test]
+    fn every_attempt_is_logged_first_as_pending_and_then_with_its_outcome() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        run(&ctx, MOVE)?;
+        let logged = entries(&ctx)?;
+        assert_eq!(logged.len(), 2);
+        let (pending, done) = (&logged[0], &logged[1]);
+        assert_eq!(
+            (pending.outcome, done.outcome),
+            (Outcome::Pending, Outcome::Done)
+        );
+        assert_eq!(pending.id, done.id);
+        assert_eq!(done.id.len(), 12);
+        assert_eq!((pending.count, done.count), (2, 2));
+        assert_eq!((done.from.as_str(), done.to.as_str()), ("INBOX", "Werbung"));
+        assert_eq!(
+            (pending.to.as_str(), pending.from.as_str()),
+            ("Werbung", "")
+        );
+        assert!(done.created && pending.created);
+        assert_eq!(done.account, "Demo Gmail");
+        let mode = fs::metadata(ctx.settings.moves_path())?
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        Ok(())
+    }
+
+    #[test]
+    fn a_decline_pauses_the_model_and_the_refused_retry_leaves_no_trace() -> TestResult {
+        for (approve, outcome) in [("no", Outcome::Declined), ("timeout", Outcome::Timeout)] {
+            let dir = TempDir::new()?;
+            let ctx = gmail(&dir, approve);
+            run(&ctx, MOVE)?;
+            assert!(refused(run(&ctx, MOVE), "just declined or ignored"));
+            let outcomes: Vec<Outcome> = entries(&ctx)?.iter().map(|e| e.outcome).collect();
+            assert_eq!(outcomes, [Outcome::Pending, outcome]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_with_an_unknown_outcome_leaves_the_attempt_pending_and_counted() -> TestResult {
+        let dir = TempDir::new()?;
+        let mut settings = settings_at(&dir.path("config.json"));
+        settings.fake = true;
+        settings.fake_write = "FAKE-GMAIL".to_string();
+        let ctx = Context::demo(
+            settings,
+            FakeOptions {
+                approve: "yes".to_string(),
+                uncertain: true,
+                ..FakeOptions::default()
+            },
+        );
+        let now = journal::now_seconds();
+        for n in 0..MAX_MOVES_PER_HOUR - 1 {
+            let earlier = MoveEntry {
+                ts: now - 1000 + i64::try_from(n)?,
+                id: format!("d{n}"),
+                outcome: Outcome::Done,
+                account_id: "FAKE-GMAIL".to_string(),
+                account: "Demo Gmail".to_string(),
+                from: "INBOX".to_string(),
+                to: "Werbung".to_string(),
+                count: 1,
+                created: false,
+            };
+            movelog::append(&ctx.settings, &earlier, true)?;
+        }
+        assert!(matches!(
+            run(&ctx, MOVE),
+            Err(ToolError::Uncertain(message)) if message.contains("may have been moved")
+        ));
+        let logged = entries(&ctx)?;
+        let last = logged.last().ok_or("no entry")?;
+        assert_eq!(
+            (logged.len(), last.outcome),
+            (MAX_MOVES_PER_HOUR, Outcome::Pending)
+        );
+        assert!(refused(run(&ctx, MOVE), "Move limit reached"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_model_that_keeps_failing_is_stopped_after_six_attempts_in_ten_minutes() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        let missing = r#"{"ids": [999], "to_mailbox": "Werbung", "create_mailbox": true}"#;
+        for _ in 0..MAX_ATTEMPTS_PER_10_MIN {
+            assert!(refused(run(&ctx, missing), "A message id was not found"));
+        }
+        assert!(refused(run(&ctx, MOVE), "Too many move requests"));
+        let errors = entries(&ctx)?
+            .iter()
+            .filter(|entry| entry.outcome == Outcome::Error)
+            .count();
+        assert_eq!(errors, MAX_ATTEMPTS_PER_10_MIN);
+        Ok(())
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_trusted_blocks_moves_and_mistakes_leave_no_trace() -> TestResult {
+        let dir = TempDir::new()?;
+        let ctx = gmail(&dir, "yes");
+        assert!(refused(
+            run(&ctx, r#"{"ids": [], "to_mailbox": "Werbung"}"#),
+            "'ids'"
+        ));
+        assert!(!std::path::Path::new(&ctx.settings.moves_path()).exists());
+        fs::write(ctx.settings.moves_path(), "garbage\n")?;
+        assert!(refused(run(&ctx, MOVE), "cannot be read"));
+        fs::remove_file(ctx.settings.moves_path())?;
+        fs::create_dir(ctx.settings.moves_path())?;
+        assert!(refused(run(&ctx, MOVE), "not writable"));
         Ok(())
     }
 

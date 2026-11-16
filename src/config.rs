@@ -83,6 +83,10 @@ impl Settings {
         join_path(&dirname(&self.config_path), "changes.jsonl")
     }
 
+    pub(crate) fn moves_path(&self) -> String {
+        join_path(&dirname(&self.config_path), "moves.jsonl")
+    }
+
     pub(crate) fn lock_path(&self) -> String {
         join_path(&dirname(&self.config_path), "config.lock")
     }

@@ -1,29 +1,33 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{say, Launcher, Refusal};
+use super::{read_limited, say, Launcher, Refusal};
 use crate::civil::civil_from_days;
+use crate::sha256::sha256_hex;
 
 const CONFIG: &str = include_str!("../../profile/config.yaml.tmpl");
 const PERMISSION: &str = include_str!("../../profile/permission.yaml");
 const PROVIDER: &str = include_str!("../../profile/custom_splash.json");
 const TOP_OF_MIND: &str = include_str!("../../profile/top-of-mind.md");
 const ENV_TEMPLATE: &str = include_str!("../../profile/avery.env");
+const MARKER: &str = "avery-profile.sha256";
 const MAX_BACKUPS: u32 = 99;
 const PRIVATE: u32 = 0o700;
+pub(super) const DATA: u32 = 0o666;
+pub(super) const PROGRAM: u32 = 0o777;
 const NEXT: [&str; 6] = [
     "Weiter mit:",
     "  brew services start avery   (Modell als Dienst starten, auch bei jedem Login)",
-    "  avery app                   (Goose mit dem Avery-Profil oeffnen; beim ersten Start fuehren Dialoge durch die Einrichtung von Mail und Kalender; wiederholen: avery mail onboard)",
+    "  Avery.app aus ~/Applications ins Dock ziehen und anklicken (oder: avery app): oeffnet Goose mit dem Avery-Profil; beim ersten Start fuehren Dialoge durch die Einrichtung von Mail und Kalender (wiederholen: avery mail onboard)",
     "  oder im Terminal:",
     "  avery mail setup            (je Konto und Kalender die Stufe waehlen: aus/lesen/schreiben; macOS fragt einmal nach der Automation-Berechtigung)",
     "  avery mail selftest         (Lesezugriff pruefen)",
 ];
 
-fn failed(what: &str, path: &Path, error: &io::Error) -> Refusal {
+pub(super) fn failed(what: &str, path: &Path, error: &io::Error) -> Refusal {
     Refusal::new(format!("{what}: {}: {error}", path.display()))
 }
 
@@ -96,24 +100,29 @@ fn copy_new(from: &Path, to: &Path) -> io::Result<()> {
     target.sync_all()
 }
 
-fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write_atomic(dest: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let name = dest
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
     let temp = dest.with_file_name(format!(".{name}.new-{}", std::process::id()));
-    let result = File::create_new(&temp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, dest)
-    });
+    let result = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temp, dest)
+        });
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
 }
 
-fn install(dest: &Path, text: &str, force: bool, out: &mut dyn Write) -> Result<(), Refusal> {
+fn install(dest: &Path, text: &str, force: bool, out: &mut dyn Write) -> Result<bool, Refusal> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| failed("Ordner nicht anlegbar", parent, &error))?;
@@ -124,17 +133,76 @@ fn install(dest: &Path, text: &str, force: bool, out: &mut dyn Write) -> Result<
                 out,
                 &format!("  vorhanden, nicht ueberschrieben: {}", dest.display()),
             );
-            return Ok(());
+            return Ok(false);
         }
         let backup = backup_path(dest)?;
         copy_new(dest, &backup)
             .map_err(|error| failed("Sicherung fehlgeschlagen", &backup, &error))?;
         say(out, &format!("  Sicherung: {}", backup.display()));
     }
-    write_atomic(dest, text.as_bytes())
+    write_atomic(dest, text.as_bytes(), DATA)
         .map_err(|error| failed("Datei nicht schreibbar", dest, &error))?;
     say(out, &format!("  geschrieben: {}", dest.display()));
+    Ok(true)
+}
+
+fn digest_of(parts: &[&str]) -> String {
+    let mut bytes = Vec::new();
+    for part in parts {
+        let length = u64::try_from(part.len()).unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    sha256_hex(&bytes)
+}
+
+pub(super) fn digest() -> String {
+    digest_of(&[CONFIG, PERMISSION, PROVIDER, TOP_OF_MIND])
+}
+
+pub(crate) fn current(l: &Launcher) -> bool {
+    read_limited(&l.env.goose_root.join(MARKER)).is_some_and(|text| text.trim() == digest())
+}
+
+fn usable(l: &Launcher) -> Result<(), Refusal> {
+    if !cfg!(target_os = "macos") {
+        return Err(Refusal::new("Avery laeuft nur auf macOS."));
+    }
+    if !l.exe.is_absolute() {
+        return Err(Refusal::new("Der Pfad von avery ist nicht ermittelbar."));
+    }
     Ok(())
+}
+
+fn install_profile(l: &Launcher, force: bool, out: &mut dyn Write) -> Result<(), Refusal> {
+    let root = &l.env.goose_root;
+    let files = [
+        (
+            root.join("config/config.yaml"),
+            render(CONFIG, root, &l.exe)?,
+        ),
+        (root.join("config/permission.yaml"), PERMISSION.to_string()),
+        (
+            root.join("config/custom_providers/custom_splash.json"),
+            PROVIDER.to_string(),
+        ),
+        (root.join("top-of-mind.md"), TOP_OF_MIND.to_string()),
+    ];
+    let mut complete = true;
+    for (dest, text) in &files {
+        complete &= install(dest, text, force, out)?;
+    }
+    if complete {
+        let marker = root.join(MARKER);
+        write_atomic(&marker, format!("{}\n", digest()).as_bytes(), DATA)
+            .map_err(|error| failed("Datei nicht schreibbar", &marker, &error))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn refresh(l: &Launcher, out: &mut dyn Write) -> Result<(), Refusal> {
+    usable(l)?;
+    install_profile(l, true, out)
 }
 
 pub(crate) fn init(l: &Launcher, args: &[String], out: &mut dyn Write) -> Result<u8, Refusal> {
@@ -152,36 +220,26 @@ pub(crate) fn init(l: &Launcher, args: &[String], out: &mut dyn Write) -> Result
             other => return Err(Refusal::new(format!("Unbekannte Option: {other}"))),
         }
     }
-    if !cfg!(target_os = "macos") {
-        return Err(Refusal::new("Avery laeuft nur auf macOS."));
-    }
-    if !l.exe.is_absolute() {
-        return Err(Refusal::new("Der Pfad von avery ist nicht ermittelbar."));
-    }
-    let root = &l.env.goose_root;
-    say(out, &format!("Avery-Profil einrichten: {}", root.display()));
-    let files = [
-        (
-            root.join("config/config.yaml"),
-            render(CONFIG, root, &l.exe)?,
-        ),
-        (root.join("config/permission.yaml"), PERMISSION.to_string()),
-        (
-            root.join("config/custom_providers/custom_splash.json"),
-            PROVIDER.to_string(),
-        ),
-        (root.join("top-of-mind.md"), TOP_OF_MIND.to_string()),
-        (l.env.home.join("avery.env"), ENV_TEMPLATE.to_string()),
-    ];
-    for (dest, text) in &files {
-        install(dest, text, force, out)?;
-    }
+    usable(l)?;
+    say(
+        out,
+        &format!("Avery-Profil einrichten: {}", l.env.goose_root.display()),
+    );
+    install_profile(l, force, out)?;
+    install(&l.env.home.join("avery.env"), ENV_TEMPLATE, force, out)?;
     let mail = l.env.home.join("mail");
     fs::create_dir_all(&mail).map_err(|error| failed("Ordner nicht anlegbar", &mail, &error))?;
     for dir in [&l.env.home, &mail] {
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(PRIVATE));
     }
+    super::dock::install(l, force, out)?;
     say(out, "");
+    if !current(l) {
+        say(
+            out,
+            "Hinweis: Das Profil ist nicht aktuell. Aktualisieren (die alten Dateien bleiben als Sicherung): avery init --force",
+        );
+    }
     if !l.env.goose_app.is_dir() {
         say(
             out,
@@ -241,5 +299,15 @@ mod tests {
         assert_eq!(stamp(0), "19700101000000");
         assert_eq!(stamp(1_700_000_000), "20231114221320");
         assert_eq!(stamp(86_399), "19700101235959");
+    }
+
+    #[test]
+    fn the_profile_digest_tells_the_parts_apart_by_their_length() {
+        let digest = digest_of(&["ab", "c"]);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(digest_of(&["ab", "c"]), digest);
+        assert_ne!(digest_of(&["a", "bc"]), digest);
+        assert_ne!(digest_of(&["a"]), digest_of(&["a", ""]));
     }
 }

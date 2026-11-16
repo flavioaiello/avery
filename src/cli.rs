@@ -23,8 +23,8 @@ use crate::rights::{name_or_id, Level, Rights, MAX_ENTRIES, MAX_NAME};
 use crate::sendlog::{self, Outcome};
 use crate::text::{bracketed, one_line_str};
 use crate::texts::{
-    COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_MOVE_MESSAGES, MAX_RECIPIENTS, MAX_SEND_CHARS,
-    MAX_SEND_LINES, VERSION,
+    COMMANDS, HELP, MAX_DRAFTS_PER_HOUR, MAX_MOVES_PER_HOUR, MAX_MOVE_MESSAGES, MAX_RECIPIENTS,
+    MAX_SEND_CHARS, MAX_SEND_LINES, VERSION,
 };
 use crate::write_tools;
 
@@ -293,7 +293,8 @@ fn explain_levels(ctx: &Context, console: &mut Console, rights: &Rights) {
         ctx.settings.sendlog_path()
     ));
     console.hint(&format!(
-        "Verschieben: max. {MAX_MOVE_MESSAGES} Mails pro Dialog, nie nach Papierkorb, Spam, Entwuerfe oder Gesendet; geloescht wird nichts."
+        "Verschieben: max. {MAX_MOVE_MESSAGES} Mails pro Dialog und max. {MAX_MOVES_PER_HOUR} Verschiebungen pro Stunde, nie nach Papierkorb, Spam, Entwuerfe oder Gesendet; geloescht wird nichts. Jeder Versuch steht in {}",
+        ctx.settings.moves_path()
     ));
     console.hint(&format!(
         "Kalender-Grenzen: nur einzelne Termine ohne Teilnehmer und ohne Wiederholung, max. {} Aenderungen pro Stunde. Jeder Versuch steht in {}",
@@ -724,7 +725,7 @@ fn cmd_status(ctx: &Context, console: &mut Console) -> u8 {
         console.say(SETUP_HINT);
     }
     console.say(&format!(
-        "Grenzen pro Stunde: {} gesendete Mails, {MAX_DRAFTS_PER_HOUR} Entwuerfe, {} Kalenderaenderungen",
+        "Grenzen pro Stunde: {} gesendete Mails, {MAX_DRAFTS_PER_HOUR} Entwuerfe, {} Kalenderaenderungen, {MAX_MOVES_PER_HOUR} Verschiebungen",
         rights.sends_per_hour, rights.changes_per_hour
     ));
     0
@@ -2038,7 +2039,7 @@ mod tests {
         assert!(out.contains("Kalender: Familie (lesen)"));
         assert!(!out.contains(SETUP_HINT), "{out}");
         assert!(out.contains(
-            "Grenzen pro Stunde: 2 gesendete Mails, 30 Entwuerfe, 6 Kalenderaenderungen"
+            "Grenzen pro Stunde: 2 gesendete Mails, 30 Entwuerfe, 6 Kalenderaenderungen, 20 Verschiebungen"
         ));
         assert!(out.contains(&format!("Version: {VERSION}")));
         let empty = TempDir::new()?;

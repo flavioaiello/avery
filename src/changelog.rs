@@ -37,7 +37,7 @@ impl Outcome {
         }
     }
 
-    fn parse(text: &str) -> Option<Outcome> {
+    pub(crate) fn parse(text: &str) -> Option<Outcome> {
         match text {
             "pending" => Some(Outcome::Pending),
             "done" => Some(Outcome::Done),

@@ -1,6 +1,6 @@
 [package]
 name = "avery"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Private AI agent for macOS: starts Goose with a local model and serves private mail and calendars from Apple Mail and Calendar over MCP (stdio): reading, drafts, sending, moving mail and calendar changes with approval."

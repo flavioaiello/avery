@@ -170,15 +170,28 @@ fn hit_count(low: &str) -> Option<String> {
 
 pub(crate) fn failure(text: &str, op: Option<&str>, uncertain: bool) -> ToolError {
     let low = text.to_lowercase();
-    let timed_out = low.contains("-1712")
-        || low.contains("timed out")
-        || low.contains("timeout")
-        || low.contains("send_state_unknown");
-    if op == Some("compose") && (uncertain || timed_out) {
+    let timed_out = low.contains("-1712") || low.contains("timed out") || low.contains("timeout");
+    if op == Some("compose") && (uncertain || timed_out || low.contains("send_state_unknown")) {
         let mut message = map_error(text, op);
         if !message.contains("may or may not") {
             message.push_str(
                 " The message may or may not have been sent: ask the user to check Sent in Mail before you try again.",
+            );
+        }
+        return ToolError::Uncertain(message);
+    }
+    let move_unknown = low.contains("move_state_unknown") || low.contains("move_incomplete");
+    if op == Some("move") && (uncertain || timed_out || move_unknown) {
+        let mut message = map_error(text, op);
+        if message.contains("NOTHING was moved") {
+            return ToolError::Msg(message);
+        }
+        if !message.contains("may have been moved") {
+            if !message.ends_with('.') {
+                message.push('.');
+            }
+            message.push_str(
+                " Some messages may have been moved: look at both mailboxes with list_messages before you try again.",
             );
         }
         return ToolError::Uncertain(message);
@@ -391,11 +404,66 @@ mod tests {
             map_error("mailbox_not_found", Some("move")),
             map_error("mailbox_not_found", None)
         );
-        for text in ["move_state_unknown: x", "timed out"] {
-            assert!(matches!(
-                failure(text, Some("move"), true),
-                ToolError::Msg(_)
-            ));
+    }
+
+    #[test]
+    fn a_move_that_may_have_happened_after_the_click_is_uncertain() {
+        for (text, uncertain) in [
+            ("move_state_unknown: 1 of 3: boom", false),
+            ("move_incomplete:3", false),
+            ("AppleEvent timed out. (-1712)", false),
+            ("timed out", false),
+            ("empty answer from osascript", true),
+            ("unexpected answer from osascript", true),
+        ] {
+            let error = failure(text, Some("move"), uncertain);
+            assert!(
+                matches!(
+                    &error,
+                    ToolError::Uncertain(m)
+                        if m.contains("may have been moved")
+                            && m.contains("list_messages")
+                            && !m.contains("NOTHING")
+                ),
+                "{text}: {error:?}"
+            );
+        }
+        let bare = failure("empty answer from osascript", Some("move"), true);
+        assert_eq!(
+            bare,
+            ToolError::Uncertain(
+                "Mail error: empty answer from osascript. Some messages may have been moved: look at both mailboxes with list_messages before you try again.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_move_that_failed_before_anything_was_moved_stays_a_plain_error() {
+        for text in [
+            "target_missing",
+            "same_mailbox",
+            "messages_changed",
+            "too_many_messages",
+            "message_not_found",
+            "mailbox_create_failed: AppleEvent timed out. (-1712)",
+            "approval_dialog_failed: timed out",
+        ] {
+            assert!(
+                matches!(
+                    failure(text, Some("move"), false),
+                    ToolError::Msg(m) if m.contains("NOTHING was moved")
+                ),
+                "{text}"
+            );
+        }
+        for op in [Some("read"), Some("messages"), None] {
+            assert!(
+                matches!(
+                    failure("move_state_unknown: x", op, false),
+                    ToolError::Msg(_)
+                ),
+                "{op:?}"
+            );
         }
     }
 

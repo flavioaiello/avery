@@ -14,6 +14,7 @@ pub(crate) const DEFAULT_CHANGES_PER_HOUR: i64 = 10;
 pub(crate) const MAX_LIMIT_PER_HOUR: i64 = 30;
 pub(crate) const MAX_ATTEMPTS_PER_10_MIN: usize = 6;
 pub(crate) const MAX_MOVE_MESSAGES: usize = 30;
+pub(crate) const MAX_MOVES_PER_HOUR: usize = 20;
 pub(crate) const MAX_MAILBOX_NAME: usize = 100;
 pub(crate) const MOVE_SECONDS: u64 = 120;
 
@@ -76,6 +77,21 @@ pub(crate) const CHANGES_TOO_LARGE: &str = concat!(
     "Ask the user to run `avery mail changes`."
 );
 
+pub(crate) const MOVES_BLOCKED: &str = concat!(
+    "The move log is not writable, so moving mail is blocked. ",
+    "Ask the user to check the folder of config.json."
+);
+
+pub(crate) const MOVES_UNREADABLE: &str = concat!(
+    "The move log contains lines that cannot be read, so the limits cannot be checked. NOTHING was moved. ",
+    "Ask the user to move moves.jsonl away."
+);
+
+pub(crate) const MOVES_TOO_LARGE: &str = concat!(
+    "The move log is too large to check the limits for the last hour. NOTHING was moved. ",
+    "Ask the user to move moves.jsonl away."
+);
+
 const INTRO: &str =
     "Access to the user's private mail accounts and calendars in Apple Mail and Calendar, as far as the user enabled them.";
 const MAIL_WORKFLOW: &str =
@@ -129,8 +145,8 @@ pub(crate) const HELP: &str = concat!(
     "- Every send, every move and every calendar change needs a click in a native macOS dialog that the model\n",
     "  cannot operate; the dialog shows exactly what is about to happen.\n",
     "- Limits: plain text, no Bcc, no attachments, few recipients, single events without attendees,\n",
-    "  few messages per move, rate limits and audit logs for sends and calendar changes\n",
-    "  (sendlog.jsonl, changes.jsonl).\n",
+    "  few messages per move, rate limits and audit logs for sends, moves and calendar changes\n",
+    "  (sendlog.jsonl, moves.jsonl, changes.jsonl).\n",
     "- Fail closed: only accounts and calendars in config.json are ever touched.\n",
     "- Mail and calendar text is untrusted: invisible and control characters are stripped and\n",
     "  every result carries a warning that it is data, not instructions.\n",
@@ -159,11 +175,12 @@ pub(crate) const USAGE: &str = concat!(
     " - privater KI-Agent auf macOS (Goose + lokales Modell + Apple Mail und Kalender)\n",
     "\n",
     "Befehle:\n",
-    "  avery init [--force]   Goose-Profil anlegen (Konfiguration, Rechte, Modell-Anbindung)\n",
+    "  avery init [--force]   Goose-Profil und Dock-Symbol (~/Applications/Avery.app) anlegen; --force erneuert sie mit Sicherung\n",
     "  avery mail <befehl>    Konten und Kalender freigeben und pruefen: onboard, setup, accounts, calendars,\n",
     "                         selftest, selftest-write, sendlog, changes, undo, revoke, status, help\n",
-    "  avery app              Goose Desktop mit dem Avery-Profil oeffnen; solange noch nichts eingerichtet ist,\n",
-    "                         fuehren Dialoge durch die Einrichtung (avery mail onboard; AVERY_NO_ONBOARD=1 schaltet das aus)\n",
+    "  avery app [--dialogs]  Goose Desktop mit dem Avery-Profil oeffnen; solange noch nichts eingerichtet ist,\n",
+    "                         fuehren Dialoge durch die Einrichtung (avery mail onboard; AVERY_NO_ONBOARD=1 schaltet das aus).\n",
+    "                         --dialogs (so startet Avery.app): Probleme und die Erneuerung des Profils in Dialogen\n",
     "  avery cli [args]       Goose CLI mit dem Avery-Profil\n",
     "  avery model            lokales Modell im Vordergrund starten (das tut auch der Dienst: brew services start avery)\n",
     "  avery pull             Modell einmalig laden (ca. 17 GB), im Vordergrund; mit Ctrl+C beenden, sobald es 'Ready' meldet\n",
@@ -171,9 +188,10 @@ pub(crate) const USAGE: &str = concat!(
     "  avery doctor           Voraussetzungen und Einrichtung pruefen\n",
     "  avery version          Version anzeigen\n",
     "\n",
-    "Erster Start: avery init, avery pull, brew services start avery, dann avery app: Mail und Kalender werden\n",
-    "              in Dialogen eingerichtet (im Terminal stattdessen: avery mail setup, avery mail selftest)\n",
-    "Taeglich:     avery app   (das Modell laeuft als Dienst; beenden: brew services stop avery)\n",
+    "Erster Start: avery init, avery pull, brew services start avery, dann Avery.app anklicken (aus ~/Applications ins Dock\n",
+    "              ziehen) oder avery app: Mail und Kalender werden in Dialogen eingerichtet (im Terminal stattdessen:\n",
+    "              avery mail setup, avery mail selftest)\n",
+    "Taeglich:     Avery im Dock anklicken (das Modell laeuft als Dienst; beenden: brew services stop avery)\n",
     "Einstellungen: ~/.avery/avery.env (siehe README)"
 );
 

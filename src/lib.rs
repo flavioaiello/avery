@@ -17,6 +17,7 @@ mod localtime;
 mod lock;
 mod mailerror;
 mod move_tools;
+mod movelog;
 mod osascript;
 mod read_tools;
 mod real;

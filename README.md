@@ -10,7 +10,7 @@ tokens.
 
 Everything runs on your Mac. macOS keeps your credentials and Avery never sees them; the bridge also works offline.
 
-> Status: early (v0.7.1). After installing, run `avery mail selftest` and `avery mail selftest-write`. They check the
+> Status: early (v0.8.0). After installing, run `avery mail selftest` and `avery mail selftest-write`. They check the
 > integration with Mail.app and Calendar.app, which the automated tests cannot do (they use demo data and a mock of the
 > scripting interface).
 
@@ -21,6 +21,7 @@ Everything runs on your Mac. macOS keeps your credentials and Avery never sees t
 | `avery` | One program (Rust, no dependencies). Command line: creates the Goose profile, opens Goose with it, runs the model, checks the setup. `avery serve` is the MCP server that Goose starts: it reads and changes Mail.app and Calendar.app through `osascript` |
 | Model service | `brew services start avery` runs `avery model`: Splash with the Avery settings, also at every login |
 | Goose profile | Config, permissions and a local provider for Splash, created by `avery init` in `~/.avery/goose`; your default Goose profile is not touched |
+| `Avery.app` | A small launcher that `avery init` writes to `~/Applications` (three files, no download, no disk image): click it, or drag it into the Dock, to open Goose with the Avery profile |
 
 ## Requirements
 
@@ -43,12 +44,13 @@ The formula builds avery from source at a pinned commit and installs Splash with
 ## First run
 
 ```sh
-avery init                  # create the Goose profile in ~/.avery/goose
+avery init                  # create the Goose profile in ~/.avery/goose and the app ~/Applications/Avery.app
 avery pull                  # download the model once (about 17 GB); stop it with Ctrl+C when it says Ready
 brew services start avery   # run the model as a service, also at every login
 ```
 
-Then open Goose with the Avery profile: `avery app`. While nothing is set up, the first start shows dialogs that guide
+Then open Goose with the Avery profile: click **Avery** (drag it from `~/Applications` into the Dock once) or run
+`avery app`. While nothing is set up, the first start shows dialogs that guide
 you through the setup (see [First start: the setup dialogs](#first-start-the-setup-dialogs)). The same step from a terminal:
 
 ```sh
@@ -87,27 +89,46 @@ security delete-generic-password -s avery-mail -a microsoft:bob@outlook.example
 ```
 
 The logs `sendlog.jsonl` and `changes.jsonl` keep working. The empty file `vault.lock` beside `config.lock` is no longer
-used and can be deleted. If `avery doctor` reports profile files that do not ask before changes, or you want the new
+used and can be deleted. If `avery doctor` reports that the profile is not up to date, or you want the new
 wording of the mail extension, `avery init --force` writes new ones (the old ones are kept as backup).
 
 ### Update from 0.6.1 and earlier
 
 `avery` is now one program, and it also serves Goose (`avery serve`; before, that was a second program,
-`avery-mail`). There is no `Avery.app` (and no Avery cask), no `avery up`, `avery down` or `avery install-app`, and the
-model no longer stops by itself: it runs as the Homebrew service. Homebrew removes a formula that only the cask needed
-when the cask goes away, so install the formula yourself first if you installed just the cask:
+`avery-mail`). There is no Avery cask or disk image, no `avery up`, `avery down` or `avery install-app`, and the
+model no longer stops by itself: it runs as the Homebrew service. `Avery.app` is back as three small files that
+`avery init` writes (see [Daily use](#daily-use)). An older `Avery.app` (from the cask or from `avery install-app`) starts
+commands that are gone, so remove it first; an app that is not Avery's own is never overwritten. Homebrew removes a
+formula that only the cask needed when the cask goes away, so install the formula yourself first if you installed just
+the cask:
 
 ```sh
 brew install flavioaiello/avery/avery
 brew uninstall --cask flavioaiello/avery/avery   # if you installed the Avery cask
-rm -rf ~/Applications/Avery.app                  # if you made the app with avery install-app
+rm -rf ~/Applications/Avery.app                  # the old app, if you have one: avery init writes a new one
 avery init --force                               # the Goose profile must start "avery serve"; the old files are kept as backups
 brew services start avery
 ```
 
 Your accounts and logs in `~/.avery/mail` stay as they are. `avery doctor` tells you if the Goose profile still points
-at the old program. The new profile also turns on [voice dictation](#voice-dictation) and sets moving mail to
-`ask_before`. `write` on a mail account now includes moving messages (always with your click).
+at the old program. The new profile also turns on [voice dictation](#voice-dictation). `write` on a mail account now
+includes moving messages (always with your click).
+
+### Update from 0.7.x
+
+Goose no longer asks before sending, moving or changing events: `permission.yaml` lists those five tools under
+`always_allow`, so only Avery's own dialog asks (see [How sending and changes are protected](#how-sending-and-changes-are-protected)).
+Moving mail now has a log (`moves.jsonl`) and limits like the other two. `avery init` also writes the new app. The profile
+files changed, so renew them:
+
+```sh
+brew upgrade avery
+avery init --force     # new profile and ~/Applications/Avery.app; the old profile files are kept as backups
+```
+
+Quit Goose before that, and start it again afterwards. From now on a changed profile no longer needs you to remember
+`--force`: `avery doctor` says `Profil aktuell` or reports it as outdated, and the Avery app offers to renew it at the start
+(only when Goose is not running; *Später* keeps the old files and asks again next time).
 
 ## First start: the setup dialogs
 
@@ -166,12 +187,21 @@ scans all of its events (up to 20000), so very large calendars are slow. All tim
 ## Daily use
 
 The model runs as a Homebrew service (`brew services start avery`, also at every login), so only Goose needs to be
-opened with the Avery profile: `avery app` (while nothing is set up, the [setup dialogs](#first-start-the-setup-dialogs)
-come first). If Goose is already open with that profile, it just brings it to the front.
+opened with the Avery profile: click **Avery** (`~/Applications/Avery.app`, written by `avery init`; drag it into the
+Dock once, or find it with Spotlight) or run `avery app` in a terminal. While nothing is set up, the
+[setup dialogs](#first-start-the-setup-dialogs) come first. If Goose is already open with that profile, it just brings it
+to the front.
 
-Do not start Goose from its own Dock icon for this setup: that opens Goose's default profile. To open it from the Dock or
-Spotlight, make a shortcut in the Shortcuts app with the action *Run Shell Script* and the command
-`/opt/homebrew/bin/avery app`.
+Where a terminal would print a message, the app shows a dialog instead (it starts `avery app --dialogs`): a missing Goose
+Desktop, a model that is not running, Goose already open with another profile (quit it with Cmd+Q and click again). When
+the profile files come from an older version, it asks whether to renew them: *Aktualisieren* writes the new files and keeps
+the old ones as `.bak` backups, *Später* changes nothing. It asks only while Goose is not running, because Goose rewrites
+its configuration while it runs.
+
+`Avery.app` is not signed: `Contents/MacOS/Avery` is a short shell script that runs the program that wrote it
+(`/opt/homebrew/bin/avery`, and `AVERY_HOME` if you set one when you ran `avery init`). Move Homebrew or `AVERY_HOME` and
+`avery init --force` writes it again; `rm -rf ~/Applications/Avery.app` removes it. Do not start Goose from its own Dock
+icon for this setup: that opens Goose's default profile.
 
 The model holds up to 28 GB of memory while it runs (`AVERY_MAX_MEMORY`); `brew services stop avery` frees it.
 `avery model` runs it in the foreground instead (for testing, or the one-time `avery pull`). `avery doctor` shows what is
@@ -218,17 +248,22 @@ doing something.
   dialog is the hard gate), nothing is deleted, and you can always move the messages back. A Gmail mailbox is a label,
   and Apple Mail's scripting can only add it: the message also stays in the inbox (the dialog says so, and so does the
   result), and you archive it in Mail, for example all at once from the label's mailbox. Other accounts (iCloud,
-  Exchange, IMAP) move the message for real. There is no log and no hourly limit for moves:
-  every call needs your click and is limited to 30 messages. A failure after the click is reported as such, with the
-  note that some messages may have been moved.
-- **Goose asks too.** `permission.yaml` sets the sending, moving and calendar change tools to `ask_before`.
+  Exchange, IMAP) move the message for real. Every attempt is logged in `moves.jsonl` before anything happens (account,
+  mailboxes and number of messages, never subjects) and counts against the limits below. If Mail fails or does not
+  answer after the click, the outcome is unknown: the attempt stays `pending` in the log, keeps counting against the
+  limits, and the model is told that some messages may have been moved and to look at both mailboxes.
+- **One click, not two.** `permission.yaml` lists the sending, moving and calendar change tools under `always_allow`:
+  Goose does not ask before them, because Avery's own dialog is the gate and shows what Goose's prompt cannot (the whole
+  mail, the event before and after, every moved message), while the model cannot operate it. The limits and logs below do
+  not depend on Goose. If you want Goose's question as well, move the five tools to `ask_before` in
+  `~/.avery/goose/config/permission.yaml`; renewing the profile writes the default again (with a backup).
 - **Limits.** Mail: plain text only, no Bcc, no attachments, at most 5 recipients (also for replies to all), at most
   1500 characters and 40 lines per sent mail (longer texts must be drafts you send from your mail app), 5 sent mails per hour,
-  30 drafts per hour. Calendar: title and place up to 200 characters, notes up to 1000 characters and 30 lines (the dialog shows all of them), 10 changes per hour. For both:
-  6 attempts per 10 minutes and a 20 second cool-down after you decline. Every attempt is logged before anything
-  happens (`avery mail sendlog`, `avery mail changes`). If a log cannot be written or read, contains a line the server
-  does not understand, or is too large to check the last hour, nothing is sent or changed until you look at it and move
-  the file away. The hourly limits can be changed in `config.json` (`sends_per_hour`, `changes_per_hour`, 1 to 30).
+  30 drafts per hour. Calendar: title and place up to 200 characters, notes up to 1000 characters and 30 lines (the dialog shows all of them), 10 changes per hour. Moves: 30 messages per call and 20 moves per hour.
+  For all three: 6 attempts per 10 minutes and a 20 second cool-down after you decline. Every attempt is logged before anything
+  happens (`avery mail sendlog`, `avery mail changes`, and `moves.jsonl`). If a log cannot be written or read, contains a line the server
+  does not understand, or is too large to check the last hour, nothing is sent, moved or changed until you look at it and move
+  the file away. The hourly limits for sends and changes can be changed in `config.json` (`sends_per_hour`, `changes_per_hour`, 1 to 30).
 - **Undo.** The change log keeps the event as it was before and after every change. `avery mail undo` restores it
   (a deleted event is created again; attendees and alerts do not come back). It asks for the dialog again and is not
   held back by the hourly limits, which exist for the model.
@@ -238,8 +273,8 @@ doing something.
 - **No other destructive tools.** There is no code that deletes, flags or marks mail, and mail only moves between
   mailboxes of one account.
 - **Replies** use Mail's reply: the recipients and the subject are taken from the original message.
-- **No retries.** A request that fails after the click is reported as an unknown outcome and counts as sent; the server
-  never repeats a send or a change on its own.
+- **No retries.** A request that fails after the click is reported as an unknown outcome and counts as sent, moved or
+  changed; the server never repeats a send, a move or a change on its own.
 
 The dialog is the hard gate. Instructions to the model (`top-of-mind.md`) are only a second line of defence.
 The profile disables Goose's shell and file extensions; do not enable them for this profile.
@@ -248,8 +283,8 @@ The profile disables Goose's shell and file extensions; do not enable them for t
 
 | Command | Purpose |
 |---|---|
-| `avery init [--force]` | Create the profile (existing files are kept; `--force` replaces them and keeps a backup) |
-| `avery app` | Open Goose with the Avery profile (the setup dialogs come first while nothing is set up) |
+| `avery init [--force]` | Create the profile and the app `~/Applications/Avery.app` (existing files are kept; `--force` renews them, keeps a backup of the profile files and replaces the app only if it is Avery's own) |
+| `avery app [--dialogs]` | Open Goose with the Avery profile (the setup dialogs come first while nothing is set up). `--dialogs` is what the app uses: problems and the offer to renew the profile come as dialogs |
 | `avery cli` | Run the Goose CLI with the Avery profile, for example `avery cli session` |
 | `avery model` | Run the local model server in the foreground (this is what the service runs: `brew services start avery`) |
 | `avery pull` | Download the model once (online, foreground; Ctrl+C when it says Ready) |
@@ -276,11 +311,14 @@ cannot pull a new multi-gigabyte model revision. `avery pull` is the one command
 | Path | Content |
 |---|---|
 | `~/.avery/goose` | Goose profile (`config/`, `top-of-mind.md`, sessions) |
+| `~/.avery/goose/avery-profile.sha256` | Fingerprint of the profile templates, written by the last complete `avery init` or renewal; `avery doctor` and the app compare it with the installed version to see whether the profile is out of date |
+| `~/Applications/Avery.app` | The launcher written by `avery init` (`Info.plist`, the icon and the script `Contents/MacOS/Avery`) |
 | `~/.avery/mail/config.json` | The enabled mail accounts and calendars with their levels and the hourly limits (format version 4, written by `avery mail setup`, `revoke` and the setup dialogs of `avery mail onboard`) |
 | `~/.avery/mail/config.lock` | Empty lock file: those commands hold it only while they re-read and save `config.json` (a few milliseconds, never while you answer prompts), so two terminals never overwrite each other; a command that cannot get it within 5 seconds stops and saves nothing |
 | `~/.avery/mail/onboard.dismissed` | Empty marker file (owner-only), created when you choose *Nicht mehr fragen* in the first dialog: `avery mail onboard --if-needed` is silent while it exists. Delete it to be asked again; the config format is not involved |
 | `~/.avery/mail/sendlog.jsonl` | Audit log of send and draft attempts (format version 1; no mail text, only a short hash) |
 | `~/.avery/mail/changes.jsonl` | Log of calendar changes with the event before and after (format version 1; used by `avery mail undo`) |
+| `~/.avery/mail/moves.jsonl` | Log of move attempts: account, source and target mailbox, number of messages, outcome (format version 1; no subjects, no message ids) |
 
 Set `AVERY_HOME` to use another base folder. The lock file is created (owner-only) when it is missing and never written
 afterwards: an existing one is only opened for reading, so a read-only lock file works and may stay as it is.
@@ -312,10 +350,12 @@ checks before it is saved; a file that would be refused is never written.
   watch the first start once. If the dialogs do not show, `avery mail onboard` in a terminal says why, and
   `AVERY_NO_ONBOARD=1` with `avery mail setup` always works.
 - macOS asks for permission to control Mail and Calendar for the app that starts the server (Terminal for the command
-  line, Goose for the agent); if Goose does not get the prompt, use `avery cli session` from a terminal.
+  line, Goose for the agent, the Avery app for the setup dialogs); if Goose does not get the prompt, use
+  `avery cli session` from a terminal.
 - Mail search covers subject and sender, not the message body.
 - Single events without attendees can be changed; links on events (`url`) are not supported.
 - Avery is for Apple silicon.
+- `Avery.app` is a script that is not signed or notarized; it only starts the program that wrote it.
 - The model runs as a service and holds its memory until you stop it (`brew services stop avery`).
 - The model server settings assume Splash and the model named in `avery.env`.
 

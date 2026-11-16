@@ -121,14 +121,16 @@ fn an_approved_send_goes_out_and_the_log_has_no_mail_text() -> TestResult {
     Ok(())
 }
 
+const MOVE: &str = r#"{"ids": [101, 102], "to_mailbox": "Werbung", "create_mailbox": true}"#;
+
 #[test]
 fn moving_needs_the_write_level_and_the_click_and_never_reaches_trash() -> TestResult {
-    const MOVE: &str = r#"{"ids": [101, 102], "to_mailbox": "Werbung", "create_mailbox": true}"#;
     let sandbox = Sandbox::new()?;
     let mut off = Server::start(&sandbox, &[("MAIL_MCP_FAKE", "1")])?;
     let (error, text) = off.call("move_messages", MOVE)?;
     assert!(error && text.contains("not enabled"), "{text}");
-    let mut declined = start_writer(&sandbox, "FAKE-GMAIL", "no", &[])?;
+    let elsewhere = Sandbox::new()?;
+    let mut declined = start_writer(&elsewhere, "FAKE-GMAIL", "no", &[])?;
     let (error, text) = declined.call("move_messages", MOVE)?;
     assert!(
         !error && text.contains("did NOT approve") && text.contains("NOTHING was moved"),
@@ -148,6 +150,43 @@ fn moving_needs_the_write_level_and_the_click_and_never_reaches_trash() -> TestR
     )?;
     assert!(error && text.contains("cannot be the target"), "{text}");
     assert!(!sandbox.path("sendlog.jsonl").exists());
+    let log = sandbox.read("moves.jsonl");
+    assert_eq!(lines(&log).len(), 2, "{log}");
+    assert!(log.contains("\"outcome\": \"pending\"") && log.contains("\"outcome\": \"done\""));
+    assert!(log.contains("\"to\": \"Werbung\"") && !log.contains("Subject"));
+    Ok(())
+}
+
+#[test]
+fn an_uncertain_move_asks_the_user_to_check_both_mailboxes_and_stays_pending() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut server = start_writer(
+        &sandbox,
+        "FAKE-GMAIL",
+        "yes",
+        &[("MAIL_MCP_FAKE_UNCERTAIN", "1")],
+    )?;
+    let (error, text) = server.call("move_messages", MOVE)?;
+    assert!(
+        error && text.contains("may have been moved") && text.contains("list_messages"),
+        "{text}"
+    );
+    let log = sandbox.read("moves.jsonl");
+    assert_eq!(lines(&log).len(), 1, "{log}");
+    assert!(log.contains("\"outcome\": \"pending\""), "{log}");
+    Ok(())
+}
+
+#[test]
+fn a_declined_move_blocks_a_retry_even_after_a_restart() -> TestResult {
+    let sandbox = Sandbox::new()?;
+    let mut first = start_writer(&sandbox, "FAKE-GMAIL", "no", &[])?;
+    first.call("move_messages", MOVE)?;
+    assert_eq!(first.finish()?, Some(0));
+    let mut second = start_writer(&sandbox, "FAKE-GMAIL", "yes", &[])?;
+    let (error, text) = second.call("move_messages", MOVE)?;
+    assert!(error && text.contains("just declined or ignored"), "{text}");
+    assert_eq!(lines(&sandbox.read("moves.jsonl")).len(), 2);
     Ok(())
 }
 

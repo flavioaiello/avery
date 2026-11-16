@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use super::system::Ran;
 use super::*;
+use crate::json::Json;
 use crate::osascript::{App, Finished, Host};
-use crate::testutil::TempDir;
+use crate::testutil::{Reply, Script, TempDir};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -129,20 +130,19 @@ fn lookup_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
     move |key: &str| map.get(key).cloned()
 }
 
-fn invoke(args: &[&str], pairs: &[(&str, &str)], fake: &Fake) -> (u8, String, String) {
+fn invoke_on(
+    screen: &Screen,
+    args: &[&str],
+    pairs: &[(&str, &str)],
+    fake: &Fake,
+) -> (u8, String, String) {
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     let lookup = lookup_of(pairs);
-    let host = NoHost;
-    let gui = || false;
-    let screen = Screen {
-        host: &host,
-        gui: &gui,
-    };
     let call = Call {
         args: &args,
         lookup: &lookup,
         system: fake,
-        screen: &screen,
+        screen,
         exe: PathBuf::from(EXE),
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -152,6 +152,16 @@ fn invoke(args: &[&str], pairs: &[(&str, &str)], fake: &Fake) -> (u8, String, St
         String::from_utf8_lossy(&out).into_owned(),
         String::from_utf8_lossy(&err).into_owned(),
     )
+}
+
+fn invoke(args: &[&str], pairs: &[(&str, &str)], fake: &Fake) -> (u8, String, String) {
+    let host = NoHost;
+    let gui = || false;
+    let screen = Screen {
+        host: &host,
+        gui: &gui,
+    };
+    invoke_on(&screen, args, pairs, fake)
 }
 
 fn env_of(pairs: &[(&str, &str)]) -> Result<Env, String> {
@@ -183,7 +193,21 @@ fn commands_are_parsed_with_their_trailing_punctuation_tolerated() {
         assert_eq!(parse(&words(&[word])), Command::Version, "{word}");
     }
     assert_eq!(parse(&words(&["serve"])), Command::Serve);
-    assert_eq!(parse(&words(&["app", "x"])), Command::Launch(Launch::App));
+    assert_eq!(
+        parse(&words(&["app"])),
+        Command::Launch(Launch::App { dialogs: false })
+    );
+    assert_eq!(
+        parse(&words(&["app", "--dialogs"])),
+        Command::Launch(Launch::App { dialogs: true })
+    );
+    for bad in [&["app", "x"][..], &["app", "--dialogs", "--dialogs"][..]] {
+        assert_eq!(
+            parse(&words(bad)),
+            Command::Unknown(bad.join(" ")),
+            "{bad:?}"
+        );
+    }
     assert_eq!(parse(&words(&["doctor,"])), Command::Launch(Launch::Doctor));
     assert_eq!(
         parse(&words(&["init", "--force"])),
@@ -222,10 +246,12 @@ fn version_help_and_unknown_commands_answer_without_touching_the_system() {
         "onboard, setup",
         "AVERY_NO_ONBOARD=1",
         "brew services start avery",
+        "~/Applications/Avery.app",
+        "avery app [--dialogs]",
     ] {
         assert!(out.contains(word), "{word}");
     }
-    for gone in ["avery up", "avery down", "install-app", "Avery.app", "link"] {
+    for gone in ["avery up", "avery down", "install-app", "link"] {
         assert!(!out.contains(gone), "{gone}");
     }
     let (code, out, err) = invoke(&["foo"], &[], &fake);
@@ -295,7 +321,7 @@ fn init_writes_the_profile_with_this_program_and_keeps_it_private() -> TestResul
     let pairs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let (code, out, err) = invoke(&["init"], &pairs, &fake);
     assert_eq!((code, err.as_str()), (0, ""), "{out}");
-    assert_eq!(out.matches("  geschrieben: ").count(), 5);
+    assert_eq!(out.matches("  geschrieben: ").count(), 6);
     let goose = rig.goose_root();
     assert!(out.contains(&format!("Avery-Profil einrichten: {}", goose.display())));
     let config = fs::read_to_string(goose.join("config/config.yaml"))?;
@@ -307,12 +333,18 @@ fn init_writes_the_profile_with_this_program_and_keeps_it_private() -> TestResul
     assert!(config.contains("- serve") && config.contains("envs: {}"));
     assert!(!config.contains("@GOOSE_ROOT@") && !config.contains("@AVERY@"));
     let permission = fs::read_to_string(goose.join("config/permission.yaml"))?;
-    assert!(permission.contains(
-        "ask_before:\n  - mail__send_message\n  - mail__move_messages\n  - mail__create_event\n  - mail__update_event\n  - mail__delete_event"
-    ));
-    assert!(permission.contains("- mail__create_draft"));
-    assert!(permission.contains("- mail__list_events"));
-    assert!(permission.contains("never_allow: []"));
+    for tool in [
+        "mail__create_draft",
+        "mail__send_message",
+        "mail__move_messages",
+        "mail__create_event",
+        "mail__update_event",
+        "mail__delete_event",
+        "mail__list_events",
+    ] {
+        assert!(permission.contains(&format!("\n  - {tool}\n")), "{tool}");
+    }
+    assert!(permission.contains("\n  ask_before: []\n  never_allow: []\n"));
     for relative in [
         "config/custom_providers/custom_splash.json",
         "top-of-mind.md",
@@ -362,12 +394,12 @@ fn a_second_init_keeps_everything_and_force_keeps_backups() -> TestResult {
     fs::write(&notes, &text)?;
     let (code, out, _) = invoke(&["init"], &pairs, &fake);
     assert_eq!(code, 0);
-    assert_eq!(out.matches("nicht ueberschrieben").count(), 5);
+    assert_eq!(out.matches("nicht ueberschrieben").count(), 6);
     assert_eq!(fs::read_to_string(&notes)?, text);
     let (code, out, _) = invoke(&["init", "--force"], &pairs, &fake);
     assert_eq!(code, 0);
     assert_eq!(out.matches("  Sicherung: ").count(), 5);
-    assert_eq!(out.matches("  geschrieben: ").count(), 5);
+    assert_eq!(out.matches("  geschrieben: ").count(), 6);
     let backups: Vec<_> = fs::read_dir(rig.goose_root())?
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -435,6 +467,225 @@ fn init_needs_an_absolute_program_path() -> TestResult {
         Err(Refusal::new("Der Pfad von avery ist nicht ermittelbar."))
     );
     assert!(!rig.avery_home().exists());
+    Ok(())
+}
+
+#[test]
+fn init_records_the_profile_as_current_and_only_a_complete_write_does() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let pairs = app_pairs(&rig, &[]);
+    let pairs = borrowed(&pairs);
+    let (code, out, _) = invoke(&["init"], &pairs, &fake);
+    assert_eq!(code, 0);
+    assert!(!out.contains("Das Profil ist nicht aktuell"), "{out}");
+    let launcher = launcher(&fake, &pairs)?;
+    assert!(profile::current(&launcher));
+    let marker = rig.goose_root().join("avery-profile.sha256");
+    assert_eq!(fs::read_to_string(&marker)?.trim().len(), 64);
+
+    fs::remove_file(&marker)?;
+    assert!(!profile::current(&launcher));
+    let (_, out, _) = invoke(&["init"], &pairs, &fake);
+    assert!(out.contains("Hinweis: Das Profil ist nicht aktuell. Aktualisieren (die alten Dateien bleiben als Sicherung): avery init --force"), "{out}");
+    assert!(!marker.exists());
+    let (_, out, _) = invoke(&["init", "--force"], &pairs, &fake);
+    assert!(!out.contains("Das Profil ist nicht aktuell"), "{out}");
+    assert!(profile::current(&launcher));
+
+    fs::write(&marker, "0000\n")?;
+    assert!(!profile::current(&launcher));
+    Ok(())
+}
+
+fn app_files(app: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    (
+        app.join("Contents/MacOS/Avery"),
+        app.join("Contents/Info.plist"),
+        app.join("Contents/Resources/Avery.icns"),
+    )
+}
+
+#[test]
+fn init_makes_the_app_for_the_dock() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let pairs = app_pairs(&rig, &[]);
+    let (code, out, _) = invoke(&["init"], &borrowed(&pairs), &fake);
+    assert_eq!(code, 0);
+    let app = rig.root().join("Applications/Avery.app");
+    assert!(out.contains(&format!("  geschrieben: {}", app.display())));
+    let (script, plist, icon) = app_files(&app);
+    assert_eq!(
+        fs::read_to_string(&script)?,
+        format!("#!/bin/sh\nexec '{EXE}' app --dialogs\n")
+    );
+    assert_eq!(
+        fs::read_to_string(&plist)?,
+        include_str!("../../assets/Info.plist")
+    );
+    assert_eq!(fs::read(&icon)?, include_bytes!("../../assets/Avery.icns"));
+    let owner = |path: &Path| -> Result<u32, io::Error> {
+        Ok(fs::metadata(path)?.permissions().mode() & 0o111)
+    };
+    assert_eq!(owner(&script)? & 0o100, 0o100);
+    assert_eq!((owner(&plist)?, owner(&icon)?), (0, 0));
+    let names: Vec<String> = fs::read_dir(rig.root().join("Applications"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["Avery.app"]);
+    Ok(())
+}
+
+#[test]
+fn the_app_carries_a_custom_avery_home_and_nothing_else() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let home = rig.root().join("my 'avery' home");
+    let home_text = home.to_string_lossy().into_owned();
+    let pairs = app_pairs(&rig, &[("AVERY_HOME", &home_text)]);
+    let (code, _, err) = invoke(&["init"], &borrowed(&pairs), &fake);
+    assert_eq!((code, err.as_str()), (0, ""));
+    let (script, _, _) = app_files(&rig.root().join("Applications/Avery.app"));
+    assert_eq!(
+        fs::read_to_string(&script)?,
+        format!(
+            "#!/bin/sh\nexport AVERY_HOME='{}/my '\\''avery'\\'' home'\nexec '{EXE}' app --dialogs\n",
+            rig.root().display()
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn the_script_in_the_app_starts_this_program_even_with_awkward_paths() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let program = rig.write("it's here/avery", "")?;
+    let log = rig.root().join("called.txt");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s|' \"$@\" > '{log}'\nprintf '%s' \"$AVERY_HOME\" >> '{log}'\n",
+            log = log.display()
+        ),
+    )?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+    let home = rig.root().join("a b/\"home\"");
+    let home_text = home.to_string_lossy().into_owned();
+    let pairs = app_pairs(&rig, &[("AVERY_HOME", &home_text)]);
+    let mut launcher = launcher(&fake, &borrowed(&pairs))?;
+    launcher.exe = program;
+    let mut out = Vec::new();
+    dock::install(&launcher, false, &mut out).map_err(|refusal| refusal.0)?;
+    let (script, _, _) = app_files(&rig.root().join("Applications/Avery.app"));
+    let status = std::process::Command::new("/bin/sh")
+        .arg(&script)
+        .status()?;
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(&log)?,
+        format!("app|--dialogs|{home_text}")
+    );
+    Ok(())
+}
+
+#[test]
+fn the_app_is_replaced_only_when_forced_and_only_when_it_is_ours() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let pairs = app_pairs(&rig, &[]);
+    let pairs = borrowed(&pairs);
+    invoke(&["init"], &pairs, &fake);
+    let app = rig.root().join("Applications/Avery.app");
+    let (script, plist, _) = app_files(&app);
+    fs::write(&script, "#!/bin/sh\nexit 3\n")?;
+    let (code, out, _) = invoke(&["init"], &pairs, &fake);
+    assert_eq!(code, 0);
+    assert!(out.contains(&format!(
+        "  vorhanden, nicht ueberschrieben: {}",
+        app.display()
+    )));
+    assert_eq!(fs::read_to_string(&script)?, "#!/bin/sh\nexit 3\n");
+    let (code, out, _) = invoke(&["init", "--force"], &pairs, &fake);
+    assert_eq!(code, 0);
+    assert!(out.contains(&format!("  geschrieben: {}", app.display())));
+    assert_eq!(
+        fs::read_to_string(&script)?,
+        format!("#!/bin/sh\nexec '{EXE}' app --dialogs\n")
+    );
+    let names: Vec<String> = fs::read_dir(rig.root().join("Applications"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["Avery.app"]);
+
+    fs::write(&plist, "<plist>someone else's app</plist>")?;
+    for args in [&["init", "--force"][..], &["init"][..]] {
+        let (code, _, err) = invoke(args, &pairs, &fake);
+        assert_eq!(code, 1, "{args:?}");
+        assert_eq!(
+            err,
+            format!(
+                "avery: {app} gehoert nicht zu Avery und bleibt unveraendert. Entfernen mit: rm -rf '{app}'  und danach: avery init\n",
+                app = app.display()
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(&plist)?,
+            "<plist>someone else's app</plist>"
+        );
+    }
+
+    fs::remove_dir_all(&app)?;
+    let elsewhere = rig.root().join("elsewhere.app");
+    fs::create_dir_all(elsewhere.join("Contents"))?;
+    fs::write(
+        elsewhere.join("Contents/Info.plist"),
+        include_str!("../../assets/Info.plist"),
+    )?;
+    std::os::unix::fs::symlink(&elsewhere, &app)?;
+    for args in [&["init", "--force"][..], &["init"][..]] {
+        let (code, _, err) = invoke(args, &pairs, &fake);
+        assert_eq!(code, 1, "{args:?}");
+        assert!(err.contains("gehoert nicht zu Avery"), "{err}");
+        assert!(fs::symlink_metadata(&app)?.file_type().is_symlink());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_foreign_app_stops_init_only_after_the_profile_is_complete_and_private() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    rig.write(
+        "Applications/Avery.app/Contents/Info.plist",
+        "<plist>someone else's app</plist>",
+    )?;
+    let pairs = app_pairs(&rig, &[]);
+    let (code, out, err) = invoke(&["init"], &borrowed(&pairs), &fake);
+    assert_eq!(code, 1, "{out}");
+    assert!(err.contains("gehoert nicht zu Avery"), "{err}");
+    let launcher = launcher(&fake, &borrowed(&pairs))?;
+    assert!(profile::current(&launcher));
+    for dir in [rig.avery_home(), rig.avery_home().join("mail")] {
+        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
+    }
+    Ok(())
+}
+
+#[test]
+fn without_a_user_home_the_app_is_skipped_with_a_hint() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let home = rig.root().join("avery-home");
+    let home_text = home.to_string_lossy().into_owned();
+    let (code, out, err) = invoke(&["init"], &[("AVERY_HOME", &home_text)], &fake);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert!(out.contains("Hinweis: Das Dock-Symbol wurde nicht angelegt (HOME ist nicht gesetzt)."));
+    assert!(!out.contains("/Avery.app"));
+    assert!(!rig.root().join("Applications").exists());
     Ok(())
 }
 
@@ -614,6 +865,10 @@ fn ready() -> Result<Ready, io::Error> {
     let app = rig.root().join("Goose.app");
     fs::create_dir_all(app.join("Contents"))?;
     rig.write(".avery/goose/config/config.yaml", "x: 1\n")?;
+    rig.write(
+        ".avery/goose/avery-profile.sha256",
+        &format!("{}\n", profile::digest()),
+    )?;
     let root = rig.goose_root().to_string_lossy().into_owned();
     Ok(Ready {
         app: app.to_string_lossy().into_owned(),
@@ -622,12 +877,62 @@ fn ready() -> Result<Ready, io::Error> {
     })
 }
 
+fn ready_pairs(ready: &Ready) -> Vec<(String, String)> {
+    vec![
+        ("HOME".to_string(), ready.rig.home()),
+        ("AVERY_GOOSE_APP".to_string(), ready.app.clone()),
+        ("AVERY_NO_ONBOARD".to_string(), "1".to_string()),
+    ]
+}
+
+fn marker_of(ready: &Ready) -> PathBuf {
+    ready.rig.goose_root().join("avery-profile.sha256")
+}
+
+struct FakeUi {
+    setups: usize,
+    setup_code: u8,
+    alerts: Vec<String>,
+    answer: Option<bool>,
+    asked: Vec<(String, String, String)>,
+}
+
+impl FakeUi {
+    fn new(setup_code: u8, answer: Option<bool>) -> FakeUi {
+        FakeUi {
+            setups: 0,
+            setup_code,
+            alerts: Vec::new(),
+            answer,
+            asked: Vec::new(),
+        }
+    }
+}
+
+impl start::Ui for FakeUi {
+    fn setup(&mut self, out: &mut dyn io::Write) -> u8 {
+        self.setups += 1;
+        let _ = writeln!(out, "dialogs");
+        self.setup_code
+    }
+
+    fn alert(&mut self, text: &str) {
+        self.alerts.push(text.to_string());
+    }
+
+    fn agree(&mut self, question: &str, yes: &str, no: &str) -> Option<bool> {
+        self.asked
+            .push((question.to_string(), yes.to_string(), no.to_string()));
+        self.answer
+    }
+}
+
 fn start_app(
     ready: &Ready,
     fake: &Fake,
     no_onboard: bool,
-    onboard_code: u8,
-) -> Result<(Result<u8, Refusal>, String, String, usize), String> {
+    ui: &mut FakeUi,
+) -> Result<(Result<u8, Refusal>, String, String), String> {
     let pairs = [
         ("HOME", ready.rig.home()),
         ("AVERY_GOOSE_APP", ready.app.clone()),
@@ -635,18 +940,11 @@ fn start_app(
     let pairs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let launcher = launcher(fake, &pairs)?;
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let mut calls = 0usize;
-    let mut onboard = |out: &mut dyn io::Write| {
-        calls += 1;
-        let _ = writeln!(out, "dialogs");
-        onboard_code
-    };
-    let result = start::app(&launcher, no_onboard, &mut onboard, &mut out, &mut err);
+    let result = start::app(&launcher, no_onboard, ui, &mut out, &mut err);
     Ok((
         result,
         String::from_utf8_lossy(&out).into_owned(),
         String::from_utf8_lossy(&err).into_owned(),
-        calls,
     ))
 }
 
@@ -672,9 +970,14 @@ fn app_opens_goose_with_the_profile_when_goose_is_not_running() -> TestResult {
         healthy: true,
         ..Fake::default()
     };
-    let (result, out, err, calls) = start_app(&ready, &fake, false, 0)?;
+    let mut ui = FakeUi::new(0, None);
+    let (result, out, err) = start_app(&ready, &fake, false, &mut ui)?;
     assert_eq!(result, Ok(0));
-    assert_eq!((out.as_str(), err.as_str(), calls), ("dialogs\n", "", 1));
+    assert_eq!(
+        (out.as_str(), err.as_str(), ui.setups),
+        ("dialogs\n", "", 1)
+    );
+    assert!(ui.alerts.is_empty() && ui.asked.is_empty());
     assert_eq!(fake.started(), [open_plan(&ready)]);
     Ok(())
 }
@@ -686,17 +989,20 @@ fn a_failed_setup_never_blocks_the_start_and_no_onboard_skips_it() -> TestResult
         healthy: true,
         ..Fake::default()
     };
-    let (result, _, err, calls) = start_app(&ready, &fake, false, 1)?;
+    let mut ui = FakeUi::new(1, None);
+    let (result, _, err) = start_app(&ready, &fake, false, &mut ui)?;
     assert_eq!(result, Ok(0));
-    assert_eq!(calls, 1);
+    assert_eq!(ui.setups, 1);
     assert_eq!(
         err,
         "Hinweis: Die Einrichtung in Dialogen ist nicht abgeschlossen. Wiederholen: avery mail onboard\n"
     );
+    assert!(ui.alerts.is_empty());
     assert_eq!(fake.started(), [open_plan(&ready)]);
-    let (result, out, err, calls) = start_app(&ready, &fake, true, 1)?;
+    let mut ui = FakeUi::new(1, None);
+    let (result, out, err) = start_app(&ready, &fake, true, &mut ui)?;
     assert_eq!(result, Ok(0));
-    assert_eq!((out.as_str(), err.as_str(), calls), ("", "", 0));
+    assert_eq!((out.as_str(), err.as_str(), ui.setups), ("", "", 0));
     assert_eq!(fake.started().len(), 2);
     Ok(())
 }
@@ -705,12 +1011,12 @@ fn a_failed_setup_never_blocks_the_start_and_no_onboard_skips_it() -> TestResult
 fn app_warns_when_the_model_is_down_but_still_starts() -> TestResult {
     let ready = ready()?;
     let fake = Fake::default();
-    let (result, _, err, _) = start_app(&ready, &fake, true, 0)?;
+    let mut ui = FakeUi::new(0, None);
+    let (result, _, err) = start_app(&ready, &fake, true, &mut ui)?;
     assert_eq!(result, Ok(0));
-    assert_eq!(
-        err,
-        "Hinweis: Das Modell laeuft nicht. Mit 'brew services start avery' starten.\n"
-    );
+    let hint = "Hinweis: Das Modell laeuft nicht. Mit 'brew services start avery' starten.";
+    assert_eq!(err, format!("{hint}\n"));
+    assert_eq!(ui.alerts, [hint]);
     assert_eq!(fake.started(), [open_plan(&ready)]);
     Ok(())
 }
@@ -718,15 +1024,24 @@ fn app_warns_when_the_model_is_down_but_still_starts() -> TestResult {
 #[test]
 fn app_only_brings_goose_forward_when_it_runs_with_the_profile() -> TestResult {
     let ready = ready()?;
+    fs::remove_file(marker_of(&ready))?;
     let fake = Fake {
         healthy: true,
         ..Fake::default()
     }
     .with_running(format!("{}/Contents/", ready.app))
     .with_running(format!("GOOSE_PATH_ROOT\":\"{}\"", ready.root));
-    let (result, out, _, _) = start_app(&ready, &fake, true, 0)?;
+    let mut ui = FakeUi::new(0, Some(true));
+    let (result, out, err) = start_app(&ready, &fake, true, &mut ui)?;
     assert_eq!(result, Ok(0));
-    assert_eq!(out, "Goose laeuft bereits mit dem Avery-Profil.\n");
+    assert_eq!(
+        (out.as_str(), err.as_str()),
+        ("Goose laeuft bereits mit dem Avery-Profil.\n", "")
+    );
+    assert!(
+        ui.asked.is_empty(),
+        "a running Goose must not get a new profile under it"
+    );
     assert_eq!(
         fake.started(),
         [Plan::new("open", vec!["-a".to_string(), ready.app.clone()])]
@@ -737,17 +1052,219 @@ fn app_only_brings_goose_forward_when_it_runs_with_the_profile() -> TestResult {
 #[test]
 fn app_refuses_to_start_goose_over_another_profile() -> TestResult {
     let ready = ready()?;
+    fs::remove_file(marker_of(&ready))?;
     let fake = Fake {
         healthy: true,
         ..Fake::default()
     }
     .with_running(format!("{}/Contents/", ready.app));
-    let (result, _, _, _) = start_app(&ready, &fake, true, 0)?;
+    let mut ui = FakeUi::new(0, Some(true));
+    let (result, _, _) = start_app(&ready, &fake, true, &mut ui)?;
     assert_eq!(
         result.err().map(|refusal| refusal.0),
         Some("Goose laeuft bereits mit einem anderen Profil (z. B. dem Standardprofil). Bitte beenden (Cmd+Q) und danach erneut starten.".to_string())
     );
-    assert!(fake.started().is_empty());
+    assert!(fake.started().is_empty() && ui.asked.is_empty());
+    Ok(())
+}
+
+#[test]
+fn an_outdated_profile_is_offered_for_renewal_and_renewed_only_on_a_yes() -> TestResult {
+    let ready = ready()?;
+    let marker = marker_of(&ready);
+    let config = ready.rig.goose_root().join("config/config.yaml");
+    fs::remove_file(&marker)?;
+    let fake = Fake {
+        healthy: true,
+        ..Fake::default()
+    };
+
+    let mut ui = FakeUi::new(0, None);
+    let (result, _, err) = start_app(&ready, &fake, true, &mut ui)?;
+    assert_eq!(result, Ok(0));
+    assert_eq!(
+        err,
+        "Hinweis: Das Profil ist nicht aktuell. Aktualisieren (die alten Dateien bleiben als Sicherung): avery init --force\n"
+    );
+    assert_eq!(ui.asked.len(), 1);
+
+    let mut ui = FakeUi::new(0, Some(false));
+    let (result, out, err) = start_app(&ready, &fake, true, &mut ui)?;
+    assert_eq!((result, out.as_str(), err.as_str()), (Ok(0), "", ""));
+    let (question, yes, no) = &ui.asked[0];
+    assert!(question.starts_with("Das Avery-Profil für Goose ist nicht mehr aktuell"));
+    assert!(question.contains("Sicherung (.bak)"));
+    assert_eq!((yes.as_str(), no.as_str()), ("Aktualisieren", "Später"));
+    assert_eq!(fs::read_to_string(&config)?, "x: 1\n");
+    assert!(!marker.exists());
+
+    let mut ui = FakeUi::new(0, Some(true));
+    let (result, out, err) = start_app(&ready, &fake, true, &mut ui)?;
+    assert_eq!((result, err.as_str()), (Ok(0), ""));
+    assert_eq!(out.matches("  geschrieben: ").count(), 4, "{out}");
+    assert_eq!(fs::read_to_string(&marker)?.trim(), profile::digest());
+    let renewed = fs::read_to_string(&config)?;
+    assert!(renewed.contains(&format!("cmd: \"{EXE}\"")), "{renewed}");
+    let backups: Vec<String> = fs::read_dir(ready.rig.goose_root().join("config"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("config.yaml.bak-"))
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(
+        fs::read_to_string(ready.rig.goose_root().join("config").join(&backups[0]))?,
+        "x: 1\n"
+    );
+    assert_eq!(fake.started().len(), 3);
+
+    let mut ui = FakeUi::new(0, Some(true));
+    let (_, out, _) = start_app(&ready, &fake, true, &mut ui)?;
+    assert!(
+        ui.asked.is_empty() && !out.contains("geschrieben"),
+        "a current profile is not offered again"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failing_renewal_is_reported_and_the_start_goes_on() -> TestResult {
+    let ready = ready()?;
+    let marker = marker_of(&ready);
+    fs::remove_file(&marker)?;
+    fs::create_dir_all(ready.rig.goose_root().join("config/permission.yaml"))?;
+    let fake = Fake {
+        healthy: true,
+        ..Fake::default()
+    };
+    let mut ui = FakeUi::new(0, Some(true));
+    let (result, _, err) = start_app(&ready, &fake, true, &mut ui)?;
+    assert_eq!(result, Ok(0));
+    assert!(
+        err.starts_with("avery: Sicherung fehlgeschlagen: "),
+        "{err}"
+    );
+    assert_eq!(ui.alerts.len(), 1);
+    assert!(
+        ui.alerts[0]
+            .starts_with("Das Profil konnte nicht aktualisiert werden: Sicherung fehlgeschlagen"),
+        "{:?}",
+        ui.alerts
+    );
+    assert!(!marker.exists());
+    assert_eq!(fake.started(), [open_plan(&ready)]);
+    Ok(())
+}
+
+fn dialog_screen<'a>(script: &'a Script, gui: &'a dyn Fn() -> bool) -> Screen<'a> {
+    Screen { host: script, gui }
+}
+
+#[test]
+fn the_dialogs_flag_shows_a_refusal_as_one_modal_dialog_and_nothing_without_it() -> TestResult {
+    let rig = Rig::new()?;
+    let fake = Fake::default();
+    let missing = rig.root().join("nirgends/Goose.app");
+    let missing_text = missing.to_string_lossy().into_owned();
+    let pairs = app_pairs(
+        &rig,
+        &[
+            ("AVERY_NO_ONBOARD", "1"),
+            ("AVERY_GOOSE_APP", &missing_text),
+        ],
+    );
+    let refusal = "Goose Desktop fehlt. Installieren mit: brew install --cask block-goose";
+    let gui = || true;
+
+    let script = Script::new().then("ask_buttons", Reply::Button(0));
+    let screen = dialog_screen(&script, &gui);
+    let (code, _, err) = invoke_on(&screen, &["app", "--dialogs"], &borrowed(&pairs), &fake);
+    assert_eq!(
+        (code, err.as_str()),
+        (1, format!("avery: {refusal}\n").as_str())
+    );
+    let seen = script.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].text("title"), "Avery");
+    assert_eq!(seen[0].text("text"), refusal);
+    assert_eq!(seen[0].text("icon"), "caution");
+    assert_eq!(
+        seen[0].field("buttons"),
+        Some(Json::from(vec!["OK".to_string()]))
+    );
+    assert!(script.mismatches().is_empty() && script.left() == 0);
+
+    let script = Script::new();
+    let screen = dialog_screen(&script, &gui);
+    let (code, _, err) = invoke_on(&screen, &["app"], &borrowed(&pairs), &fake);
+    assert_eq!(
+        (code, err.as_str()),
+        (1, format!("avery: {refusal}\n").as_str())
+    );
+    assert!(script.seen().is_empty());
+
+    let script = Script::new();
+    let dark = || false;
+    let screen = dialog_screen(&script, &dark);
+    let (code, _, _) = invoke_on(&screen, &["app", "--dialogs"], &borrowed(&pairs), &fake);
+    assert_eq!(code, 1);
+    assert!(script.seen().is_empty(), "no graphical session, no dialog");
+    Ok(())
+}
+
+#[test]
+fn the_dialogs_flag_asks_about_the_renewal_and_warns_when_the_model_is_down() -> TestResult {
+    let ready = ready()?;
+    let marker = marker_of(&ready);
+    fs::remove_file(&marker)?;
+    let pairs = ready_pairs(&ready);
+    let gui = || true;
+    let down = Fake::default();
+
+    let script = Script::new()
+        .then("ask_buttons", Reply::Button(1))
+        .then("ask_buttons", Reply::Button(0));
+    let screen = dialog_screen(&script, &gui);
+    let (code, _, err) = invoke_on(&screen, &["app", "--dialogs"], &borrowed(&pairs), &down);
+    assert_eq!(code, 0);
+    assert_eq!(
+        err,
+        "Hinweis: Das Modell laeuft nicht. Mit 'brew services start avery' starten.\n"
+    );
+    let seen = script.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].text("icon"), "note");
+    assert_eq!(
+        seen[0].field("buttons"),
+        Some(Json::from(vec![
+            "Aktualisieren".to_string(),
+            "Später".to_string()
+        ]))
+    );
+    assert_eq!(seen[1].text("icon"), "caution");
+    assert!(seen[1]
+        .text("text")
+        .starts_with("Hinweis: Das Modell laeuft nicht"));
+    assert!(script.mismatches().is_empty() && script.left() == 0);
+    assert!(!marker.exists());
+    assert_eq!(down.started(), [open_plan(&ready)]);
+
+    let up = Fake {
+        healthy: true,
+        ..Fake::default()
+    };
+    let script = Script::new().then("ask_buttons", Reply::Button(0));
+    let screen = dialog_screen(&script, &gui);
+    let (code, out, err) = invoke_on(&screen, &["app", "--dialogs"], &borrowed(&pairs), &up);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(out.matches("  geschrieben: ").count(), 4, "{out}");
+    assert_eq!(fs::read_to_string(&marker)?.trim(), profile::digest());
+    assert_eq!(up.started(), [open_plan(&ready)]);
+
+    let script = Script::new();
+    let screen = dialog_screen(&script, &gui);
+    let (code, _, _) = invoke_on(&screen, &["app", "--dialogs"], &borrowed(&pairs), &up);
+    assert_eq!(code, 0);
+    assert!(script.seen().is_empty());
     Ok(())
 }
 
@@ -840,10 +1357,10 @@ fn doctor_is_content_when_everything_is_in_place() -> TestResult {
         ),
         "  ok      YAML gueltig: config.yaml".to_string(),
         "  ok      YAML gueltig: permission.yaml".to_string(),
-        "  ok      Senden, Verschieben und Kalenderaenderungen in Goose auf 'nachfragen' gestellt"
-            .to_string(),
+        "  ok      Profil aktuell".to_string(),
         format!("  ok      Mail-Server im Goose-Profil ({EXE})"),
         "  ok      Diktat: lokales Whisper-Modell small".to_string(),
+        "  ok      Avery.app (Dock-Symbol) in ~/Applications".to_string(),
     ];
     assert_eq!(&lines(&out)[..expected.len()], expected, "{out}");
     assert!(out.contains("  Mail: keine"), "{out}");
@@ -913,14 +1430,19 @@ fn doctor_reports_unparsable_yaml_and_skips_the_check_without_ruby() -> TestResu
 }
 
 #[test]
-fn doctor_insists_on_questions_before_sending_and_a_present_mail_server() -> TestResult {
+fn doctor_reports_an_outdated_profile_and_a_missing_mail_server() -> TestResult {
     let mut green = green()?;
-    green
-        .rig
-        .write(".avery/goose/config/permission.yaml", "ask_before: []\n")?;
+    let marker = green.rig.goose_root().join("avery-profile.sha256");
+    fs::write(&marker, "0000\n")?;
     let (code, out) = doctor(&green);
     assert_eq!(code, 1);
-    assert!(out.contains("  FEHLT   permission.yaml: mail__send_message, mail__move_messages oder mail__delete_event fehlt unter ask_before (avery init --force)"));
+    assert!(out.contains("  FEHLT   Profil nicht aktuell -> avery init --force (die alten Dateien bleiben als Sicherung)"), "{out}");
+    fs::remove_file(&marker)?;
+    let (_, out) = doctor(&green);
+    assert!(out.contains("  FEHLT   Profil nicht aktuell"), "{out}");
+    let (_, _, _) = invoke(&["init", "--force"], &borrowed(&green.pairs), &green.fake);
+    let (code, out) = doctor(&green);
+    assert_eq!(code, 0, "{out}");
     green.fake.found.remove(EXE);
     let (_, out) = doctor(&green);
     assert!(out.contains(&format!(
@@ -931,6 +1453,30 @@ fn doctor_insists_on_questions_before_sending_and_a_present_mail_server() -> Tes
         .write(".avery/goose/config/config.yaml", "extensions: {}\n")?;
     let (_, out) = doctor(&green);
     assert!(out.contains("  FEHLT   Goose-Profil ohne Mail-Server -> avery init --force"));
+    Ok(())
+}
+
+#[test]
+fn doctor_only_hints_at_a_missing_app_for_the_dock() -> TestResult {
+    let green = green()?;
+    let app = green.rig.root().join("Applications/Avery.app");
+    fs::remove_dir_all(&app)?;
+    let (code, out) = doctor(&green);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("  hinweis Avery.app fehlt (Dock-Symbol zum Starten von Goose) -> avery init"),
+        "{out}"
+    );
+    assert!(!out.contains("ok      Avery.app"));
+    assert!(out.trim_end().ends_with("\nAlles bereit."), "{out}");
+    fs::create_dir_all(app.join("Contents"))?;
+    fs::write(app.join("Contents/Info.plist"), "<plist>fremd</plist>")?;
+    let (code, out) = doctor(&green);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("  hinweis Avery.app fehlt"),
+        "a foreign app is not ours"
+    );
     Ok(())
 }
 

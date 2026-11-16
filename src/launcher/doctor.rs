@@ -22,6 +22,10 @@ impl Report<'_> {
     fn plain(&mut self, text: &str) {
         say(self.out, text);
     }
+
+    fn hint(&mut self, text: &str) {
+        say(self.out, &format!("  hinweis {text}"));
+    }
 }
 
 fn model_cached(l: &Launcher) -> bool {
@@ -163,18 +167,12 @@ fn profile(l: &Launcher, report: &mut Report) {
             None => {}
         }
     }
-    let permission = read_limited(&root.join("config/permission.yaml")).unwrap_or_default();
-    if [
-        "mail__send_message",
-        "mail__move_messages",
-        "mail__delete_event",
-    ]
-    .iter()
-    .all(|tool| permission.contains(tool))
-    {
-        report.ok("Senden, Verschieben und Kalenderaenderungen in Goose auf 'nachfragen' gestellt");
+    if super::profile::current(l) {
+        report.ok("Profil aktuell");
     } else {
-        report.miss("permission.yaml: mail__send_message, mail__move_messages oder mail__delete_event fehlt unter ask_before (avery init --force)");
+        report.miss(
+            "Profil nicht aktuell -> avery init --force (die alten Dateien bleiben als Sicherung)",
+        );
     }
     let text = read_limited(&config).unwrap_or_default();
     match profile_program(&text) {
@@ -234,6 +232,11 @@ pub(crate) fn run(
         report.miss("Modellserver laeuft nicht -> brew services start avery");
     }
     profile(l, &mut report);
+    if super::dock::present(l) {
+        report.ok("Avery.app (Dock-Symbol) in ~/Applications");
+    } else {
+        report.hint("Avery.app fehlt (Dock-Symbol zum Starten von Goose) -> avery init");
+    }
     let mut buffer = Vec::new();
     let code = status(&mut buffer);
     for line in String::from_utf8_lossy(&buffer).lines() {

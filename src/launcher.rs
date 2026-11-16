@@ -1,3 +1,4 @@
+mod dock;
 mod doctor;
 mod profile;
 mod start;
@@ -116,6 +117,7 @@ impl<'a> Variables<'a> {
 
 pub(crate) struct Env {
     pub(crate) home: PathBuf,
+    pub(crate) user: Option<PathBuf>,
     pub(crate) goose_root: PathBuf,
     pub(crate) goose_app: PathBuf,
     pub(crate) model_url: String,
@@ -153,7 +155,8 @@ impl Env {
             hf_home: variables
                 .present("HF_HOME")
                 .map(PathBuf::from)
-                .or_else(|| user.map(|user| user.join(".cache/huggingface"))),
+                .or_else(|| user.as_ref().map(|user| user.join(".cache/huggingface"))),
+            user,
             home,
         })
     }
@@ -179,7 +182,7 @@ impl Launcher<'_> {
 #[derive(Debug, PartialEq, Eq)]
 enum Launch {
     Init(Vec<String>),
-    App,
+    App { dialogs: bool },
     Cli(Vec<String>),
     Model(Vec<String>),
     Pull(Vec<String>),
@@ -206,7 +209,11 @@ fn parse(args: &[String]) -> Command {
         "" | "help" | "-h" | "--help" => Command::Help,
         "version" | "-V" | "--version" => Command::Version,
         "init" => Command::Launch(Launch::Init(rest())),
-        "app" => Command::Launch(Launch::App),
+        "app" => match rest().as_slice() {
+            [] => Command::Launch(Launch::App { dialogs: false }),
+            [flag] if flag == "--dialogs" => Command::Launch(Launch::App { dialogs: true }),
+            other => Command::Unknown(format!("app {}", other.join(" "))),
+        },
         "cli" => Command::Launch(Launch::Cli(rest())),
         "model" => Command::Launch(Launch::Model(rest())),
         "pull" => Command::Launch(Launch::Pull(rest())),
@@ -261,6 +268,7 @@ pub(crate) fn dispatch(
 
 fn run(call: &Call, launch: Launch, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let variables = Variables::load(call.lookup);
+    let dialogs = matches!(launch, Launch::App { dialogs: true });
     let outcome = Env::from_variables(&variables).and_then(|env| {
         let launcher = Launcher {
             env,
@@ -273,13 +281,14 @@ fn run(call: &Call, launch: Launch, out: &mut dyn Write, err: &mut dyn Write) ->
             Launch::Model(args) => start::model(&launcher, &args, true, out),
             Launch::Pull(args) => start::pull(&launcher, &args, out),
             Launch::Cli(args) => start::goose_cli(&launcher, &args, out),
-            Launch::App => {
+            Launch::App { dialogs } => {
                 let ctx = context();
-                let mut onboard = |out: &mut dyn Write| {
-                    let args = ["onboard".to_string(), "--if-needed".to_string()];
-                    cli::dispatch(&args, &ctx, call.screen, &mut io::empty(), out)
+                let mut ui = start::AppUi {
+                    ctx: &ctx,
+                    screen: call.screen,
+                    dialogs,
                 };
-                start::app(&launcher, ctx.settings.no_onboard, &mut onboard, out, err)
+                start::app(&launcher, ctx.settings.no_onboard, &mut ui, out, err)
             }
             Launch::Doctor => {
                 let ctx = context();
@@ -295,6 +304,9 @@ fn run(call: &Call, launch: Launch, out: &mut dyn Write, err: &mut dyn Write) ->
         Ok(code) => code,
         Err(refusal) => {
             say(err, &format!("avery: {}", refusal.0));
+            if dialogs {
+                start::tell(call.screen, &refusal.0);
+            }
             1
         }
     }

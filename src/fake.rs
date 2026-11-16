@@ -398,6 +398,9 @@ impl Backend for FakeBackend {
         if self.options.crash {
             return Err(ToolError::internal("RuntimeError"));
         }
+        if self.options.uncertain {
+            return Err(failure("timed out", Some("move"), false));
+        }
         let source = Self::mailbox(account, request.mailbox.as_deref())?;
         let known = fake_messages(&account.id, now());
         if request
@@ -624,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_hooks() {
+    fn failure_hooks() -> TestResult {
         let crash = FakeBackend::new(FakeOptions {
             crash: true,
             ..FakeOptions::default()
@@ -640,6 +643,16 @@ mod tests {
         assert!(
             matches!(uncertain.compose(&gmail(), &request(Mode::Send)), Err(ToolError::Uncertain(m)) if m.contains("may or may not"))
         );
+        let moving = MoveRequest {
+            mailbox: None,
+            ids: vec![mid("101")?],
+            target: "Werbung".to_string(),
+            create: true,
+        };
+        assert!(
+            matches!(uncertain.move_messages(&gmail(), &moving), Err(ToolError::Uncertain(m)) if m.contains("may have been moved"))
+        );
+        Ok(())
     }
 
     #[test]

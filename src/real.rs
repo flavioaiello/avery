@@ -444,14 +444,16 @@ mod tests {
         assert!(script.borrow().payloads.is_empty());
         let request = moving(&["7"], false)?;
         let next = || backend.move_messages(&account, &request);
-        assert!(matches!(next(), Err(ToolError::Msg(m)) if m.starts_with("Mail error:")));
+        assert!(
+            matches!(next(), Err(ToolError::Uncertain(m)) if m.starts_with("Mail error:") && m.contains("may have been moved"))
+        );
         assert!(
             matches!(next(), Err(ToolError::Msg(m)) if m.contains("create_mailbox=true") && m.contains("NOTHING was moved"))
         );
         assert!(
-            matches!(next(), Err(ToolError::Msg(m)) if m.contains("Some messages may have been moved"))
+            matches!(next(), Err(ToolError::Uncertain(m)) if m.contains("Some messages may have been moved"))
         );
-        assert!(matches!(next(), Err(ToolError::Msg(_))));
+        assert!(matches!(next(), Err(ToolError::Uncertain(_))));
         Ok(())
     }
 

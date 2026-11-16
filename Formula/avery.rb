@@ -3,7 +3,7 @@ class Avery < Formula
   homepage "https://github.com/flavioaiello/avery"
   url "https://github.com/flavioaiello/avery.git",
       using:    :git,
-      tag:      "v0.7.1",
+      tag:      "v0.8.0",
       revision: "d7aae767076157ae164230c0aef2e1bccf1e97be"
   license "MIT"
   head "https://github.com/flavioaiello/avery.git", using: :git, branch: "main"
@@ -31,11 +31,12 @@ class Avery < Formula
         brew install --cask block-goose
 
       First run:
-        avery init
+        avery init                  # the Goose profile in ~/.avery/goose and the app ~/Applications/Avery.app
         avery pull                  # downloads the model once (about 17 GB); Ctrl+C when it says Ready
         brew services start avery   # runs the model, also at every login (it holds up to 28 GB of memory, AVERY_MAX_MEMORY)
 
-      Then open Goose with the Avery profile: avery app. While nothing is set up, the first start guides you
+      Then open Goose with the Avery profile: click Avery (drag it from ~/Applications into the Dock once) or run
+      avery app. While nothing is set up, the first start guides you
       through the setup in macOS dialogs: Avery lists the accounts and calendars of Apple Mail and Calendar and you
       choose what it may read or write. macOS may ask for permission to show notifications; macOS asks once for
       Automation (Mail and Calendar): allow what Avery should use. A failed setup is also shown as a notification;
@@ -52,15 +53,20 @@ class Avery < Formula
       only format 4 and uses only Apple Mail and Calendar: move ~/.avery/mail/config.json away and run avery mail setup.
       The sign-ins that 0.5.0 stored in the Keychain stay there until you remove them (see the README, "Update from 0.5.0").
 
-      Upgrading from 0.6.1 and earlier: "avery" is now one program, and it also serves Goose ("avery serve"). Avery.app,
-      "avery up", "avery down", "avery install-app" and the idle stop are gone: the model runs as the Homebrew service.
+      Upgrading from 0.6.1 and earlier: "avery" is now one program, and it also serves Goose ("avery serve"). The Avery
+      cask, "avery up", "avery down", "avery install-app" and the idle stop are gone: the model runs as the Homebrew service.
         brew install flavioaiello/avery/avery            # only if you installed just the Avery cask: Homebrew removes a formula that only the cask needed
         brew uninstall --cask flavioaiello/avery/avery   # if you installed the Avery cask
-        rm -rf ~/Applications/Avery.app                  # if you made the app with "avery install-app"
+        rm -rf ~/Applications/Avery.app                  # the old app, if you have one: "avery init" writes a new one
         avery init --force                               # the Goose profile must start "avery serve" (the old files are kept as backups)
         brew services start avery
 
-      Daily use: the model runs as a service, so only Goose needs to be opened: avery app
+      Upgrading from 0.7.x: Goose no longer asks before sending, moving or changing events (Avery's own dialog does),
+      and moves have a log and limits. Quit Goose, then:
+        avery init --force                               # new profile and the app ~/Applications/Avery.app (the old profile files are kept as backups)
+      Later profile changes are offered by the Avery app at the start; "avery doctor" shows whether the profile is current.
+
+      Daily use: the model runs as a service, so only Goose needs to be opened: click Avery in the Dock, or run avery app
       Stop the model: brew services stop avery
     EOS
   end
@@ -72,6 +78,7 @@ class Avery < Formula
     system bin/"avery", "init"
     assert_match "- serve", (testpath/".avery/goose/config/config.yaml").read
     assert_path_exists testpath/".avery/goose/top-of-mind.md"
+    assert_match "app --dialogs", (testpath/"Applications/Avery.app/Contents/MacOS/Avery").read
 
     ENV["MAIL_MCP_FAKE"] = "1"
     requests = <<~JSON
