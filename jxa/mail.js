@@ -88,39 +88,67 @@ function listMailboxes(acc, depth) {
   return out;
 }
 
-function queryMessages(acc, req) {
-  var mb = findMailbox(acc, req.mailbox, '', 3);
-  if (!mb) { throw new Error('mailbox_not_found'); }
-  var conds = [];
+function textClause(req) {
+  if (req.field === 'subject') { return {subject: {_contains: req.query}}; }
+  if (req.field === 'sender') { return {sender: {_contains: req.query}}; }
+  return {_or: [{subject: {_contains: req.query}}, {sender: {_contains: req.query}}]};
+}
+
+function searchIds(msgs, req) {
+  var conds = [], found, wanted = {}, i;
   if (req.sinceDays) {
     conds.push({dateReceived: {_greaterThan: new Date(Date.now() - req.sinceDays * 86400000)}});
   }
   if (req.unreadOnly) { conds.push({readStatus: false}); }
+  conds.push(textClause(req));
+  found = msgs.whose(conds.length === 1 ? conds[0] : {_and: conds}).id();
+  for (i = 0; i < found.length; i++) { wanted[found[i]] = true; }
+  return wanted;
+}
+
+function listedRow(msgs, row) {
+  var m = msgs.byId(row.id), when, item;
+  try {
+    when = m.dateReceived();
+    item = {id: row.id, subject: m.subject(), from: m.sender(), ts: Math.floor(row.ms / 1000), date: fmt(when),
+            read: m.readStatus(), flagged: m.flaggedStatus()};
+  } catch (e) { return null; }
+  if (when.getTime() !== row.ms) { throw new Error('mailbox_changed_during_read'); }
+  return item;
+}
+
+function queryMessages(acc, req) {
+  var mb = findMailbox(acc, req.mailbox, '', 3);
+  if (!mb) { throw new Error('mailbox_not_found'); }
+  var msgs = mb.ref.messages, ids = msgs.id(), dates = msgs.dateReceived(), unread = null, wanted = null, cut = null,
+      rows = [], items = [], i, ms, row;
+  if (dates.length !== ids.length) { throw new Error('mailbox_changed_during_read'); }
   if (req.query) {
-    if (req.field === 'subject') { conds.push({subject: {_contains: req.query}}); }
-    else if (req.field === 'sender') { conds.push({sender: {_contains: req.query}}); }
-    else { conds.push({_or: [{subject: {_contains: req.query}}, {sender: {_contains: req.query}}]}); }
+    wanted = searchIds(msgs, req);
+  } else {
+    if (req.sinceDays) { cut = Date.now() - req.sinceDays * 86400000; }
+    if (req.unreadOnly) {
+      unread = msgs.readStatus();
+      if (unread.length !== ids.length) { throw new Error('mailbox_changed_during_read'); }
+    }
   }
-  var msgs = mb.ref.messages;
-  var sel = msgs;
-  if (conds.length === 1) { sel = msgs.whose(conds[0]); }
-  else if (conds.length > 1) { sel = msgs.whose({_and: conds}); }
-  var ids = sel.id();
-  if (ids.length > req.maxHits) { throw new Error('too_many_hits:' + ids.length); }
-  if (ids.length === 0) { return {mailbox: mb.path, total: 0, items: []}; }
-  var subj = sel.subject(), snd = sel.sender(), dt = sel.dateReceived();
-  var rd = sel.readStatus(), fl = sel.flaggedStatus();
-  if (subj.length !== ids.length || snd.length !== ids.length || dt.length !== ids.length ||
-      rd.length !== ids.length || fl.length !== ids.length) {
-    throw new Error('mailbox_changed_during_read');
+  for (i = 0; i < ids.length; i++) {
+    ms = dates[i] ? dates[i].getTime() : NaN;
+    if (isNaN(ms)) { continue; }
+    if (wanted !== null) {
+      if (wanted[ids[i]] !== true) { continue; }
+    } else if ((cut !== null && !(ms > cut)) || (unread !== null && unread[i] !== false)) {
+      continue;
+    }
+    rows.push({id: ids[i], ms: ms});
   }
-  var items = [];
-  for (var i = 0; i < ids.length; i++) {
-    items.push({id: ids[i], subject: subj[i], from: snd[i], ts: Math.floor(dt[i].getTime() / 1000),
-                date: fmt(dt[i]), read: rd[i], flagged: fl[i]});
+  if (rows.length > req.maxHits) { throw new Error('too_many_hits:' + rows.length); }
+  rows.sort(function (a, b) { return b.ms - a.ms || b.id - a.id; });
+  for (i = 0; i < rows.length && items.length < req.limit; i++) {
+    row = listedRow(msgs, rows[i]);
+    if (row !== null) { items.push(row); }
   }
-  items.sort(function (a, b) { return b.ts - a.ts; });
-  return {mailbox: mb.path, total: ids.length, items: items.slice(0, req.limit)};
+  return {mailbox: mb.path, total: rows.length, items: items};
 }
 
 function recipients(coll) {

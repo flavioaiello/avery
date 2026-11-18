@@ -1087,37 +1087,143 @@ function run(argv) {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn whose_clauses_are_built_the_way_mail_accepts_them() -> TestResult {
-        let answer = probe(
-            r"
-var calls = [];
-var mock = {
-  whose: function (arg) {
-    calls.push(arg);
-    if (arg && arg._and && arg._and.length < 2) { throw new Error('Whose clause _and needs two elements.'); }
-    return {id: function () { return []; }};
+    const MOCK_QUERY: &str = r"
+var calls = [], reads = 0, MATCH = [], SHORT = false, SHORTREAD = false, world = [], DAY = 86400000, NOW = Date.now();
+function reset() {
+  calls = []; reads = 0; MATCH = []; SHORT = false; SHORTREAD = false;
+  world = [[11, 1, false], [12, 2, true], [13, 2, false], [14, 10, true], [15, 40, false], [16, 400, true]].map(function (r) {
+    return {id: r[0], ms: NOW - r[1] * DAY, read: r[2], gone: false, skew: 0};
+  });
+}
+var messages = {
+  id: function () { return world.map(function (m) { return m.id; }); },
+  dateReceived: function () { var d = world.map(function (m) { return m.nodate ? null : new Date(m.ms); }); return SHORT ? d.slice(1) : d; },
+  readStatus: function () { var r = world.map(function (m) { return m.read; }); return SHORTREAD ? r.slice(1) : r; },
+  whose: function (clause) {
+    calls.push(clause);
+    if (clause._and && clause._and.length < 2) { throw new Error('Whose clause _and needs two elements.'); }
+    return {id: function () { return MATCH; }};
+  },
+  byId: function (id) {
+    reads++;
+    var m = world.filter(function (x) { return x.id === id; })[0];
+    function need(v) { if (m.gone) { throw new Error('Cannot get message'); } return v; }
+    return {
+      dateReceived: function () { return need(new Date(m.ms + m.skew)); },
+      subject: function () { return need('S' + id); },
+      sender: function () { return need('F' + id); },
+      readStatus: function () { return need(m.read); },
+      flaggedStatus: function () { return need(id % 2 === 0); }
+    };
   }
 };
-function findMailbox() { return {ref: {messages: mock}, path: 'INBOX'}; }
+function findMailbox() { return {ref: {messages: messages}, path: 'INBOX'}; }
+function summary(req) {
+  var out;
+  calls = []; reads = 0;
+  req.maxHits = req.maxHits || 1500; req.limit = req.limit || 10; req.mailbox = null;
+  try {
+    var r = queryMessages({}, req);
+    out = {ids: r.items.map(function (i) { return i.id; }), total: r.total, reads: reads,
+           calls: calls.map(function (c) { return c._and ? '_and:' + c._and.length : Object.keys(c)[0]; })};
+  } catch (e) { out = {error: String(e.message), reads: reads}; }
+  return out;
+}
+";
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listing_reads_ids_and_dates_in_bulk_and_details_only_for_the_rows_it_returns() -> TestResult
+    {
+        let answer = probe(&format!(
+            "{MOCK_QUERY}{}",
+            r"
 function run(argv) {
-  var cases = [{sinceDays: 30}, {sinceDays: 30, unreadOnly: true}, {sinceDays: 30, query: 'x', field: 'both'},
-               {sinceDays: 30, unreadOnly: true, query: 'x', field: 'subject'}], out = [];
-  for (var i = 0; i < cases.length; i++) {
-    calls = [];
-    var req = cases[i]; req.maxHits = 1500; req.limit = 5; req.mailbox = null;
-    try {
-      queryMessages({}, req);
-      out.push(calls.map(function (c) { return c._and ? '_and:' + c._and.length : Object.keys(c)[0]; }).join(','));
-    } catch (e) { out.push('ERROR ' + String(e.message)); }
-  }
+  var out = [], r, first;
+  reset(); out.push(summary({sinceDays: 30}));
+  reset(); out.push(summary({sinceDays: 30, unreadOnly: true}));
+  reset(); out.push(summary({sinceDays: 30, limit: 2}));
+  reset(); out.push(summary({}));
+  reset(); world[3].nodate = true; out.push(summary({}));
+  reset();
+  r = queryMessages({}, {sinceDays: 30, limit: 1, maxHits: 1500, mailbox: null});
+  first = r.items[0];
+  out.push({id: first.id, subject: first.subject, from: first.from, ts: first.ts === Math.floor(world[0].ms / 1000),
+            read: first.read, flagged: first.flagged});
   return JSON.stringify(out);
 }
-",
-        )?;
+"
+        ))?;
         assert_eq!(
             j(&answer)?,
-            j(r#"["dateReceived", "_and:2", "_and:2", "_and:3"]"#)?
+            j(r#"[
+                {"ids": [11, 13, 12, 14], "total": 4, "reads": 4, "calls": []},
+                {"ids": [11, 13], "total": 2, "reads": 2, "calls": []},
+                {"ids": [11, 13], "total": 4, "reads": 2, "calls": []},
+                {"ids": [11, 13, 12, 14, 15, 16], "total": 6, "reads": 6, "calls": []},
+                {"ids": [11, 13, 12, 15, 16], "total": 5, "reads": 5, "calls": []},
+                {"id": 11, "subject": "S11", "from": "F11", "ts": true, "read": false, "flagged": false}
+            ]"#)?
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_search_asks_mail_once_with_a_clause_mail_accepts() -> TestResult {
+        let answer = probe(&format!(
+            "{MOCK_QUERY}{}",
+            r"
+function run(argv) {
+  var out = [];
+  reset(); MATCH = [12, 14]; out.push(summary({sinceDays: 30, query: 'x', field: 'both'}));
+  reset(); MATCH = [13]; out.push(summary({sinceDays: 30, unreadOnly: true, query: 'x', field: 'subject'}));
+  reset(); MATCH = [16]; out.push(summary({query: 'x', field: 'sender'}));
+  reset(); MATCH = [11, 15]; out.push(summary({query: 'x', field: 'both'}));
+  reset(); MATCH = []; out.push(summary({sinceDays: 30, query: 'x', field: 'both'}));
+  return JSON.stringify(out);
+}
+"
+        ))?;
+        assert_eq!(
+            j(&answer)?,
+            j(r#"[
+                {"ids": [12, 14], "total": 2, "reads": 2, "calls": ["_and:2"]},
+                {"ids": [13], "total": 1, "reads": 1, "calls": ["_and:3"]},
+                {"ids": [16], "total": 1, "reads": 1, "calls": ["sender"]},
+                {"ids": [11, 15], "total": 2, "reads": 2, "calls": ["_or"]},
+                {"ids": [], "total": 0, "reads": 0, "calls": ["_and:2"]}
+            ]"#)?
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mailbox_that_changes_while_it_is_listed_is_reported_or_skipped() -> TestResult {
+        let answer = probe(&format!(
+            "{MOCK_QUERY}{}",
+            r"
+function run(argv) {
+  var out = [];
+  reset(); out.push(summary({sinceDays: 30, maxHits: 3}));
+  reset(); SHORT = true; out.push(summary({sinceDays: 30}));
+  reset(); SHORTREAD = true; out.push(summary({sinceDays: 30, unreadOnly: true}));
+  reset(); world[0].gone = true; out.push(summary({sinceDays: 30, limit: 2}));
+  reset(); world[2].skew = 1000; out.push(summary({sinceDays: 30}));
+  return JSON.stringify(out);
+}
+"
+        ))?;
+        assert_eq!(
+            j(&answer)?,
+            j(r#"[
+                {"error": "too_many_hits:4", "reads": 0},
+                {"error": "mailbox_changed_during_read", "reads": 0},
+                {"error": "mailbox_changed_during_read", "reads": 0},
+                {"ids": [13, 12], "total": 4, "reads": 3, "calls": []},
+                {"error": "mailbox_changed_during_read", "reads": 2}
+            ]"#)?
         );
         Ok(())
     }
